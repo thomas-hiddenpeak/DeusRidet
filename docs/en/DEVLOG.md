@@ -1,5 +1,37 @@
 # DeusRidet Development Log
 
+## 2026-04-02 — Phase 0 Complete: Foundation
+
+### Result
+
+Phase 0 implemented and validated. All milestone criteria met.
+
+**Components built:**
+- CMake scaffold: SM87 targeting, CUTLASS submodule, `machina` + `communis` static libs
+- `SafetensorsLoader`: zero-copy mmap, multi-shard support via `model.safetensors.index.json`
+- `Tokenizer`: GPT2 byte-level BPE, 248070 vocab, 247504 merges, 26 special tokens
+- `Allocator`: `DeviceAllocator` (cudaMalloc), `UnifiedAllocator` (cudaMallocManaged),
+  `MmapAllocator` (adaptive mmap with populate/willneed strategy)
+- `Tensor`: lightweight descriptor with owning/non-owning modes
+- `Config`: key=value parser (`machina.conf`) with typed accessors
+- `Log`: structured stderr logging with timestamps
+
+**Validation on AGX Orin 64GB:**
+- `test-tokenizer "Hello, world! 你好世界"` → 7 tokens, round-trip PASS
+- `test-tokenizer "人类一思考，上帝就发笑；AI一思考，人类就不笑了。"` → round-trip PASS
+- `test-weights` → 1775 tensors, 28.16 GB across 11 shards, all loaded
+- `version` → Orin SM8.7, 16 SMs, 61.4 GB, CUDA 12.6
+
+**Files (19 new, ~10800 lines):**
+`CMakeLists.txt`, `LICENSE`, `.gitignore`, `.gitmodules`, `configs/machina.conf`,
+`docs/ACKNOWLEDGMENTS.md`, `src/main.cpp`, `src/communis/{config.h,config.cpp,log.h}`,
+`src/machina/{allocator.h,allocator.cpp,tensor.h,safetensors.h,safetensors.cpp,
+tokenizer.h,tokenizer.cpp}`, `third_party/{cutlass,stb}`
+
+**Next:** Phase 1 — GPTQ-Int4 dequant kernels (GEMV for decode, GEMM for prefill)
+
+---
+
 ## 2026-04-02 — Development Plan
 
 ### Context

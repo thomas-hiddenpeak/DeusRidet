@@ -1,5 +1,37 @@
 # DeusRidet 开发日志
 
+## 2026-04-02 — Phase 0 完成：基础设施
+
+### 结果
+
+Phase 0 实现并验证完毕，所有里程碑指标达成。
+
+**构建组件：**
+- CMake 骨架：SM87 目标架构，CUTLASS 子模块，`machina` + `communis` 静态库
+- `SafetensorsLoader`：零拷贝 mmap，多分片支持（通过 `model.safetensors.index.json`）
+- `Tokenizer`：GPT2 字节级 BPE，248070 词表，247504 合并规则，26 个特殊标记
+- `Allocator`：`DeviceAllocator`（cudaMalloc）、`UnifiedAllocator`（cudaMallocManaged）、
+  `MmapAllocator`（根据可用内存自适应 populate/willneed 策略）
+- `Tensor`：支持拥有/非拥有两种模式的轻量级描述符
+- `Config`：key=value 解析器（`machina.conf`），带类型化访问器
+- `Log`：带时间戳的结构化日志
+
+**AGX Orin 64GB 验证：**
+- `test-tokenizer "Hello, world! 你好世界"` → 7 tokens，往返测试通过
+- `test-tokenizer "人类一思考，上帝就发笑；AI一思考，人类就不笑了。"` → 往返测试通过
+- `test-weights` → 1775 个张量，28.16 GB，11 个分片全部加载成功
+- `version` → Orin SM8.7，16 SMs，61.4 GB，CUDA 12.6
+
+**文件（19 个新文件，约 10800 行）：**
+`CMakeLists.txt`, `LICENSE`, `.gitignore`, `.gitmodules`, `configs/machina.conf`,
+`docs/ACKNOWLEDGMENTS.md`, `src/main.cpp`, `src/communis/{config.h,config.cpp,log.h}`,
+`src/machina/{allocator.h,allocator.cpp,tensor.h,safetensors.h,safetensors.cpp,
+tokenizer.h,tokenizer.cpp}`, `third_party/{cutlass,stb}`
+
+**下一步：** Phase 1 — GPTQ-Int4 反量化内核（解码用 GEMV，预填充用 GEMM）
+
+---
+
 ## 2026-04-02 — 开发计划
 
 ### 背景
