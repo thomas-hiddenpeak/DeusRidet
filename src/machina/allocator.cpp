@@ -112,6 +112,11 @@ MmapAllocator::MmapAllocator(const std::string& file_path)
         madvise(base_ptr_, size_, MADV_SEQUENTIAL);
         madvise(base_ptr_, size_, MADV_WILLNEED);
     }
+
+    // Note: cudaHostRegister does not work with PROT_READ-only mmap on Tegra.
+    // Weight data must be explicitly copied to device memory for GPU access.
+    // This is actually preferred for inference weights: device memory avoids
+    // coherency overhead on Tegra iGPU.
 }
 
 MmapAllocator::~MmapAllocator() {

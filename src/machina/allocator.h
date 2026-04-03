@@ -25,6 +25,7 @@ enum class DataType {
     FP32,
     FP16,
     BF16,
+    INT32,    // GPTQ qweight/qzeros packed container
     INT8,
     U8,
     INT4,     // GPTQ packed (2 values per byte)
@@ -36,6 +37,7 @@ inline size_t dtype_size(DataType dtype) {
         case DataType::FP32:  return 4;
         case DataType::FP16:  return 2;
         case DataType::BF16:  return 2;
+        case DataType::INT32: return 4;
         case DataType::INT8:  return 1;
         case DataType::U8:    return 1;
         case DataType::INT4:  return 0;  // special: 2 values per byte
@@ -48,6 +50,7 @@ inline const char* dtype_name(DataType dtype) {
         case DataType::FP32:  return "FP32";
         case DataType::FP16:  return "FP16";
         case DataType::BF16:  return "BF16";
+        case DataType::INT32: return "INT32";
         case DataType::INT8:  return "INT8";
         case DataType::U8:    return "U8";
         case DataType::INT4:  return "INT4";

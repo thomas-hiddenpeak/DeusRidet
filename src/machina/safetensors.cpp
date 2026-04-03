@@ -187,7 +187,7 @@ DataType SafetensorsFile::parse_dtype(const std::string& s) const {
     if (s == "BF16") return DataType::BF16;
     if (s == "I8")   return DataType::INT8;
     if (s == "U8")   return DataType::U8;
-    if (s == "I32")  return DataType::FP32;  // treat as FP32 size for offsets
+    if (s == "I32")  return DataType::INT32;
     return DataType::UNKNOWN;
 }
 

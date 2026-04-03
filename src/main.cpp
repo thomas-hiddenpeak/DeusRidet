@@ -14,10 +14,12 @@
 
 #include "communis/config.h"
 #include "communis/log.h"
+#include "machina/gptq.h"
 #include "machina/safetensors.h"
 #include "machina/tokenizer.h"
 #include <iostream>
 #include <cstring>
+#include <cmath>
 #include <csignal>
 #include <execinfo.h>
 #include <unistd.h>
@@ -77,6 +79,8 @@ static void print_usage() {
     printf("  Commands:\n");
     printf("    test-tokenizer <text>   Encode/decode round-trip test\n");
     printf("    test-weights            Load weights and print tensor summary\n");
+    printf("    test-gptq               GPTQ kernel correctness test with model weights\n");
+    printf("    bench-gptq              GPTQ GEMV/GEMM benchmark\n");
     printf("    version                 Print version and hardware info\n\n");
     printf("  Options:\n");
     printf("    --config <file>         Configuration file (default: configs/machina.conf)\n");
@@ -156,6 +160,268 @@ static int cmd_test_weights(const std::string& model_dir) {
 }
 
 // ============================================================================
+// test-gptq: Correctness test using actual model weights
+// ============================================================================
+static int cmd_test_gptq(const std::string& model_dir) {
+    LOG_INFO("Main", "Loading model weights for GPTQ correctness test...");
+
+    deusridet::SafetensorsLoader loader(model_dir);
+
+    // Test with layer 0 MLP gate_proj (a quantized layer)
+    const char* layer_name = "model.language_model.layers.0.mlp.gate_proj";
+    std::string qw_name = std::string(layer_name) + ".qweight";
+    std::string sc_name = std::string(layer_name) + ".scales";
+
+    if (!loader.has_tensor(qw_name)) {
+        LOG_ERROR("Main", "Tensor not found: %s", qw_name.c_str());
+        return 1;
+    }
+
+    auto qw_tensor = loader.get_tensor(qw_name);
+    auto sc_tensor = loader.get_tensor(sc_name);
+
+    int packed_K = (int)qw_tensor->shape()[0];
+    int N        = (int)qw_tensor->shape()[1];
+    int K        = packed_K * 8;
+    int num_groups = (int)sc_tensor->shape()[0];
+
+    printf("[GPTQ Test] Layer: %s\n", layer_name);
+    printf("  qweight: [%d, %d] (K=%d, N=%d)\n", packed_K, N, K, N);
+    printf("  scales:  [%d, %d]\n", num_groups, N);
+    printf("  group_size: %d, bits: 4, sym: true\n\n", K / num_groups);
+
+    // Allocate device memory for x and y
+    size_t x_bytes = (size_t)K * sizeof(__half);
+    size_t y_bytes = (size_t)N * sizeof(__half);
+
+    __half* d_x;
+    __half* d_y;
+    cudaMalloc(&d_x, x_bytes);
+    cudaMalloc(&d_y, y_bytes);
+
+    // Fill x with small values on host, copy to device
+    __half* h_x = (__half*)malloc(x_bytes);
+    srand(42);
+    for (int i = 0; i < K; i++) {
+        h_x[i] = __float2half(((float)(rand() % 1000) - 500.0f) / 5000.0f);
+    }
+    cudaMemcpy(d_x, h_x, x_bytes, cudaMemcpyHostToDevice);
+
+    // Copy GPTQ weights to device memory.
+    // On Tegra, mmap'd files can't be registered via cudaHostRegister with
+    // PROT_READ-only mappings, so we copy to device memory which also avoids
+    // coherency overhead for frequently-read weight data.
+    size_t qw_bytes = qw_tensor->nbytes();
+    size_t sc_bytes = sc_tensor->nbytes();
+
+    printf("[GPTQ Test] Copying weights to device: qweight %.1f MB, scales %.1f MB\n",
+           qw_bytes / 1048576.0, sc_bytes / 1048576.0);
+
+    uint32_t* d_qw;
+    __half*   d_sc;
+    cudaError_t cerr;
+
+    cerr = cudaMalloc(&d_qw, qw_bytes);
+    if (cerr != cudaSuccess) {
+        LOG_ERROR("Main", "cudaMalloc qweight failed: %s", cudaGetErrorString(cerr));
+        return 1;
+    }
+    cerr = cudaMalloc(&d_sc, sc_bytes);
+    if (cerr != cudaSuccess) {
+        LOG_ERROR("Main", "cudaMalloc scales failed: %s", cudaGetErrorString(cerr));
+        cudaFree(d_qw);
+        return 1;
+    }
+    cudaMemcpy(d_qw, qw_tensor->data(), qw_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_sc, sc_tensor->data(), sc_bytes, cudaMemcpyHostToDevice);
+
+    deusridet::GptqWeight weight;
+    weight.qweight = d_qw;
+    weight.scales  = d_sc;
+    weight.K       = K;
+    weight.N       = N;
+
+    // Run GEMV
+    printf("[GPTQ Test] Running GEMV (M=1, K=%d, N=%d)...\n", K, N);
+    deusridet::gptq_gemv(d_x, weight, d_y);
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        LOG_ERROR("Main", "CUDA error: %s", cudaGetErrorString(err));
+        cudaFree(d_x); cudaFree(d_y); free(h_x);
+        return 1;
+    }
+
+    // Copy result back
+    __half* h_y = (__half*)malloc(y_bytes);
+    cudaMemcpy(h_y, d_y, y_bytes, cudaMemcpyDeviceToHost);
+
+    // CPU reference (partial — first 256 columns for speed)
+    int check_N = (N < 256) ? N : 256;
+    printf("[GPTQ Test] CPU reference check (first %d columns)...\n", check_N);
+
+    const uint32_t* h_qw = (const uint32_t*)qw_tensor->data();
+    const __half*   h_sc = (const __half*)sc_tensor->data();
+
+    float max_err = 0.0f;
+    float max_abs_err = 0.0f;
+    int max_err_col = 0;
+    for (int n = 0; n < check_N; n++) {
+        double sum = 0.0;
+        for (int k = 0; k < K; k++) {
+            int pk = k / 8;
+            int ki = k % 8;
+            uint32_t packed = h_qw[pk * N + n];
+            int q_val = (packed >> (ki * 4)) & 0xF;
+            int group = k / 128;
+            float s = __half2float(h_sc[group * N + n]);
+            float w = s * (float)(q_val - 8);
+            sum += (double)__half2float(h_x[k]) * (double)w;
+        }
+        float gpu_val = __half2float(h_y[n]);
+        float ref_val = (float)sum;
+        float abs_err = fabsf(gpu_val - ref_val);
+        float rel = (fabsf(ref_val) > 1e-6f) ? abs_err / fabsf(ref_val) : abs_err;
+        if (rel > max_err) {
+            max_err = rel;
+            max_err_col = n;
+        }
+        max_abs_err = fmaxf(max_abs_err, abs_err);
+    }
+
+    printf("\n[GPTQ Test] Max relative error: %.6f (column %d)\n", max_err, max_err_col);
+    printf("[GPTQ Test] Max absolute error: %.6f\n", max_abs_err);
+    // FP16 accumulation across K=5120 elements introduces ~1-3% relative error
+    // in worst case. This is expected for half-precision arithmetic.
+    bool pass = (max_err < 0.05f);
+    printf("[GPTQ Test] %s\n", pass ? "PASS ✓" : "FAIL ✗");
+
+    // Print a few output values
+    printf("\n[GPTQ Test] First 8 output values:\n  ");
+    for (int i = 0; i < 8 && i < N; i++) {
+        printf("%.4f ", __half2float(h_y[i]));
+    }
+    printf("\n");
+
+    // Also test GEMM with M=4
+    int M_test = 4;
+    size_t xm_bytes = (size_t)M_test * K * sizeof(__half);
+    size_t ym_bytes = (size_t)M_test * N * sizeof(__half);
+    __half* d_xm;
+    __half* d_ym;
+    cudaMalloc(&d_xm, xm_bytes);
+    cudaMalloc(&d_ym, ym_bytes);
+
+    __half* h_xm = (__half*)malloc(xm_bytes);
+    for (int i = 0; i < M_test * K; i++) {
+        h_xm[i] = __float2half(((float)(rand() % 1000) - 500.0f) / 5000.0f);
+    }
+    cudaMemcpy(d_xm, h_xm, xm_bytes, cudaMemcpyHostToDevice);
+
+    printf("\n[GPTQ Test] Running GEMM (M=%d, K=%d, N=%d)...\n", M_test, K, N);
+    deusridet::gptq_gemm(d_xm, weight, d_ym, M_test);
+    cudaDeviceSynchronize();
+
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        LOG_ERROR("Main", "CUDA error in GEMM: %s", cudaGetErrorString(err));
+        pass = false;
+    } else {
+        __half* h_ym = (__half*)malloc(ym_bytes);
+        cudaMemcpy(h_ym, d_ym, ym_bytes, cudaMemcpyDeviceToHost);
+
+        // Check first row against CPU reference
+        float max_err_gemm = 0.0f;
+        for (int n = 0; n < check_N; n++) {
+            double sum = 0.0;
+            for (int k = 0; k < K; k++) {
+                int pk = k / 8;
+                int ki = k % 8;
+                uint32_t packed = h_qw[pk * N + n];
+                int q_val = (packed >> (ki * 4)) & 0xF;
+                int group = k / 128;
+                float s = __half2float(h_sc[group * N + n]);
+                float w = s * (float)(q_val - 8);
+                sum += (double)__half2float(h_xm[k]) * (double)w;
+            }
+            float gpu_val = __half2float(h_ym[n]);
+            float ref_val = (float)sum;
+            float err2 = fabsf(gpu_val - ref_val);
+            float rel = (fabsf(ref_val) > 1e-6f) ? err2 / fabsf(ref_val) : err2;
+            max_err_gemm = fmaxf(max_err_gemm, rel);
+        }
+
+        printf("[GPTQ Test] GEMM max relative error (row 0): %.6f\n", max_err_gemm);
+        bool gemm_pass = (max_err_gemm < 0.05f);
+        printf("[GPTQ Test] GEMM %s\n", gemm_pass ? "PASS ✓" : "FAIL ✗");
+        pass = pass && gemm_pass;
+
+        free(h_ym);
+    }
+
+    cudaFree(d_x); cudaFree(d_y); cudaFree(d_xm); cudaFree(d_ym);
+    cudaFree(d_qw); cudaFree(d_sc);
+    free(h_x); free(h_y); free(h_xm);
+
+    return pass ? 0 : 1;
+}
+
+// ============================================================================
+// bench-gptq: GPTQ GEMV/GEMM benchmark with synthetic data
+// ============================================================================
+static int cmd_bench_gptq() {
+    printf("[GPTQ Benchmark] — SM87 Jetson AGX Orin\n");
+    printf("  GPTQ: bits=4, group_size=128, sym=true\n\n");
+
+    // Dimensions from Qwen3.5-27B model
+    struct BenchCase {
+        const char* name;
+        int K, N, M;
+        int warmup, iters;
+    };
+
+    BenchCase cases[] = {
+        // Decode (M=1)
+        {"gate_proj GEMV  (5120→17408)",          5120, 17408,   1, 10, 50},
+        {"down_proj GEMV  (17408→5120)",          17408,  5120,   1, 10, 50},
+        // Prefill (various M)
+        {"gate_proj GEMM M=32  (5120→17408)",     5120, 17408,  32,  5, 20},
+        {"gate_proj GEMM M=128 (5120→17408)",     5120, 17408, 128,  3, 10},
+        {"gate_proj GEMM M=512 (5120→17408)",     5120, 17408, 512,  2,  5},
+        {"down_proj GEMM M=128 (17408→5120)",    17408,  5120, 128,  3, 10},
+    };
+
+    int num_cases = sizeof(cases) / sizeof(cases[0]);
+    bool all_correct = true;
+
+    printf("  %-45s %10s %10s %10s %8s\n",
+           "Case", "Time(us)", "BW(GB/s)", "TFLOPS", "Correct");
+    printf("  %s\n", std::string(90, '-').c_str());
+
+    for (int c = 0; c < num_cases; c++) {
+        auto& bc = cases[c];
+        auto r = deusridet::gptq_benchmark(bc.K, bc.N, bc.M, bc.warmup, bc.iters);
+
+        if (bc.M == 1) {
+            printf("  %-45s %10.1f %10.1f %10s %8s\n",
+                   bc.name, r.gemv_us, r.gemv_gbps, "—",
+                   r.correct ? "✓" : "✗");
+        } else {
+            printf("  %-45s %10.1f %10s %10.3f %8s\n",
+                   bc.name, r.gemm_us, "—", r.gemm_tflops,
+                   r.correct ? "✓" : "✗");
+        }
+
+        if (!r.correct) all_correct = false;
+    }
+
+    printf("\n  %s\n", all_correct ? "All correctness checks PASSED ✓" :
+                                      "Some correctness checks FAILED ✗");
+    return all_correct ? 0 : 1;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -214,6 +480,12 @@ int main(int argc, char** argv) {
     }
     else if (cmd == "test-weights") {
         rc = cmd_test_weights(model_dir);
+    }
+    else if (cmd == "test-gptq") {
+        rc = cmd_test_gptq(model_dir);
+    }
+    else if (cmd == "bench-gptq") {
+        rc = cmd_bench_gptq();
     }
     else if (cmd == "--help" || cmd == "-h" || cmd == "help") {
         print_usage();

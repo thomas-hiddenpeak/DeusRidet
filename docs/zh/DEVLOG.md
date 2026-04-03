@@ -1,5 +1,68 @@
 # DeusRidet 开发日志
 
+## 2026-04-02 — Phase 1：GPTQ-Int4 内核
+
+### 背景
+
+LLM（Qwen3.5-27B-GPTQ-Int4）仅 MLP 层量化为 INT4（GPTQ），所有注意力层
+（GQA 和 DeltaNet SSM）保持 BF16。没有正确的 GPTQ 反量化+矩阵乘法内核，
+量化层无法完成前向传播。
+
+### 权重格式分析
+
+- **qweight**: `I32 [K/8, N]` — 每个 uint32 打包 8 个 INT4 nibble，LSB-first 沿 K 维
+- **qzeros**: `I32 [K/128, N/8]` — 常量 `0x88888888`（零点=8，对称量化）
+- **scales**: `F16 [K/128, N]` — 每组每列 FP16 缩放因子
+- **g_idx**: `I32 [K]` — 简单顺序(`g_idx[i] = i/128`），忽略
+- 反量化公式：`W[k,n] = scales[k/128, n] * (qw_4bit - 8)`
+- 仅 MLP gate/up/down_proj 被量化（全部 64 层）
+
+### 实现
+
+**新建文件：**
+- `src/machina/gptq.h` — GPTQ-Int4 接口：`GptqWeight` 描述符，
+  `gptq_gemv()`、`gptq_gemm()`、`gptq_linear()` 自动分发，基准测试 API
+- `src/machina/gptq.cu` — CUDA 内核：
+  - GEMV (解码, M=1)：N 方向分块 64 列/block，K 维 8 线程分割，FP32 累加，共享内存归约
+  - GEMM (预填充, M>1)：分块 [32×64×128]，BK=128 对齐 group_size，
+    共享内存反量化，每线程 [4×2] FP32 累加
+  - 基准测试工具（CPU 参考使用 FP64 累加）
+
+**修改文件：**
+- `src/machina/allocator.h` — 新增 `INT32` DataType
+- `src/machina/safetensors.cpp` — "I32" 映射到 `INT32`
+- `src/main.cpp` — 新增 `test-gptq` 和 `bench-gptq` 命令
+
+### Tegra 内存发现
+
+`cudaHostRegister` 在 `PROT_READ` 只读 mmap 内存上失败（返回"invalid argument"）。
+权重数据必须通过 `cudaMemcpy` 显式复制到设备内存。这实际上是更优选择：设备内存
+避免了 Tegra iGPU 上频繁读取的一致性开销。
+
+### 结果
+
+**正确性**（真实模型权重，layer 0 gate_proj K=5120→N=17408）：
+- GEMV 最大绝对误差：0.000038（对比 FP64 CPU 参考）
+- GEMV 最大相对误差：1.86%（仅在绝对值极小的列上）
+- GEMM 最大相对误差：1.68%
+- **均通过 ✓**
+
+**基准测试**（合成数据，SM87 Orin）：
+
+| 用例 | 耗时 (µs) | 指标 | 值 |
+|------|-----------|------|-----|
+| gate_proj GEMV (5120→17408) | 882 | 带宽 | 52.1 GB/s |
+| down_proj GEMV (17408→5120) | 902 | 带宽 | 51.0 GB/s |
+| gate_proj GEMM M=32 | 3887 | TFLOPS | 1.47 |
+| gate_proj GEMM M=128 | 15216 | TFLOPS | 1.50 |
+| gate_proj GEMM M=512 | 60407 | TFLOPS | 1.51 |
+| down_proj GEMM M=128 | 15492 | TFLOPS | 1.47 |
+
+GEMV 达到 192 GB/s 理论带宽的 ~27%。GEMM 达到 ~1.5 TFLOPS（FP16 Tensor Core
+理论 ~5.2 TFLOPS 的 ~29%）。这是首个正确实现的基线数据，优化留待后续阶段。
+
+---
+
 ## 2026-04-02 — Phase 0 完成：基础设施
 
 ### 结果

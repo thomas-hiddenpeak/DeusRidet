@@ -1,5 +1,74 @@
 # DeusRidet Development Log
 
+## 2026-04-02 — Phase 1: GPTQ-Int4 Kernels
+
+### Context
+
+The LLM (Qwen3.5-27B-GPTQ-Int4) has only MLP layers quantized to INT4 (GPTQ).
+All attention layers (GQA and DeltaNet SSM) remain BF16. Without correct GPTQ
+dequantization + matmul kernels, no forward pass is possible through quantized
+layers.
+
+### Weight Format Analysis
+
+- **qweight**: `I32 [K/8, N]` — 8 INT4 nibbles per uint32, LSB-first along K
+- **qzeros**: `I32 [K/128, N/8]` — constant `0x88888888` (zero=8, symmetric)
+- **scales**: `F16 [K/128, N]` — per-group per-column FP16 scale
+- **g_idx**: `I32 [K]` — trivially sequential (`g_idx[i] = i/128`), ignored
+- Dequant formula: `W[k,n] = scales[k/128, n] * (qw_4bit - 8)`
+- Only MLP gate/up/down_proj are quantized (all 64 layers)
+- Attention layers are 16× full BF16 (GQA), 48× full BF16 (DeltaNet SSM)
+
+### Implementation
+
+**Files created:**
+- `src/machina/gptq.h` — GPTQ-Int4 interface: `GptqWeight` descriptor,
+  `gptq_gemv()`, `gptq_gemm()`, `gptq_linear()` auto-dispatch, benchmark API
+- `src/machina/gptq.cu` — CUDA kernels:
+  - GEMV (decode, M=1): tiled N (64 columns/block), K-split across 8 threads,
+    FP32 accumulation, shared memory reduction
+  - GEMM (prefill, M>1): tile [32×64×128], BK=128 aligned to group_size,
+    dequant to shared memory, per-thread [4×2] output accumulation in FP32
+  - Benchmark utility with CPU reference (FP64 accumulation)
+
+**Modified:**
+- `src/machina/allocator.h` — added `INT32` DataType
+- `src/machina/safetensors.cpp` — map "I32" to `INT32` instead of `FP32`
+- `src/main.cpp` — added `test-gptq` and `bench-gptq` commands
+
+### Tegra Memory Discovery
+
+`cudaHostRegister` fails on `PROT_READ`-only mmap'd memory (returns "invalid
+argument"). Weight data must be explicitly `cudaMemcpy`'d to device memory
+for GPU kernel access. This is actually preferred: device memory avoids
+coherency overhead for repeatedly-read inference weights.
+
+### Results
+
+**Correctness** (real model weights, layer 0 gate_proj K=5120→N=17408):
+- GEMV max absolute error: 0.000038 (vs FP64 CPU reference)
+- GEMV max relative error: 1.86% (only on columns with tiny absolute values)
+- GEMM max relative error: 1.68% (row 0 check)
+- **Both PASS**
+
+**Benchmark** (synthetic data, SM87 Orin):
+
+| Case | Time (µs) | Metric | Value |
+|------|-----------|--------|-------|
+| gate_proj GEMV (5120→17408) | 882 | BW | 52.1 GB/s |
+| down_proj GEMV (17408→5120) | 902 | BW | 51.0 GB/s |
+| gate_proj GEMM M=32 | 3887 | TFLOPS | 1.47 |
+| gate_proj GEMM M=128 | 15216 | TFLOPS | 1.50 |
+| gate_proj GEMM M=512 | 60407 | TFLOPS | 1.51 |
+| down_proj GEMM M=128 | 15492 | TFLOPS | 1.47 |
+
+GEMV achieves ~27% of 192 GB/s theoretical bandwidth. GEMM achieves ~1.5
+TFLOPS vs ~5.2 TFLOPS theoretical (FP16 Tensor Core). These are baseline
+numbers for a first correct implementation; optimization is deferred to a
+later phase.
+
+---
+
 ## 2026-04-02 — Phase 0 Complete: Foundation
 
 ### Result
