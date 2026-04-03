@@ -1,4 +1,8 @@
 cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
+
+# CUDA 12.9.1 installed alongside JetPack 6 default 12.6.
+# Configure with: cmake -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc
+#                       -DCUDAToolkit_ROOT=/usr/local/cuda-12.9 ..
 project(deusridet LANGUAGES CXX CUDA)
 
 # ============================================================================
@@ -62,3 +66,11 @@ add_executable(deusridet
     src/main.cpp
 )
 target_link_libraries(deusridet PRIVATE machina communis stdc++fs rt dl)
+
+# Embed RPATH (not RUNPATH) so the binary finds CUDA 12.9 libs.
+# DT_RPATH takes precedence over ldconfig cache, unlike DT_RUNPATH.
+set_target_properties(deusridet PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)

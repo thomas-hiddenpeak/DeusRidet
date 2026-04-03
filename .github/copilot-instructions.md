@@ -3,6 +3,36 @@
 > *"人类一思考，上帝就发笑；AI一思考，人类就不笑了。"*
 > *"When humans think, God laughs; when AI thinks, humans stop laughing."*
 
+## Collaboration Principle
+
+Thomas is the project owner and architect with deep expertise in Tegra/CUDA
+systems and LLM inference. When he reports an observation (memory usage, performance
+numbers, system behavior), **trust it as ground truth** — he is running experiments
+on real hardware and bearing the cost of every decision. Do not dismiss or
+rationalize away his observations. If measurement data appears to contradict his
+report, the measurement methodology is more likely flawed than his observation.
+When in doubt, ask for clarification or a screenshot rather than assuming error.
+
+## Implementation Pacing
+
+**Never attempt to generate very long files in a single step.** Break large file
+creation into incremental stages — define structures first, then implement
+functions one at a time. Long generation attempts will time out and waste the
+entire output. Prefer multiple small, compilable commits over one monolithic
+generation. Each step should be independently verifiable (compiles, runs, or
+at minimum has no syntax errors).
+
+## Testing Discipline
+
+**Before every test or benchmark run**, the following steps are mandatory:
+
+1. Kill all previous test processes: `sudo kill -9 $(pgrep -f deusridet) 2>/dev/null`
+2. Drop page caches: `echo 3 | sudo tee /proc/sys/vm/drop_caches`
+3. Verify clean state before proceeding
+
+No exceptions. Skipping these steps produces polluted baselines and meaningless
+measurements. This applies to every single invocation — not just the first one.
+
 ## Project Overview
 
 DeusRidet is a self-contained multimodal LLM application built on a Disaggregated

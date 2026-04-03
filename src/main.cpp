@@ -15,6 +15,8 @@
 #include "communis/config.h"
 #include "communis/log.h"
 #include "machina/gptq.h"
+#include "machina/model.h"
+#include "machina/forward.h"
 #include "machina/allocator.h"
 #include "machina/safetensors.h"
 #include "machina/tokenizer.h"
@@ -84,6 +86,7 @@ static void print_usage() {
     printf("    test-gptq               GPTQ kernel correctness test with model weights\n");
     printf("    bench-gptq              GPTQ GEMV/GEMM benchmark\n");
     printf("    load-model              Load all weights to device, hold for inspection\n");
+    printf("    load-weights            Structured weight load (model.h) with validation\n");
     printf("    version                 Print version and hardware info\n\n");
     printf("  Options:\n");
     printf("    --config <file>         Configuration file (default: configs/machina.conf)\n");
@@ -385,96 +388,103 @@ static int cmd_test_gptq(const std::string& model_dir) {
 static int cmd_load_model(const std::string& model_dir) {
     using Clock = std::chrono::steady_clock;
 
-    // Helper: read MemTotal/MemAvailable/Cached from /proc/meminfo
-    auto read_meminfo = [](size_t& total_kb, size_t& avail_kb, size_t& cached_kb, size_t& free_kb) {
-        total_kb = avail_kb = cached_kb = free_kb = 0;
+    // Helper: read MemAvailable from /proc/meminfo
+    auto read_avail_mb = []() -> size_t {
+        size_t avail_kb = 0;
         FILE* f = fopen("/proc/meminfo", "r");
-        if (!f) return;
+        if (!f) return 0;
         char line[256];
         while (fgets(line, sizeof(line), f)) {
-            if (strncmp(line, "MemTotal:", 9) == 0)     sscanf(line+9, " %zu", &total_kb);
-            if (strncmp(line, "MemAvailable:", 13) == 0) sscanf(line+13, " %zu", &avail_kb);
-            if (strncmp(line, "Cached:", 7) == 0)        sscanf(line+7, " %zu", &cached_kb);
-            if (strncmp(line, "MemFree:", 8) == 0)       sscanf(line+8, " %zu", &free_kb);
+            if (strncmp(line, "MemAvailable:", 13) == 0) {
+                sscanf(line+13, " %zu", &avail_kb);
+                break;
+            }
         }
         fclose(f);
+        return avail_kb / 1024;
     };
 
-    size_t mt0, ma0, mc0, mf0;
-    read_meminfo(mt0, ma0, mc0, mf0);
-    printf("[Load Model] System RAM before: Total=%zuMB  Used=%zuMB  Free=%zuMB  Cached=%zuMB  Avail=%zuMB\n",
-           mt0/1024, (mt0-ma0)/1024, mf0/1024, mc0/1024, ma0/1024);
+    // Drop page caches for clean baseline measurement
+    {
+        FILE* f = fopen("/proc/sys/vm/drop_caches", "w");
+        if (f) { fprintf(f, "3\n"); fclose(f); }
+    }
 
-    // Force CUDA context init before measuring
+    // Force CUDA context init
     cudaFree(0);
-    size_t mt1, ma1, mc1, mf1;
-    read_meminfo(mt1, ma1, mc1, mf1);
-    printf("[Load Model] After CUDA init:   Used=%zuMB (+%ldMB)  Avail=%zuMB\n",
-           (mt1-ma1)/1024, (long)(mt1-ma1-(mt0-ma0))/1024, ma1/1024);
+    size_t avail_baseline = read_avail_mb();
+    printf("[Load Model] Baseline (after drop_caches + CUDA init): MemAvail=%zuMB\n", avail_baseline);
 
-    printf("[Load Model] Per-shard streaming load from %s\n", model_dir.c_str());
-    printf("[Load Model] Before load — DeviceAllocator: %.1f MB\n",
-           deusridet::DeviceAllocator::total_allocated() / 1048576.0);
+    printf("[Load Model] Pool-alloc streaming load from %s\n", model_dir.c_str());
 
     auto t0 = Clock::now();
 
-    // Accumulated device pointers (kept alive until function returns)
-    std::vector<void*> device_weights;
+    // Pool allocation: one cudaMalloc per shard, sub-allocate tensors from pool
+    struct PoolBlock { void* base; size_t size; };
+    std::vector<PoolBlock> pools;
     size_t total_copy_bytes = 0;
     int total_tensors = 0;
+    int total_cudamallocs = 0;
 
-    deusridet::DeviceAllocator dev_alloc;
+    cudaStream_t copy_stream;
+    cudaStreamCreate(&copy_stream);
 
     deusridet::SafetensorsLoader::stream_load(model_dir,
         [&](size_t shard_idx, deusridet::SafetensorsFile& shard) {
             auto shard_t0 = Clock::now();
             auto names = shard.tensor_names();
-            size_t shard_bytes = 0;
 
+            // First pass: compute total shard size with 256-byte alignment
+            size_t shard_total = 0;
+            for (const auto& name : names) {
+                auto tensor = shard.get_tensor(name);
+                size_t aligned = (tensor->nbytes() + 255) & ~(size_t)255;
+                shard_total += aligned;
+            }
+
+            // Single cudaMalloc for entire shard
+            void* pool_base = nullptr;
+            cudaError_t err = cudaMalloc(&pool_base, shard_total);
+            if (err != cudaSuccess) {
+                fprintf(stderr, "cudaMalloc failed for shard %zu (%.1f MB): %s\n",
+                        shard_idx, shard_total / 1048576.0, cudaGetErrorString(err));
+                return;
+            }
+            pools.push_back({pool_base, shard_total});
+            total_cudamallocs++;
+
+            // Second pass: sub-allocate and async copy
+            size_t offset = 0;
             for (const auto& name : names) {
                 auto tensor = shard.get_tensor(name);
                 size_t nbytes = tensor->nbytes();
-
-                void* d_ptr = dev_alloc.allocate(nbytes);
-                cudaMemcpy(d_ptr, tensor->data(), nbytes, cudaMemcpyHostToDevice);
-                device_weights.push_back(d_ptr);
-
-                shard_bytes += nbytes;
+                void* d_ptr = static_cast<char*>(pool_base) + offset;
+                cudaMemcpyAsync(d_ptr, tensor->data(), nbytes,
+                                cudaMemcpyHostToDevice, copy_stream);
+                size_t aligned = (nbytes + 255) & ~(size_t)255;
+                offset += aligned;
                 total_tensors++;
             }
-            total_copy_bytes += shard_bytes;
+            total_copy_bytes += shard_total;
+
+            // Wait for all copies from this shard before shard mmap is released
+            cudaStreamSynchronize(copy_stream);
 
             double shard_sec = std::chrono::duration<double>(Clock::now() - shard_t0).count();
-            printf("  Shard %2zu: %3zu tensors, %7.1f MB in %.1fs (%.0f MB/s) — total device: %.1f MB\n",
-                   shard_idx, names.size(), shard_bytes / 1048576.0,
-                   shard_sec, (shard_bytes / 1048576.0) / shard_sec,
-                   deusridet::DeviceAllocator::total_allocated() / 1048576.0);
+            printf("  Shard %2zu: %3zu tensors, %7.1f MB, 1 cudaMalloc, %.1fs (%.0f MB/s)\n",
+                   shard_idx, names.size(), shard_total / 1048576.0,
+                   shard_sec, (shard_total / 1048576.0) / shard_sec);
         });
 
     double total_sec = std::chrono::duration<double>(Clock::now() - t0).count();
 
-    printf("\n[Load Model] Done: %d tensors, %.2f GB copied in %.1fs (%.0f MB/s)\n",
-           total_tensors, total_copy_bytes / 1073741824.0, total_sec,
-           (total_copy_bytes / 1048576.0) / total_sec);
-    printf("[Load Model] DeviceAllocator total: %.2f GB\n",
-           deusridet::DeviceAllocator::total_allocated() / 1073741824.0);
+    printf("\n[Load Model] Done: %d tensors, %.2f GB in %d cudaMalloc calls, %.1fs (%.0f MB/s)\n",
+           total_tensors, total_copy_bytes / 1073741824.0, total_cudamallocs,
+           total_sec, (total_copy_bytes / 1048576.0) / total_sec);
 
-    // Hold weights in memory for inspection — print detailed memory breakdown
-    printf("\n[Load Model] Weights loaded and held in device memory.\n");
-
-    // Memory breakdown
+    // Memory breakdown: clean comparison against drop_caches baseline
     {
-        // RSS from /proc/self/statm (pages * 4KB on aarch64)
-        size_t rss_kb = 0;
-        FILE* sm = fopen("/proc/self/statm", "r");
-        if (sm) {
-            size_t sz, rss_pages;
-            fscanf(sm, "%zu %zu", &sz, &rss_pages);
-            rss_kb = rss_pages * 4;
-            fclose(sm);
-        }
-        // Detailed from /proc/self/status
-        size_t vm_rss_kb = 0, rss_anon_kb = 0, rss_file_kb = 0, rss_shmem_kb = 0;
+        size_t vm_rss_kb = 0, rss_anon_kb = 0, rss_file_kb = 0;
         FILE* st = fopen("/proc/self/status", "r");
         if (st) {
             char line[256];
@@ -482,58 +492,238 @@ static int cmd_load_model(const std::string& model_dir) {
                 if (strncmp(line, "VmRSS:", 6) == 0) sscanf(line+6, " %zu", &vm_rss_kb);
                 else if (strncmp(line, "RssAnon:", 8) == 0) sscanf(line+8, " %zu", &rss_anon_kb);
                 else if (strncmp(line, "RssFile:", 8) == 0) sscanf(line+8, " %zu", &rss_file_kb);
-                else if (strncmp(line, "RssShmem:", 9) == 0) sscanf(line+9, " %zu", &rss_shmem_kb);
             }
             fclose(st);
         }
-        // cudaMemGetInfo
         size_t cuda_free = 0, cuda_total = 0;
         cudaMemGetInfo(&cuda_free, &cuda_total);
+        size_t avail_now = read_avail_mb();
+        size_t consumed = (avail_baseline > avail_now) ? (avail_baseline - avail_now) : 0;
 
         printf("\n[Memory Breakdown]\n");
-        printf("  DeviceAllocator tracked:  %8.1f MB\n",
-               deusridet::DeviceAllocator::total_allocated() / 1048576.0);
+        printf("  cudaMalloc calls:         %8d  (1 per shard, pool-allocated)\n", total_cudamallocs);
         printf("  cudaMemGetInfo free:      %8.1f MB / %.1f MB\n",
                cuda_free / 1048576.0, cuda_total / 1048576.0);
         printf("  Process VmRSS:            %8.1f MB\n", vm_rss_kb / 1024.0);
-        printf("    RssAnon  (heap+mmap):   %8.1f MB\n", rss_anon_kb / 1024.0);
-        printf("    RssFile  (file-backed):  %8.1f MB\n", rss_file_kb / 1024.0);
-        printf("    RssShmem (shared):       %8.1f MB\n", rss_shmem_kb / 1024.0);
-        printf("  RSS - DeviceAlloc =       %8.1f MB  ← CPU overhead\n",
-               vm_rss_kb / 1024.0 - deusridet::DeviceAllocator::total_allocated() / 1048576.0);
-
-        size_t mt2, ma2, mc2, mf2;
-        read_meminfo(mt2, ma2, mc2, mf2);
-        size_t used2 = (mt2-ma2)/1024;
-        size_t used1 = (mt1-ma1)/1024;
-        printf("\n  System RAM now:  Used=%zuMB (+%zuMB vs post-init)  Avail=%zuMB  Cached=%zuMB\n",
-               used2, used2-used1, ma2/1024, mc2/1024);
-        printf("  NvMap (via DeviceAlloc):   %.0f MB\n",
-               deusridet::DeviceAllocator::total_allocated() / 1048576.0);
-        printf("  Extra system RAM cost:     %ld MB  ← (RAM used delta) - (DeviceAlloc)\n",
-               (long)used2 - (long)used1 - (long)(deusridet::DeviceAllocator::total_allocated() / 1048576.0));
+        printf("    RssAnon  (heap+GPU):    %8.1f MB\n", rss_anon_kb / 1024.0);
+        printf("    RssFile  (file-backed): %8.1f MB\n", rss_file_kb / 1024.0);
+        printf("  MemAvail baseline:        %8zu MB  (after drop_caches + CUDA init)\n", avail_baseline);
+        printf("  MemAvail now:             %8zu MB\n", avail_now);
+        printf("  System RAM consumed:      %8zu MB  (baseline - now)\n", consumed);
+        printf("  Weight data copied:       %8.1f MB\n", total_copy_bytes / 1048576.0);
+        printf("  Overhead (consumed-copy): %8ld MB\n",
+               (long)consumed - (long)(total_copy_bytes / 1048576));
     }
 
-    printf("\n[Load Model] Press Enter to release and exit...\n");
+    printf("\n[Load Model] Weights held in %d pool blocks. Press Enter to release...\n",
+           (int)pools.size());
     fflush(stdout);
     getchar();
 
-    // Cleanup
-    for (void* p : device_weights) {
-        dev_alloc.deallocate(p);
+    // Cleanup: free pool blocks
+    for (auto& pool : pools) {
+        cudaFree(pool.base);
     }
-    printf("[Load Model] Released. DeviceAllocator: %.1f MB\n",
-           deusridet::DeviceAllocator::total_allocated() / 1048576.0);
+    cudaStreamDestroy(copy_stream);
+
+    size_t avail_after = read_avail_mb();
+    printf("[Load Model] Released. MemAvail=%zuMB (recovered ~%zuMB vs loaded state)\n",
+           avail_after, (avail_after > avail_baseline) ? 0 : (avail_baseline - avail_after));
+
+    return 0;
+}
+
+// ============================================================================
+// load-weights: Load all model weights into device memory (structured)
+// ============================================================================
+static int cmd_load_weights(const std::string& model_dir) {
+    // Drop page caches for clean baseline
+    {
+        FILE* f = fopen("/proc/sys/vm/drop_caches", "w");
+        if (f) { fprintf(f, "3\n"); fclose(f); }
+    }
+    cudaFree(0);
+
+    deusridet::ModelWeights weights;
+    bool ok = deusridet::load_model_weights(model_dir, weights);
+
+    if (ok) {
+        printf("\n[load-weights] Summary:\n");
+        printf("  Total device memory: %.2f GB\n", weights.total_bytes / 1073741824.0);
+        printf("  Full attention layers:");
+        for (int i = 0; i < deusridet::ModelConfig::NUM_LAYERS; i++) {
+            if (weights.layers[i].is_full_attention) printf(" %d", i);
+        }
+        printf("\n");
+
+        // Spot-check: print first layer MLP dimensions
+        auto& mlp0 = weights.layers[0].mlp;
+        printf("  Layer 0 MLP: gate[K=%d,N=%d] up[K=%d,N=%d] down[K=%d,N=%d]\n",
+               mlp0.gate_proj.K, mlp0.gate_proj.N,
+               mlp0.up_proj.K, mlp0.up_proj.N,
+               mlp0.down_proj.K, mlp0.down_proj.N);
+
+        // Spot-check: layer 0 DeltaNet dims
+        auto& dn0 = weights.layers[0].delta_net;
+        printf("  Layer 0 DeltaNet: qkv[%d→%d] z[%d→%d] out[%d→%d]\n",
+               dn0.in_proj_qkv.in_features, dn0.in_proj_qkv.out_features,
+               dn0.in_proj_z.in_features, dn0.in_proj_z.out_features,
+               dn0.out_proj.in_features, dn0.out_proj.out_features);
+
+        // Spot-check: layer 3 Full Attention dims
+        auto& fa3 = weights.layers[3].full_attn;
+        printf("  Layer 3 FullAttn: q[%d→%d] k[%d→%d] v[%d→%d] o[%d→%d]\n",
+               fa3.q_proj.in_features, fa3.q_proj.out_features,
+               fa3.k_proj.in_features, fa3.k_proj.out_features,
+               fa3.v_proj.in_features, fa3.v_proj.out_features,
+               fa3.o_proj.in_features, fa3.o_proj.out_features);
+    }
+
+    printf("\n[load-weights] Press Enter to release...\n");
+    fflush(stdout);
+    getchar();
+
+    deusridet::free_model_weights(weights);
+
+    // Reclaim CMA pages
+    {
+        FILE* f = fopen("/proc/sys/vm/drop_caches", "w");
+        if (f) { fprintf(f, "3\n"); fclose(f); }
+    }
+
+    printf("[load-weights] Released.\n");
+    return ok ? 0 : 1;
+}
+
+// ============================================================================
+// test-forward: Load model, run single-token forward pass, verify output
+// ============================================================================
+static int cmd_test_forward(const std::string& model_dir) {
+    using namespace deusridet;
+    using MC = ModelConfig;
+
+    printf("[test-forward] Loading model weights...\n");
+
+    // Drop caches
+    {
+        FILE* f = fopen("/proc/sys/vm/drop_caches", "w");
+        if (f) { fprintf(f, "3\n"); fclose(f); }
+    }
+    cudaFree(0);
+
+    // Load tokenizer
+    Tokenizer tokenizer;
+    if (!tokenizer.load(model_dir)) {
+        fprintf(stderr, "[test-forward] Tokenizer load failed\n");
+        return 1;
+    }
+
+    // Load weights
+    ModelWeights weights;
+    if (!load_model_weights(model_dir, weights)) {
+        fprintf(stderr, "[test-forward] Weight load failed\n");
+        return 1;
+    }
+    printf("[test-forward] Weights loaded: %.2f GB\n",
+           weights.total_bytes / 1073741824.0);
+
+    // Allocate inference state
+    int max_seq = 64;  // Small for testing
+    InferenceState state;
+    if (!state.allocate(max_seq)) {
+        fprintf(stderr, "[test-forward] State allocation failed\n");
+        free_model_weights(weights);
+        return 1;
+    }
+
+    // Allocate KV cache for full attention layers
+    // Layout: [num_full_attn_layers * 2 * num_kv_heads * max_kv_len * head_dim]
+    int num_full_attn = 0;
+    for (int i = 0; i < MC::NUM_LAYERS; i++)
+        if (MC::is_full_attention(i)) num_full_attn++;
+
+    int max_kv_len = max_seq;
+    size_t kv_plane = (size_t)MC::NUM_KV_HEADS * max_kv_len * MC::HEAD_DIM;
+    size_t kv_bytes = (size_t)MC::NUM_LAYERS * 2 * kv_plane * sizeof(__half);
+    __half* kv_cache = nullptr;
+    cudaMalloc(&kv_cache, kv_bytes);
+    cudaMemset(kv_cache, 0, kv_bytes);
+    printf("[test-forward] KV cache: %.1f MB (max_kv=%d, %d full-attn layers)\n",
+           kv_bytes / 1048576.0, max_kv_len, num_full_attn);
+
+    // Encode prompt
+    std::string prompt = "Hello";
+    auto tokens = tokenizer.encode(prompt);
+    printf("[test-forward] Prompt: \"%s\" → %zu tokens:", prompt.c_str(), tokens.size());
+    for (int t : tokens) printf(" %d", t);
+    printf("\n");
+
+    if (tokens.empty()) {
+        fprintf(stderr, "[test-forward] Tokenizer returned empty tokens\n");
+        cudaFree(kv_cache);
+        state.free();
+        free_model_weights(weights);
+        return 1;
+    }
+
+    // Generate tokens
+    int max_gen = 16;
+    printf("[test-forward] Generating %d tokens...\n", max_gen);
+
+    std::vector<int> generated;
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    // Process prompt tokens one by one
+    int pos = 0;
+    int next_token = tokens[0];
+
+    for (size_t i = 0; i < tokens.size(); i++) {
+        next_token = forward_one_token(weights, state, kv_cache,
+                                       tokens[i], pos, max_kv_len);
+        pos++;
+    }
+    generated.push_back(next_token);
+    printf("[test-forward] Prefill done. First generated token: %d = \"%s\"\n",
+           next_token, tokenizer.decode(next_token).c_str());
+
+    // Generate remaining tokens
+    for (int g = 1; g < max_gen; g++) {
+        if (pos >= max_kv_len - 1) break;  // Safety limit
+        next_token = forward_one_token(weights, state, kv_cache,
+                                       next_token, pos, max_kv_len);
+        pos++;
+        generated.push_back(next_token);
+
+        // Check for EOS (token 151643 or 151645)
+        if (next_token == 151643 || next_token == 151645) break;
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+
+    // Print results
+    printf("\n[test-forward] Generated %zu tokens in %.1f ms (%.1f ms/token)\n",
+           generated.size(), elapsed_ms, elapsed_ms / generated.size());
+    printf("[test-forward] Output: ");
+    for (int t : generated) {
+        printf("%s", tokenizer.decode(t).c_str());
+    }
+    printf("\n");
+    printf("[test-forward] Token IDs:");
+    for (int t : generated) printf(" %d", t);
+    printf("\n");
+
+    // Cleanup
+    cudaFree(kv_cache);
+    state.free();
+    free_model_weights(weights);
 
     {
-        size_t mt3, ma3, mc3, mf3;
-        read_meminfo(mt3, ma3, mc3, mf3);
-        printf("[Load Model] System RAM after free: Used=%zuMB  Avail=%zuMB  Cached=%zuMB\n",
-               (mt3-ma3)/1024, ma3/1024, mc3/1024);
-        printf("[Load Model] Not recovered vs pre-init: %ld MB\n",
-               (long)((mt3-ma3) - (mt1-ma1)) / 1024);
+        FILE* f = fopen("/proc/sys/vm/drop_caches", "w");
+        if (f) { fprintf(f, "3\n"); fclose(f); }
     }
 
+    printf("[test-forward] Done.\n");
     return 0;
 }
 
@@ -621,6 +811,9 @@ int main(int argc, char** argv) {
             config_path = argv[++i];
         } else if (arg == "--model-dir" && i + 1 < argc) {
             model_dir_override = argv[++i];
+        } else if (model_dir_override.empty() && arg[0] != '-') {
+            // Positional argument: treat as model directory
+            model_dir_override = arg;
         }
     }
 
@@ -660,6 +853,12 @@ int main(int argc, char** argv) {
     else if (cmd == "load-model") {
         rc = cmd_load_model(model_dir);
     }
+    else if (cmd == "load-weights") {
+        rc = cmd_load_weights(model_dir);
+    }
+    else if (cmd == "test-forward") {
+        rc = cmd_test_forward(model_dir);
+    }
     else if (cmd == "--help" || cmd == "-h" || cmd == "help") {
         print_usage();
     }
@@ -669,5 +868,15 @@ int main(int argc, char** argv) {
     }
 
     cudaDeviceReset();
+
+    // Tegra L4T NvMap driver does not immediately return freed CMA pages to
+    // the system free pool after cudaFree/cudaDeviceReset. Writing to
+    // drop_caches triggers the kernel reclaim path that completes the release.
+    // Without this, tegrastats will show inflated RAM usage after exit.
+    {
+        FILE* f = fopen("/proc/sys/vm/drop_caches", "w");
+        if (f) { fprintf(f, "3\n"); fclose(f); }
+    }
+
     return rc;
 }
