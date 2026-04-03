@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -69,10 +70,17 @@ public:
 // Device memory allocator (cudaMalloc)
 // Preferred for GPU-only buffers: KV Cache blocks, intermediate activations,
 // scratch space. Avoids coherency overhead on Tegra iGPU.
+// Tracks total allocated bytes via atomic counter for memory bookkeeping.
 class DeviceAllocator : public Allocator {
 public:
     void* allocate(size_t size) override;
     void  deallocate(void* ptr) override;
+
+    // Total device memory currently allocated (bytes)
+    static size_t total_allocated() { return total_allocated_.load(std::memory_order_relaxed); }
+
+private:
+    static std::atomic<size_t> total_allocated_;
 };
 
 // Unified memory allocator (cudaMallocManaged)

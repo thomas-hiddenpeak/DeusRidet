@@ -285,4 +285,53 @@ std::vector<std::string> SafetensorsLoader::tensor_names() const {
     return names;
 }
 
+void SafetensorsLoader::for_each_shard(ShardCallback cb) {
+    for (size_t i = 0; i < shards_.size(); i++) {
+        if (shards_[i]) {
+            cb(i, *shards_[i]);
+        }
+    }
+}
+
+void SafetensorsLoader::release_shard(size_t shard_idx) {
+    if (shard_idx < shards_.size()) {
+        shards_[shard_idx].reset();  // triggers ~MmapAllocator → munmap + FADV_DONTNEED
+    }
+}
+
+// Static: stream one shard at a time, release mmap between shards
+void SafetensorsLoader::stream_load(const std::string& model_dir, ShardCallback cb) {
+    namespace fs = std::filesystem;
+
+    std::string index_path = model_dir + "/model.safetensors.index.json";
+
+    if (fs::exists(index_path)) {
+        auto weight_map = parse_index_json(index_path);
+
+        // Collect unique shard filenames in discovery order
+        std::vector<std::string> shard_files;
+        std::unordered_map<std::string, bool> seen;
+        for (const auto& [tensor_name, shard_file] : weight_map) {
+            if (!seen.count(shard_file)) {
+                seen[shard_file] = true;
+                shard_files.push_back(shard_file);
+            }
+        }
+
+        for (size_t i = 0; i < shard_files.size(); i++) {
+            std::string shard_path = model_dir + "/" + shard_files[i];
+            auto shard = std::make_unique<SafetensorsFile>(shard_path);
+            cb(i, *shard);
+            // shard destroyed here → mmap released → FADV_DONTNEED
+        }
+    } else {
+        std::string single_path = model_dir + "/model.safetensors";
+        if (!fs::exists(single_path)) {
+            throw std::runtime_error("No safetensors files found in " + model_dir);
+        }
+        auto shard = std::make_unique<SafetensorsFile>(single_path);
+        cb(0, *shard);
+    }
+}
+
 } // namespace deusridet

@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <memory>
 #include <vector>
+#include <functional>
 
 namespace deusridet {
 
@@ -70,6 +71,22 @@ public:
     bool has_tensor(const std::string& name) const;
     std::vector<std::string> tensor_names() const;
     size_t shard_count() const { return shards_.size(); }
+
+    // Per-shard streaming: iterate over one shard at a time.
+    // Callback receives (shard_index, SafetensorsFile&). After callback returns,
+    // the shard can be released to free mmap pages.
+    // Use release_shard() inside or after callback to free mmap immediately.
+    using ShardCallback = std::function<void(size_t shard_idx, SafetensorsFile& shard)>;
+    void for_each_shard(ShardCallback cb);
+
+    // Release a specific shard's mmap (frees physical pages for GPU use).
+    // After release, get_tensor() for tensors in this shard will throw.
+    void release_shard(size_t shard_idx);
+
+    // Static helper: stream-load from model_dir, processing one shard at a time.
+    // Each shard is mmap'd, callback processes its tensors, then mmap is released.
+    // Peak memory: single shard mmap + accumulated cudaMalloc'd weights.
+    static void stream_load(const std::string& model_dir, ShardCallback cb);
 
 private:
     std::string model_dir_;

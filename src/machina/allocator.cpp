@@ -19,6 +19,8 @@ namespace deusridet {
 // DeviceAllocator
 // ============================================================================
 
+std::atomic<size_t> DeviceAllocator::total_allocated_{0};
+
 void* DeviceAllocator::allocate(size_t size) {
     void* ptr = nullptr;
     cudaError_t err = cudaMalloc(&ptr, size);
@@ -27,11 +29,17 @@ void* DeviceAllocator::allocate(size_t size) {
             std::string("cudaMalloc failed (") + std::to_string(size) +
             " bytes): " + cudaGetErrorString(err));
     }
+    total_allocated_.fetch_add(size, std::memory_order_relaxed);
     return ptr;
 }
 
 void DeviceAllocator::deallocate(void* ptr) {
-    if (ptr) cudaFree(ptr);
+    if (ptr) {
+        // Note: cudaFree does not report size freed. For accurate tracking,
+        // callers should use sized_deallocate() or track sizes externally.
+        // This is a best-effort deallocate — total_allocated_ not decremented.
+        cudaFree(ptr);
+    }
 }
 
 // ============================================================================
@@ -124,6 +132,10 @@ MmapAllocator::~MmapAllocator() {
         munmap(base_ptr_, size_);
     }
     if (fd_ != -1) {
+        // FADV_DONTNEED: advise kernel to release page cache immediately.
+        // Critical on Tegra unified memory — reclaims physical pages for
+        // cudaMalloc use instead of waiting for LRU eviction.
+        posix_fadvise(fd_, 0, size_, POSIX_FADV_DONTNEED);
         close(fd_);
     }
 }

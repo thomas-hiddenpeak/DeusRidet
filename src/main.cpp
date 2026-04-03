@@ -15,6 +15,7 @@
 #include "communis/config.h"
 #include "communis/log.h"
 #include "machina/gptq.h"
+#include "machina/allocator.h"
 #include "machina/safetensors.h"
 #include "machina/tokenizer.h"
 #include <iostream>
@@ -191,13 +192,12 @@ static int cmd_test_gptq(const std::string& model_dir) {
     printf("  group_size: %d, bits: 4, sym: true\n\n", K / num_groups);
 
     // Allocate device memory for x and y
+    static deusridet::DeviceAllocator dev_alloc;
     size_t x_bytes = (size_t)K * sizeof(__half);
     size_t y_bytes = (size_t)N * sizeof(__half);
 
-    __half* d_x;
-    __half* d_y;
-    cudaMalloc(&d_x, x_bytes);
-    cudaMalloc(&d_y, y_bytes);
+    __half* d_x = (__half*)dev_alloc.allocate(x_bytes);
+    __half* d_y = (__half*)dev_alloc.allocate(y_bytes);
 
     // Fill x with small values on host, copy to device
     __half* h_x = (__half*)malloc(x_bytes);
@@ -221,19 +221,28 @@ static int cmd_test_gptq(const std::string& model_dir) {
     __half*   d_sc;
     cudaError_t cerr;
 
-    cerr = cudaMalloc(&d_qw, qw_bytes);
-    if (cerr != cudaSuccess) {
-        LOG_ERROR("Main", "cudaMalloc qweight failed: %s", cudaGetErrorString(cerr));
-        return 1;
-    }
-    cerr = cudaMalloc(&d_sc, sc_bytes);
-    if (cerr != cudaSuccess) {
-        LOG_ERROR("Main", "cudaMalloc scales failed: %s", cudaGetErrorString(cerr));
-        cudaFree(d_qw);
-        return 1;
-    }
+    d_qw = (uint32_t*)dev_alloc.allocate(qw_bytes);
+    d_sc = (__half*)dev_alloc.allocate(sc_bytes);
     cudaMemcpy(d_qw, qw_tensor->data(), qw_bytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_sc, sc_tensor->data(), sc_bytes, cudaMemcpyHostToDevice);
+
+    // Keep host copies for CPU reference check before releasing mmap
+    uint32_t* h_qw = (uint32_t*)malloc(qw_bytes);
+    __half*   h_sc = (__half*)malloc(sc_bytes);
+    memcpy(h_qw, qw_tensor->data(), qw_bytes);
+    memcpy(h_sc, sc_tensor->data(), sc_bytes);
+
+    // Release mmap — weights are now in device memory, free physical pages
+    // for GPU use. On Tegra unified memory this is critical to avoid
+    // double-occupancy (mmap pages + cudaMalloc pages).
+    qw_tensor.reset();
+    sc_tensor.reset();
+    loader.for_each_shard([&](size_t idx, deusridet::SafetensorsFile&) {
+        loader.release_shard(idx);
+    });
+
+    printf("[GPTQ Test] Device memory allocated: %.1f MB\n",
+           deusridet::DeviceAllocator::total_allocated() / 1048576.0);
 
     deusridet::GptqWeight weight;
     weight.qweight = d_qw;
@@ -249,7 +258,8 @@ static int cmd_test_gptq(const std::string& model_dir) {
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         LOG_ERROR("Main", "CUDA error: %s", cudaGetErrorString(err));
-        cudaFree(d_x); cudaFree(d_y); cudaFree(d_qw); cudaFree(d_sc);
+        dev_alloc.deallocate(d_x); dev_alloc.deallocate(d_y);
+        dev_alloc.deallocate(d_qw); dev_alloc.deallocate(d_sc);
         free(h_x);
         return 1;
     }
@@ -261,9 +271,6 @@ static int cmd_test_gptq(const std::string& model_dir) {
     // CPU reference (partial — first 256 columns for speed)
     int check_N = (N < 256) ? N : 256;
     printf("[GPTQ Test] CPU reference check (first %d columns)...\n", check_N);
-
-    const uint32_t* h_qw = (const uint32_t*)qw_tensor->data();
-    const __half*   h_sc = (const __half*)sc_tensor->data();
 
     float max_err = 0.0f;
     float max_abs_err = 0.0f;
@@ -311,8 +318,8 @@ static int cmd_test_gptq(const std::string& model_dir) {
     size_t ym_bytes = (size_t)M_test * N * sizeof(__half);
     __half* d_xm;
     __half* d_ym;
-    cudaMalloc(&d_xm, xm_bytes);
-    cudaMalloc(&d_ym, ym_bytes);
+    d_xm = (__half*)dev_alloc.allocate(xm_bytes);
+    d_ym = (__half*)dev_alloc.allocate(ym_bytes);
 
     __half* h_xm = (__half*)malloc(xm_bytes);
     for (int i = 0; i < M_test * K; i++) {
@@ -361,9 +368,11 @@ static int cmd_test_gptq(const std::string& model_dir) {
         free(h_ym);
     }
 
-    cudaFree(d_x); cudaFree(d_y); cudaFree(d_xm); cudaFree(d_ym);
-    cudaFree(d_qw); cudaFree(d_sc);
+    dev_alloc.deallocate(d_x); dev_alloc.deallocate(d_y);
+    dev_alloc.deallocate(d_xm); dev_alloc.deallocate(d_ym);
+    dev_alloc.deallocate(d_qw); dev_alloc.deallocate(d_sc);
     free(h_x); free(h_y); free(h_xm);
+    free(h_qw); free(h_sc);
 
     return pass ? 0 : 1;
 }
