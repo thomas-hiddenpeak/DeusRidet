@@ -26,10 +26,10 @@ constexpr int GPTQ_GROUP_SIZE = 128;
 constexpr int GPTQ_PACK_FACTOR = 8;    // 32 / 4 = 8 INT4 per uint32
 constexpr int GPTQ_ZERO_POINT = 8;     // symmetric quantization center
 
-// GPTQ weight descriptor (non-owning pointers to mmap'd safetensors data)
+// GPTQ weight descriptor (non-owning device pointers to GPU-resident weight data)
 struct GptqWeight {
-    const uint32_t* qweight;   // [K/8, N] packed INT4
-    const __half*   scales;    // [K/128, N] FP16
+    const uint32_t* qweight;   // [K/8, N] packed INT4 (device memory)
+    const __half*   scales;    // [K/128, N] FP16 (device memory)
     // qzeros not needed: sym=true, all zeros = 8 (constant)
     int K;                     // input dimension (unpacked)
     int N;                     // output dimension

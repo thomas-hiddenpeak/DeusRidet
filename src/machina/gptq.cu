@@ -23,6 +23,7 @@
 #include "gptq.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cublas_v2.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -298,32 +299,30 @@ void gptq_gemm(const __half* X,
 }
 
 // ============================================================================
-// Benchmark + correctness check
+// GPU-based dequant kernel for reference: fully dequantize W_q → W_fp32
+// Used by benchmark correctness check (replaces slow CPU matmul)
 // ============================================================================
 
-static void cpu_gptq_matmul(const __half* X, int M,
-                             const uint32_t* qweight,
-                             const __half* scales,
-                             int K, int N,
-                             float* Y_ref)
+__global__ void gptq_dequant_kernel(
+    const uint32_t* __restrict__ qweight, // [K/8, N]
+    const __half*   __restrict__ scales,  // [K/128, N]
+    float*          __restrict__ W_fp32,  // [K, N] output
+    int K, int N)
 {
-    // Reference: Y_ref[m, n] = sum_k X[m,k] * dequant(qweight, scales, k, n)
-    for (int m = 0; m < M; m++) {
-        for (int n = 0; n < N; n++) {
-            double sum = 0.0;
-            for (int k = 0; k < K; k++) {
-                int pk = k / GPTQ_PACK_FACTOR;
-                int ki = k % GPTQ_PACK_FACTOR;
-                uint32_t packed = qweight[pk * N + n];
-                int q_val = (packed >> (ki * 4)) & 0xF;
-                int group = k / GPTQ_GROUP_SIZE;
-                float s = __half2float(scales[group * N + n]);
-                float w = s * (float)(q_val - GPTQ_ZERO_POINT);
-                sum += (double)__half2float(X[m * K + k]) * (double)w;
-            }
-            Y_ref[m * N + n] = (float)sum;
-        }
-    }
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = K * N;
+    if (idx >= total) return;
+
+    int k = idx / N;
+    int n = idx % N;
+    int pk = k / GPTQ_PACK_FACTOR;
+    int ki = k % GPTQ_PACK_FACTOR;
+    int group = k / GPTQ_GROUP_SIZE;
+
+    uint32_t packed = qweight[pk * N + n];
+    int q_val = (packed >> (ki * 4)) & 0xF;
+    float s = __half2float(scales[group * N + n]);
+    W_fp32[k * N + n] = s * (float)(q_val - GPTQ_ZERO_POINT);
 }
 
 GptqBenchResult gptq_benchmark(int K, int N, int M,
@@ -335,7 +334,7 @@ GptqBenchResult gptq_benchmark(int K, int N, int M,
     result.N = N;
     result.M = M;
 
-    // Allocate host data
+    // Allocate host data for initialization
     int packed_K = K / GPTQ_PACK_FACTOR;
     int num_groups = K / GPTQ_GROUP_SIZE;
 
@@ -348,7 +347,6 @@ GptqBenchResult gptq_benchmark(int K, int N, int M,
     uint32_t* h_qw = (uint32_t*)malloc(qw_size);
     __half*   h_sc = (__half*)malloc(sc_size);
     __half*   h_Y = (__half*)malloc(y_size);
-    float*    h_Y_ref = (float*)malloc((size_t)M * N * sizeof(float));
 
     // Initialize with deterministic pseudo-random data
     srand(42);
@@ -356,26 +354,28 @@ GptqBenchResult gptq_benchmark(int K, int N, int M,
         h_X[i] = __float2half(((float)(rand() % 1000) - 500.0f) / 500.0f);
     }
     for (int i = 0; i < packed_K * N; i++) {
-        // Random packed INT4 values (each nibble 0–15)
         h_qw[i] = (uint32_t)rand() ^ ((uint32_t)rand() << 16);
     }
     for (int i = 0; i < num_groups * N; i++) {
         h_sc[i] = __float2half(((float)(rand() % 200) - 100.0f) / 100.0f * 0.1f);
     }
 
-    // CPU reference
-    cpu_gptq_matmul(h_X, M, h_qw, h_sc, K, N, h_Y_ref);
-
     // Device allocation
     __half*   d_X;
     uint32_t* d_qw;
     __half*   d_sc;
     __half*   d_Y;
+    float*    d_W_ref;   // dequantized weights for cuBLAS reference
+    float*    d_X_fp32;  // FP32 input for cuBLAS
+    float*    d_Y_ref;   // FP32 reference output
 
     cudaMalloc(&d_X, x_size);
     cudaMalloc(&d_qw, qw_size);
     cudaMalloc(&d_sc, sc_size);
     cudaMalloc(&d_Y, y_size);
+    cudaMalloc(&d_W_ref, (size_t)K * N * sizeof(float));
+    cudaMalloc(&d_X_fp32, (size_t)M * K * sizeof(float));
+    cudaMalloc(&d_Y_ref, (size_t)M * N * sizeof(float));
 
     cudaMemcpy(d_X, h_X, x_size, cudaMemcpyHostToDevice);
     cudaMemcpy(d_qw, h_qw, qw_size, cudaMemcpyHostToDevice);
@@ -387,18 +387,58 @@ GptqBenchResult gptq_benchmark(int K, int N, int M,
     weight.K       = K;
     weight.N       = N;
 
-    // Correctness check
+    // GPU reference: dequant to FP32 + cuBLAS SGEMM
+    // 1. Dequantize qweight → W_fp32 on GPU
+    {
+        int total_elems = K * N;
+        int block = 256;
+        int grid = (total_elems + block - 1) / block;
+        gptq_dequant_kernel<<<grid, block>>>(d_qw, d_sc, d_W_ref, K, N);
+    }
+
+    // 2. Convert X from FP16 to FP32 for cuBLAS SGEMM reference
+    {
+        float* h_X_fp32 = (float*)malloc((size_t)M * K * sizeof(float));
+        for (int i = 0; i < M * K; i++) {
+            h_X_fp32[i] = __half2float(h_X[i]);
+        }
+        cudaMemcpy(d_X_fp32, h_X_fp32, (size_t)M * K * sizeof(float), cudaMemcpyHostToDevice);
+        free(h_X_fp32);
+    }
+
+    // 3. cuBLAS SGEMM: Y_ref = X_fp32 @ W_fp32^T ... but our layout is row-major
+    //    Y[M,N] = X[M,K] * W[K,N] (row-major)
+    //    cuBLAS expects column-major, so: Y^T[N,M] = W^T[N,K] * X^T[K,M]
+    //    i.e. cublasSgemm(N, M, K, W_ref, N, X_fp32, K, Y_ref, N)
+    {
+        cublasHandle_t handle;
+        cublasCreate(&handle);
+        float alpha = 1.0f, beta = 0.0f;
+        cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                    N, M, K,
+                    &alpha,
+                    d_W_ref, N,     // W[K,N] stored row-major = W^T[N,K] col-major
+                    d_X_fp32, K,    // X[M,K] stored row-major = X^T[K,M] col-major
+                    &beta,
+                    d_Y_ref, N);    // Y[M,N] stored row-major = Y^T[N,M] col-major
+        cudaDeviceSynchronize();
+        cublasDestroy(handle);
+    }
+
+    // 4. Run GPTQ kernel under test
     gptq_linear(d_X, weight, d_Y, M);
     cudaDeviceSynchronize();
-    cudaMemcpy(h_Y, d_Y, y_size, cudaMemcpyDeviceToHost);
 
-    float max_err = 0.0f;
+    // 5. Compare on host
+    cudaMemcpy(h_Y, d_Y, y_size, cudaMemcpyDeviceToHost);
+    float* h_Y_ref = (float*)malloc((size_t)M * N * sizeof(float));
+    cudaMemcpy(h_Y_ref, d_Y_ref, (size_t)M * N * sizeof(float), cudaMemcpyDeviceToHost);
+
     double sum_err = 0.0, sum_ref = 0.0;
     for (int i = 0; i < M * N; i++) {
         float gpu_val = __half2float(h_Y[i]);
         float ref_val = h_Y_ref[i];
         float err = fabsf(gpu_val - ref_val);
-        max_err = fmaxf(max_err, err);
         sum_err += (double)(err * err);
         sum_ref += (double)(ref_val * ref_val);
     }
@@ -406,12 +446,18 @@ GptqBenchResult gptq_benchmark(int K, int N, int M,
     // FP16 dequant precision allows ~2-3% relative error for large K reductions
     result.correct = (rmse < 0.05f);
 
-    // Benchmark GEMV (M=1)
-    {
-        cudaEvent_t start, stop;
-        cudaEventCreate(&start);
-        cudaEventCreate(&stop);
+    free(h_Y_ref);
+    cudaFree(d_W_ref);
+    cudaFree(d_X_fp32);
+    cudaFree(d_Y_ref);
 
+    // Benchmark: only run the relevant kernel (GEMV for M=1, GEMM for M>1)
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    if (M == 1) {
+        // Benchmark GEMV
         for (int i = 0; i < warmup_iters; i++) {
             gptq_gemv(d_X, weight, d_Y);
         }
@@ -428,21 +474,11 @@ GptqBenchResult gptq_benchmark(int K, int N, int M,
         cudaEventElapsedTime(&ms, start, stop);
         result.gemv_us = ms * 1000.0f / bench_iters;
 
-        // Effective bandwidth: read qweight + scales + x, write y
         size_t bytes_read = qw_size + sc_size + (size_t)K * sizeof(__half);
         size_t bytes_write = (size_t)N * sizeof(__half);
         result.gemv_gbps = (bytes_read + bytes_write) / (result.gemv_us * 1e3f);
-
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
-    }
-
-    // Benchmark GEMM (M=M)
-    {
-        cudaEvent_t start, stop;
-        cudaEventCreate(&start);
-        cudaEventCreate(&stop);
-
+    } else {
+        // Benchmark GEMM
         for (int i = 0; i < warmup_iters; i++) {
             gptq_gemm(d_X, weight, d_Y, M);
         }
@@ -459,13 +495,12 @@ GptqBenchResult gptq_benchmark(int K, int N, int M,
         cudaEventElapsedTime(&ms, start, stop);
         result.gemm_us = ms * 1000.0f / bench_iters;
 
-        // Effective TFLOPS: 2*M*N*K FLOPs (multiply-add)
         double flops = 2.0 * M * N * K;
         result.gemm_tflops = (float)(flops / ((double)result.gemm_us * 1e6));
-
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
     }
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 
     // Cleanup
     cudaFree(d_X);
@@ -476,7 +511,6 @@ GptqBenchResult gptq_benchmark(int K, int N, int M,
     free(h_qw);
     free(h_sc);
     free(h_Y);
-    free(h_Y_ref);
 
     return result;
 }

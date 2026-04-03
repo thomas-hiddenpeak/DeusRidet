@@ -249,7 +249,8 @@ static int cmd_test_gptq(const std::string& model_dir) {
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         LOG_ERROR("Main", "CUDA error: %s", cudaGetErrorString(err));
-        cudaFree(d_x); cudaFree(d_y); free(h_x);
+        cudaFree(d_x); cudaFree(d_y); cudaFree(d_qw); cudaFree(d_sc);
+        free(h_x);
         return 1;
     }
 
