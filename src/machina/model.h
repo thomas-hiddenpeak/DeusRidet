@@ -13,6 +13,7 @@
 #include "gptq.h"
 #include <cuda_fp16.h>
 #include <string>
+#include <vector>
 
 namespace deusridet {
 
@@ -68,15 +69,29 @@ struct Linear {
 };
 
 // ============================================================================
+// INT8 quantized linear layer (per-channel symmetric quantization)
+// ============================================================================
+// Quantized at model load time from FP16/BF16 weights.
+// Dequant: w_fp32 = scale[n] * (float)int8_weight[n][k]
+// Memory: N*K bytes (weight) + N*4 bytes (scales) → ~50% of FP16
+
+struct Int8Linear {
+    int8_t* weight = nullptr;  // [out_features, in_features] row-major INT8
+    float*  scales = nullptr;  // [out_features] per-output-channel FP32
+    int in_features  = 0;
+    int out_features = 0;
+};
+
+// ============================================================================
 // Per-layer weight structures
 // ============================================================================
 
 struct DeltaNetWeights {
-    Linear in_proj_qkv;   // 5120 → 10240 (key*2 + value)
-    Linear in_proj_z;     // 5120 → 6144  (value_dim, for gate)
-    Linear in_proj_a;     // 5120 → 48    (num_v_heads, for decay)
-    Linear in_proj_b;     // 5120 → 48    (num_v_heads, for beta)
-    Linear out_proj;      // 6144 → 5120
+    Int8Linear in_proj_qkv;   // 5120 → 10240 (key*2 + value)
+    Int8Linear in_proj_z;     // 5120 → 6144  (value_dim, for gate)
+    Int8Linear in_proj_a;     // 5120 → 48    (num_v_heads, for decay)
+    Int8Linear in_proj_b;     // 5120 → 48    (num_v_heads, for beta)
+    Int8Linear out_proj;      // 6144 → 5120
 
     __half* conv1d_weight = nullptr;  // [conv_dim, kernel] = [10240, 4]
     float*  A_log         = nullptr;  // [48]
@@ -85,10 +100,10 @@ struct DeltaNetWeights {
 };
 
 struct FullAttentionWeights {
-    Linear q_proj;   // 5120 → 12288 (includes output gate, split in kernel)
-    Linear k_proj;   // 5120 → 1024
-    Linear v_proj;   // 5120 → 1024
-    Linear o_proj;   // 6144 → 5120
+    Int8Linear q_proj;   // 5120 → 12288 (includes output gate, split in kernel)
+    Int8Linear k_proj;   // 5120 → 1024
+    Int8Linear v_proj;   // 5120 → 1024
+    Int8Linear o_proj;   // 6144 → 5120
 
     __half* q_norm = nullptr;  // [256] precomputed (1+w)
     __half* k_norm = nullptr;  // [256] precomputed (1+w)
@@ -118,11 +133,16 @@ struct LayerWeights {
 struct ModelWeights {
     __half* embed_tokens = nullptr;  // [vocab_size, hidden_size]
     __half* final_norm   = nullptr;  // [hidden_size] precomputed (1+w)
-    __half* lm_head      = nullptr;  // [vocab_size, hidden_size]
+    __half* lm_head      = nullptr;  // [vocab_size, hidden_size] FP16 (for prefill)
+    Int8Linear lm_head_int8;         // INT8 quantized lm_head for decode GEMV
 
     LayerWeights layers[ModelConfig::NUM_LAYERS];
 
     size_t total_bytes = 0;  // total device memory
+
+    // Pool-allocated blocks (one per shard). Individual tensor pointers
+    // above point into these pools. Only pool blocks are cudaFree'd.
+    std::vector<void*> pool_blocks;
 };
 
 // ============================================================================
@@ -135,6 +155,18 @@ bool load_model_weights(const std::string& model_dir, ModelWeights& weights);
 
 // Release all device memory held by the model.
 void free_model_weights(ModelWeights& weights);
+
+// ============================================================================
+// Sampling parameters
+// ============================================================================
+
+struct SamplingParams {
+    float temperature = 1.0f;   // Logit scaling (>1 = more random, <1 = more deterministic)
+    int   top_k       = 50;     // Keep top-k highest-probability tokens (0 = disabled)
+    float top_p       = 0.9f;   // Nucleus: keep smallest set with cumulative prob >= top_p
+    float rep_penalty = 1.0f;   // Repetition penalty (1.0 = disabled)
+    unsigned long long seed = 0; // RNG seed (0 = use counter)
+};
 
 // ============================================================================
 // Inference state (scratch buffers for forward pass)
@@ -151,6 +183,10 @@ struct InferenceState {
     __half* q_buf       = nullptr;  // [max_seq, q_proj_dim] (12288)
     __half* kv_buf      = nullptr;  // [max_seq, kv_proj_dim] (1024)
 
+    // Full Attention pre-allocated scratch
+    float*  attn_scores = nullptr;  // [num_attn_heads, max_seq] for Q@K^T
+    __half* scores_h16  = nullptr;  // [num_kv_groups, max_seq] for FP16 score conversion
+
     // MLP scratch
     __half* mlp_gate    = nullptr;  // [max_seq, intermediate_size] (17408)
     __half* mlp_up      = nullptr;  // [max_seq, intermediate_size]
@@ -161,6 +197,8 @@ struct InferenceState {
     __half* dn_z        = nullptr;  // [max_seq, lin_value_dim] (6144)
     __half* dn_a        = nullptr;  // [max_seq, num_v_heads] (48)
     __half* dn_b        = nullptr;  // [max_seq, num_v_heads] (48)
+    float*  dn_g        = nullptr;  // [num_v_heads] (48) decay factors
+    float*  dn_beta     = nullptr;  // [num_v_heads] (48) beta factors
 
     // DeltaNet recurrent states (one per linear attention layer)
     // state[layer][head]: [key_head_dim, value_head_dim] = [128, 128]
@@ -172,9 +210,27 @@ struct InferenceState {
 
     // Token input
     int*    token_ids   = nullptr;  // [max_seq] device
+    int*    sample_out  = nullptr;  // [1] device — greedy sample output
 
     // Logits output
     __half* logits      = nullptr;  // [vocab_size]
+
+    // Sampling workspace (FP32 probabilities for top-k/top-p)
+    float*  probs       = nullptr;  // [vocab_size]
+    unsigned long long rng_counter = 0;  // running counter for PRNG seeding
+
+    // --- CUDA Graph support ---
+    // Device-side pos for graph-capturable kernels (RoPE, KV cache write, attention)
+    int*    d_pos       = nullptr;  // [1] device — current sequence position
+    // Pinned host staging (CUDA graph reads from these at replay time)
+    int*    h_pos_pinned    = nullptr;  // pinned host — pos staging
+    int*    h_token_pinned  = nullptr;  // pinned host — token_id staging
+    // Compute stream (non-default, required for graph capture)
+    cudaStream_t compute_stream = nullptr;
+    // Graph state
+    cudaGraph_t     cuda_graph      = nullptr;
+    cudaGraphExec_t cuda_graph_exec = nullptr;
+    bool            graph_captured  = false;
 
     int max_seq_len = 0;
 

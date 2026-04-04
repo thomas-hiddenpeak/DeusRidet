@@ -49,6 +49,19 @@ void gptq_gemv(const __half* x,
                __half* y,
                cudaStream_t stream = 0);
 
+// Fused GEMV + residual add: y[n] = (x @ W_q)[n] + residual[n]
+void gptq_gemv_add(const __half* x,
+                   const GptqWeight& weight,
+                   __half* y,
+                   const __half* residual,
+                   cudaStream_t stream = 0);
+
+// Dual GEMV: gate_proj + up_proj sharing x in SMEM (one load, one launch)
+void gptq_dual_gemv(const __half* x,
+                    const GptqWeight& w_a, const GptqWeight& w_b,
+                    __half* y_a, __half* y_b,
+                    cudaStream_t stream = 0);
+
 // ============================================================================
 // GEMM — Prefill path (batch>1, compute-bound for larger M)
 // ============================================================================
@@ -65,8 +78,28 @@ void gptq_gemm(const __half* X,
                int M,
                cudaStream_t stream = 0);
 
+// Batch GEMV for small M: loads weights once, computes M dot products from L2-cached X.
+// Faster than tiled GEMM for M ≤ ~32 (avoids BM padding waste, better weight reuse).
+void gptq_batch_gemv(const __half* X,
+                     const GptqWeight& weight,
+                     __half* Y,
+                     int M,
+                     cudaStream_t stream = 0);
+
 // ============================================================================
-// Auto-dispatch: GEMV for M=1, GEMM for M>1
+// WMMA GEMM — Tensor core path (M>1, primary prefill kernel)
+// ============================================================================
+// Uses WMMA m16n16k16 FP16 tensor cores with in-SMEM INT4 dequantization.
+// Requires: K % 64 == 0, N % 64 == 0 (holds for all MLP projections).
+// M is padded to 16 internally; output buffers must be >= ceil16(M) rows.
+void gptq_wmma_gemm(const __half* X,
+                    const GptqWeight& weight,
+                    __half* Y,
+                    int M,
+                    cudaStream_t stream = 0);
+
+// ============================================================================
+// Auto-dispatch: GEMV for M=1, batch GEMV for small M (small N), GEMM otherwise
 // ============================================================================
 inline void gptq_linear(const __half* X,
                          const GptqWeight& weight,
@@ -76,6 +109,10 @@ inline void gptq_linear(const __half* X,
 {
     if (M == 1) {
         gptq_gemv(X, weight, Y, stream);
+    } else if (weight.K % 64 == 0 && weight.N % 64 == 0) {
+        // Tensor core WMMA path: dequant INT4 in SMEM + m16n16k16 FP16 mma.
+        // Reads INT4 weights once from DRAM → approaching bandwidth limit.
+        gptq_wmma_gemm(X, weight, Y, M, stream);
     } else {
         gptq_gemm(X, weight, Y, M, stream);
     }

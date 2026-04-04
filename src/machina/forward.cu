@@ -10,7 +10,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cmath>
-#include <vector>
+#include <cfloat>
+#include <cstdio>
 
 namespace deusridet {
 
@@ -24,22 +25,181 @@ namespace deusridet {
 // ============================================================================
 
 void mlp_forward(const __half* x, const MLPWeights& mlp,
+                 __half* residual,
                  InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // gate_proj: x[5120] → mlp_gate[17408]
-    gptq_linear(x, mlp.gate_proj, state.mlp_gate, 1, stream);
+    // Dual GEMV: gate_proj + up_proj (one launch, shared x in SMEM)
+    gptq_dual_gemv(x, mlp.gate_proj, mlp.up_proj,
+                   state.mlp_gate, state.mlp_up, stream);
 
-    // up_proj: x[5120] → mlp_up[17408]
-    gptq_linear(x, mlp.up_proj, state.mlp_up, 1, stream);
+    // SiLU activation: mlp_gate = silu(mlp_gate) * mlp_up
+    silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
+             MC::INTERMEDIATE_SIZE, stream);
 
-    // SiLU(gate) * up → mlp_gate (reuse buffer)
-    silu_inplace(state.mlp_gate, MC::INTERMEDIATE_SIZE, stream);
-    elementwise_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
-                    MC::INTERMEDIATE_SIZE, stream);
+    // Down projection with fused residual add
+    if (residual) {
+        gptq_gemv_add(state.mlp_gate, mlp.down_proj,
+                      residual, residual, stream);
+    } else {
+        gptq_gemv(state.mlp_gate, mlp.down_proj,
+                  state.mlp_down, stream);
+    }
+}
 
-    // down_proj: mlp_gate[17408] → mlp_down[5120]
-    gptq_linear(state.mlp_gate, mlp.down_proj, state.mlp_down, 1, stream);
+// ============================================================================
+// GQA Decode Attention — fused QK^T + softmax + V@scores
+//
+// Replaces per-KV-head cuBLAS calls (21ms overhead for tiny matrices) with a
+// single kernel launch. Grid = num_attn_heads (24), Block = head_dim (256).
+//
+// Each block handles one query head:
+//   1. QK^T: score[t] = Q[h]·K[kv_h][t] / sqrt(d) — dimension-parallel dot product
+//   2. Softmax over scores[0..seq_len-1]
+//   3. V@scores: out[d] = sum_t score[t] * V[kv_h][t][d]
+//
+// Shared memory: 8 floats (warp reduction) + seq_len_kv floats (scores)
+// ============================================================================
+
+// ============================================================================
+// GQA Decode Attention — Flash-Decoding style with online softmax
+//
+// Inspired by Flash Attention v2 and FlashInfer's decode attention:
+// - Online softmax: no score materialization, O(1) shared memory
+// - Per-position processing: QK^T → online softmax update → V accumulation
+// - Single pass: K and V loaded once per position (cache-friendly)
+//
+// Versus the previous implementation:
+// - No O(seq_len) shared memory allocation for scores
+// - No single-threaded softmax bottleneck
+// - No separate V@scores pass
+//
+// Grid = num_attn_heads (24), Block = head_dim (256)
+// Shared memory: 36 bytes (8 warp sums + 1 broadcast) — constant
+// ============================================================================
+
+__global__ void gqa_decode_attention_kernel(
+    const __half* __restrict__ Q,           // [num_attn_heads, head_dim]
+    const __half* __restrict__ k_cache,     // [num_kv_heads, max_kv_len, head_dim]
+    const __half* __restrict__ v_cache,     // [num_kv_heads, max_kv_len, head_dim]
+    __half* __restrict__ out,               // [num_attn_heads, head_dim]
+    const int* __restrict__ d_pos,          // device pointer to current position
+    int max_kv_len, int head_dim, int num_kv_groups,
+    float scale)
+{
+    const int h = blockIdx.x;                     // query head index
+    const int kv_h = h / num_kv_groups;           // KV head index (GQA)
+    const int d = threadIdx.x;                    // dimension index
+
+    const int seq_len_kv = *d_pos + 1;           // read from device memory
+
+    // Static shared memory for cross-warp dot product reduction
+    __shared__ float warp_sums[8];    // 8 warps for 256 threads
+    __shared__ float s_broadcast;     // broadcast score to all threads
+
+    const __half* q = Q + h * head_dim;
+    const __half* k = k_cache + (size_t)kv_h * max_kv_len * head_dim;
+    const __half* v = v_cache + (size_t)kv_h * max_kv_len * head_dim;
+
+    const float q_val = (d < head_dim) ? __half2float(q[d]) : 0.0f;
+    const int warp_id = d / 32;
+    const int lane    = d % 32;
+    const int num_warps = (head_dim + 31) / 32;
+
+    // Online softmax accumulators (Flash Attention v2 style)
+    // m: running max of scores, l: running sum of exp(score - m)
+    // o: unnormalized output accumulator (normalized at end)
+    float m_running = -FLT_MAX;
+    float l_running = 0.0f;
+    float o_val = 0.0f;
+
+    for (int t = 0; t < seq_len_kv; t++) {
+        // QK^T: dot product via warp + cross-warp reduction
+        float k_val = (d < head_dim) ? __half2float(k[t * head_dim + d]) : 0.0f;
+        float qk = q_val * k_val;
+
+        #pragma unroll
+        for (int off = 16; off > 0; off /= 2)
+            qk += __shfl_xor_sync(0xFFFFFFFF, qk, off);
+
+        if (lane == 0) warp_sums[warp_id] = qk;
+        __syncthreads();
+
+        if (d == 0) {
+            float sum = 0;
+            for (int w = 0; w < num_warps; w++) sum += warp_sums[w];
+            s_broadcast = sum * scale;
+        }
+        __syncthreads();
+
+        float s_t = s_broadcast;
+
+        // Online softmax update
+        float m_new = fmaxf(m_running, s_t);
+        float alpha = expf(m_running - m_new);   // rescale old accumulators
+        float p_t   = expf(s_t - m_new);          // unnormalized weight for this position
+
+        // Accumulate (normalize once at the end)
+        float v_val = (d < head_dim) ? __half2float(v[t * head_dim + d]) : 0.0f;
+        o_val     = o_val * alpha + v_val * p_t;
+        l_running = l_running * alpha + p_t;
+        m_running = m_new;
+    }
+
+    // Final normalization
+    if (d < head_dim && l_running > 0.0f) {
+        out[h * head_dim + d] = __float2half(o_val / l_running);
+    }
+}
+
+// ============================================================================
+// Full Attention helper kernels
+// ============================================================================
+
+// Convert FP32 scores to FP16 in-place (overwrite into a separate FP16 buffer)
+__global__ void f32_to_f16_kernel(const float* __restrict__ src,
+                                  __half* __restrict__ dst, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __float2half(src[i]);
+}
+
+// Deinterleave q_proj output: [Q_h0(256), Gate_h0(256), Q_h1(256), Gate_h1(256), ...]
+//   → separate Q[num_heads, head_dim] and Gate[num_heads, head_dim]
+// blockIdx.x = head index, threadIdx.x iterates over head_dim
+__global__ void split_q_gate_kernel(const __half* __restrict__ qg,
+                                    __half* __restrict__ q,
+                                    __half* __restrict__ gate,
+                                    int num_heads, int head_dim) {
+    int h = blockIdx.x;
+    if (h >= num_heads) return;
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        q[h * head_dim + d]    = qg[h * head_dim * 2 + d];
+        gate[h * head_dim + d] = qg[h * head_dim * 2 + head_dim + d];
+    }
+}
+
+// Copy K and V into cache for all heads in one kernel
+// src_k[num_kv_heads, head_dim], src_v[num_kv_heads, head_dim]
+// k_cache[num_kv_heads, max_kv_len, head_dim]
+// v_cache[num_kv_heads, max_kv_len, head_dim]
+// d_pos: device pointer to current position
+__global__ void kv_cache_write_kernel(const __half* __restrict__ src_k,
+                                      const __half* __restrict__ src_v,
+                                      __half* __restrict__ k_cache,
+                                      __half* __restrict__ v_cache,
+                                      const int* __restrict__ d_pos,
+                                      int max_kv_len, int head_dim,
+                                      int num_kv_heads) {
+    // blockIdx.x = head, threadIdx.x iterates over head_dim
+    int h = blockIdx.x;
+    if (h >= num_kv_heads) return;
+    int pos = *d_pos;
+    size_t cache_offset = (size_t)h * max_kv_len * head_dim + (size_t)pos * head_dim;
+    size_t src_offset = (size_t)h * head_dim;
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        k_cache[cache_offset + d] = src_k[src_offset + d];
+        v_cache[cache_offset + d] = src_v[src_offset + d];
+    }
 }
 
 // ============================================================================
@@ -64,227 +224,82 @@ void mlp_forward(const __half* x, const MLPWeights& mlp,
 void full_attention_forward(const __half* x, const FullAttentionWeights& attn,
                             __half* kv_cache, int layer_idx,
                             int pos, int max_kv_len,
-                            InferenceState& state, cudaStream_t stream) {
+                            InferenceState& state, cudaStream_t stream,
+                            bool trace) {
     using MC = ModelConfig;
 
-    // 1. Q projection — q_proj outputs [12288] = Q[6144] + gate[6144]
-    linear_forward(x, attn.q_proj, state.q_buf, 1, stream);
+    cudaEvent_t t0, t1;
+    if (trace) { cudaEventCreate(&t0); cudaEventCreate(&t1); }
+    auto mark = [&](const char* label) {
+        if (!trace) return;
+        cudaEventRecord(t1, stream);
+        cudaStreamSynchronize(stream);
+        float ms; cudaEventElapsedTime(&ms, t0, t1);
+        printf("    [FA] %-28s %7.2f ms\n", label, ms);
+        cudaEventRecord(t0, stream);
+    };
+    if (trace) cudaEventRecord(t0, stream);
 
-    // Split: first half is Q, second half is gate
-    // q_buf[0..6143] = Q (24 heads * 256 dim)
-    // q_buf[6144..12287] = gate (24 heads * 256 dim)
-    __half* q_ptr    = state.q_buf;                     // [24, 256]
-    __half* gate_ptr = state.q_buf + MC::ATTN_OUT_DIM;  // [24, 256]
+    // 1. Q projection — q_proj outputs [12288] = interleaved [Q_h0(256), Gate_h0(256), ...]
+    int8_linear_forward(x, attn.q_proj, state.q_buf, 1, stream);
+    mark("q_proj");
 
-    // 2. K, V projections
-    linear_forward(x, attn.k_proj, state.kv_buf, 1, stream);
-    // Need V in a separate buffer — reuse dn_z (not used in full attention layers)
-    __half* v_buf = state.dn_z;  // [kv_proj_dim=1024]
-    linear_forward(x, attn.v_proj, v_buf, 1, stream);
+    // Deinterleave Q and Gate into separate contiguous buffers
+    // Q → dn_qkv[6144] (reuse DeltaNet buffer, not used during full attention)
+    // Gate → mlp_gate[6144] (reuse MLP buffer, not used until after attention)
+    __half* q_ptr    = state.dn_qkv;   // [24, 256] contiguous Q
+    __half* gate_ptr = state.mlp_gate;  // [24, 256] contiguous Gate
+    split_q_gate_kernel<<<MC::NUM_ATTN_HEADS, 256, 0, stream>>>(
+        state.q_buf, q_ptr, gate_ptr, MC::NUM_ATTN_HEADS, MC::HEAD_DIM);
+
+    // 2. K, V projections (fused dual INT8 GEMV — shared SMEM x)
+    int8_dual_linear_forward(x, attn.k_proj, state.kv_buf,
+                                attn.v_proj, state.dn_z, 1, stream);
+    __half* v_buf = state.dn_z;  // [kv_proj_dim=1024], reuse (not used in full attn)
+    mark("k_proj+v_proj+deinterleave");
 
     // 3. Per-head Q/K RMSNorm
     head_norm(q_ptr, attn.q_norm, q_ptr,
               MC::NUM_ATTN_HEADS, MC::HEAD_DIM, MC::RMS_EPS, stream);
     head_norm(state.kv_buf, attn.k_norm, state.kv_buf,
               MC::NUM_KV_HEADS, MC::HEAD_DIM, MC::RMS_EPS, stream);
+    mark("head_norm");
 
-    // 4. Partial RoPE on Q and K
+    // 4. Partial RoPE on Q and K (reads pos from state.d_pos)
     apply_rope(q_ptr, state.kv_buf,
                MC::NUM_ATTN_HEADS, MC::NUM_KV_HEADS, MC::HEAD_DIM,
-               MC::ROTARY_DIM, pos, MC::ROPE_THETA, stream);
+               MC::ROTARY_DIM, state.d_pos, MC::ROPE_THETA, stream);
+    mark("rope");
 
-    // 5. Append K,V to cache
-    // K cache: [num_kv_heads, max_kv_len, head_dim]
-    // V cache: offset by num_kv_heads * max_kv_len * head_dim
+    // 5. Append K,V to cache via single kernel (reads pos from state.d_pos)
     size_t kv_plane = (size_t)MC::NUM_KV_HEADS * max_kv_len * MC::HEAD_DIM;
     __half* k_cache = kv_cache + (size_t)layer_idx * 2 * kv_plane;
-    __half* v_cache = k_cache + kv_plane;
+    __half* v_cache_ptr = k_cache + kv_plane;
 
-    // Copy current K into cache at position pos
-    // K: [4, 256] → K_cache[h, pos, :] for each head h
-    for (int h = 0; h < MC::NUM_KV_HEADS; h++) {
-        cudaMemcpyAsync(
-            k_cache + (size_t)h * max_kv_len * MC::HEAD_DIM + (size_t)pos * MC::HEAD_DIM,
-            state.kv_buf + h * MC::HEAD_DIM,
-            MC::HEAD_DIM * sizeof(__half),
-            cudaMemcpyDeviceToDevice, stream);
-        cudaMemcpyAsync(
-            v_cache + (size_t)h * max_kv_len * MC::HEAD_DIM + (size_t)pos * MC::HEAD_DIM,
-            v_buf + h * MC::HEAD_DIM,
-            MC::HEAD_DIM * sizeof(__half),
-            cudaMemcpyDeviceToDevice, stream);
-    }
+    kv_cache_write_kernel<<<MC::NUM_KV_HEADS, 256, 0, stream>>>(
+        state.kv_buf, v_buf, k_cache, v_cache_ptr,
+        state.d_pos, max_kv_len, MC::HEAD_DIM, MC::NUM_KV_HEADS);
+    mark("kv_cache_write");
 
-    // 6. GQA attention: Q[24,256] @ K[4, pos+1, 256]^T → scores → softmax → V
-    // Use cuBLAS for the matmuls. Each Q head attends to its KV group.
-    // For single-token decode, this is essentially 24 dot products per cached token.
-    // We compute this head-by-head on CPU to keep it simple for the skeleton.
+    // 6. Flash-decoding style GQA attention: online softmax + V accumulation
+    // No dynamic shared memory needed (uses static __shared__ for constant-size buffers)
+    float scale = 1.0f / sqrtf((float)MC::HEAD_DIM);
 
-    cublasHandle_t handle = get_cublas_handle();
-    cublasSetStream(handle, stream);
-
-    int seq_len_kv = pos + 1;  // total cached tokens including current
-
-    // Allocate temporary score buffer on device: [num_attn_heads, seq_len_kv] in FP32
-    float* scores = nullptr;
-    cudaMalloc(&scores, (size_t)MC::NUM_ATTN_HEADS * seq_len_kv * sizeof(float));
-
-    // For each Q head group, compute Q @ K^T
-    // GQA: heads 0-5 use KV head 0, heads 6-11 use KV head 1, etc.
-    float alpha = 1.0f / sqrtf((float)MC::HEAD_DIM);
-    float beta_zero = 0.0f;
-
-    for (int kv_h = 0; kv_h < MC::NUM_KV_HEADS; kv_h++) {
-        int q_start = kv_h * MC::NUM_KV_GROUPS;
-        int num_q = MC::NUM_KV_GROUPS;  // 6 Q heads per KV head
-
-        // Q_group: [num_q, head_dim] — these are contiguous in q_ptr
-        // K_head:  [seq_len_kv, head_dim] — K_cache[kv_h, :pos+1, :]
-        // scores_group: [num_q, seq_len_kv]
-
-        const __half* Q_group = q_ptr + q_start * MC::HEAD_DIM;
-        const __half* K_head  = k_cache + (size_t)kv_h * max_kv_len * MC::HEAD_DIM;
-        float* scores_group   = scores + q_start * seq_len_kv;
-
-        // S = Q @ K^T → [num_q, seq_len_kv]
-        // In cuBLAS col-major: S^T = K @ Q^T
-        //   K: [seq_len_kv, head_dim] row-major → col-major [head_dim, seq_len_kv]
-        //   Q: [num_q, head_dim] row-major → col-major [head_dim, num_q]
-        // cublasSgemm: C = alpha * A * B + beta * C
-        //   where A = K^T (trans), B = Q (no trans)... this gets confusing.
-        // Let's use GemmEx with FP16 input and FP32 output.
-
-        // Actually, cublasGemmEx: C[M,N] = alpha * op(A)[M,K] * op(B)[K,N] + beta * C
-        // We want: scores_group[seq_len_kv, num_q] (col-major of [num_q, seq_len_kv] row-major)
-        // = alpha * K[seq_len_kv, head_dim] * Q^T[head_dim, num_q]
-        // So: M=seq_len_kv, N=num_q, K=head_dim
-        // A=K (no trans), ld=head_dim... but wait, K is stored as [max_kv_len, head_dim]
-        // and we only want first seq_len_kv rows. In col-major, K is [head_dim, max_kv_len].
-        // We want CUBLAS_OP_T on K to get [seq_len_kv, head_dim] from [head_dim, seq_len_kv].
-        // Actually no. Let me think more carefully.
-
-        // K_head row-major: [max_kv_len, head_dim], padded rows, using first seq_len_kv rows
-        // In col-major interpretation: it's [head_dim, max_kv_len] with ld=head_dim
-        // Actually col-major means we read column by column. A row-major [M,N] matrix
-        // stored linearly is the same as col-major [N,M] with ld=N.
-
-        // K_head row-major [seq_len_kv, head_dim]:
-        //   col-major interpretation: [head_dim, seq_len_kv], ld=head_dim
-        //   but actual storage stride between columns is head_dim (correct if contiguous)
-        //   Wait, it's actually stored with stride max_kv_len*head_dim between heads,
-        //   but within each head, rows are stride head_dim.
-        //   So K_head[i,j] = K_head + i*head_dim + j → col-major [head_dim, seq_len_kv], ld=head_dim? No.
-        //   K_head[row, col] at address K_head + row * head_dim + col.
-        //   In column-major, this is matrix [head_dim, seq_len_kv] with ld=head_dim.
-        //   Wait: for col-major, element (i,j) = base + j * ld + i.
-        //   So if we say this is col-major [head_dim, max_kv_len], then element (i,j) = base + j*head_dim + i.
-        //   That means physical(row=r, col=c) = base + r*head_dim + c matches (i=c, j=r).
-        //   So row-major [rows, cols] = col-major [cols, rows] with ld=cols.
-
-        // K: row-major [seq_kv, hd] = col-major [hd, seq_kv], ld=hd
-        //    But the actual stride may be max_kv_len * hd per head... no, within one head,
-        //    K is contiguous [max_kv_len, hd]. We only use first seq_kv rows.
-        //    Col-major: [hd, max_kv_len], ld=hd, but we only read N=seq_kv columns.
-        //    Stride between column j and j+1 = hd. Wait but max_kv_len rows...
-        //    Row-major stride between rows = hd. Col-major ld = hd for [hd, max_kv_len].
-        //    Hmm, ld = hd is the stride between columns. Each column has hd elements.
-        //    This works because row-major [max_kv_len, hd] is contiguous.
-
-        // Q_group: row-major [num_q, hd] = col-major [hd, num_q], ld=hd
-
-        // We want: scores = Q @ K^T → [num_q, seq_kv]
-        // col-major scores: [seq_kv, num_q], ld=seq_kv
-
-        // scores^T = K @ Q^T
-        // In cuBLAS: C = alpha * A * B + beta * C
-        // C = scores: col-major [seq_kv, num_q], M=seq_kv, N=num_q
-        // A = K: we have col-major [hd, seq_kv]. We need A to be [seq_kv, hd] → op=CUBLAS_OP_T on [hd, seq_kv] → gives [seq_kv, hd]. K=hd. ld_A = hd.
-        //   Wait, op(A) must be [M,K] = [seq_kv, hd]. A is stored col-major [hd, seq_kv], ld=hd.
-        //   CUBLAS_OP_T gives A^T = [seq_kv, hd]. Yes!
-        // B = Q: we need op(B) = [hd, num_q]. B is col-major [hd, num_q], ld=hd.
-        //   CUBLAS_OP_N gives [hd, num_q]. Yes!
-
-        // cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, seq_kv, num_q, hd,
-        //              &alpha, K_head, CUDA_R_16F, hd, Q_group, CUDA_R_16F, hd,
-        //              &beta, scores_group, CUDA_R_32F, seq_kv, CUDA_R_32F, ...)
-
-        cublasGemmEx(handle,
-                     CUBLAS_OP_T,     // A^T: K^T
-                     CUBLAS_OP_N,     // B: Q
-                     seq_len_kv, num_q, MC::HEAD_DIM,
-                     &alpha,
-                     K_head,      CUDA_R_16F, MC::HEAD_DIM,  // A = K col-major [hd, max_kv], ld=hd
-                     Q_group,     CUDA_R_16F, MC::HEAD_DIM,  // B = Q col-major [hd, num_q], ld=hd
-                     &beta_zero,
-                     scores_group, CUDA_R_32F, seq_len_kv,   // C = [seq_kv, num_q], ld=seq_kv
-                     CUDA_R_32F,
-                     CUBLAS_GEMM_DEFAULT_TENSOR_OP);
-    }
-
-    // Softmax on scores: [num_attn_heads, seq_len_kv]
-    softmax(scores, scores, MC::NUM_ATTN_HEADS, seq_len_kv, stream);
-
-    // Attention output: attn_out[h, :] = scores[h, :] @ V_cache[kv_h(h), :seq_kv, :]
-    // attn_out: [num_attn_heads, head_dim] = [24, 256]
-
-    for (int kv_h = 0; kv_h < MC::NUM_KV_HEADS; kv_h++) {
-        int q_start = kv_h * MC::NUM_KV_GROUPS;
-        int num_q = MC::NUM_KV_GROUPS;
-
-        const float* scores_group = scores + q_start * seq_len_kv;
-        const __half* V_head = v_cache + (size_t)kv_h * max_kv_len * MC::HEAD_DIM;
-        __half* out_group = state.attn_out + q_start * MC::HEAD_DIM;
-
-        __half* scores_h16 = nullptr;
-        cudaMalloc(&scores_h16, (size_t)num_q * seq_len_kv * sizeof(__half));        {
-            size_t n = (size_t)num_q * seq_len_kv;
-            std::vector<float> h_f32(n);
-            std::vector<uint16_t> h_f16(n);
-            cudaMemcpy(h_f32.data(), scores_group, n * sizeof(float),
-                       cudaMemcpyDeviceToHost);
-            for (size_t i = 0; i < n; i++) {
-                __half h = __float2half(h_f32[i]);
-                memcpy(&h_f16[i], &h, sizeof(uint16_t));
-            }
-            cudaMemcpy(scores_h16, h_f16.data(), n * sizeof(__half),
-                       cudaMemcpyHostToDevice);
-        }
-
-        __half alpha_h = __float2half(1.0f);
-        __half beta_h  = __float2half(0.0f);
-
-        // C[hd, num_q] = V[hd, seq_kv] * scores[seq_kv, num_q]
-        cublasGemmEx(handle,
-                     CUBLAS_OP_N,     // V: col-major [hd, max_kv], no trans
-                     CUBLAS_OP_N,     // scores: col-major [seq_kv, num_q]
-                     MC::HEAD_DIM, num_q, seq_len_kv,
-                     &alpha_h,
-                     V_head,      CUDA_R_16F, MC::HEAD_DIM,
-                     scores_h16,  CUDA_R_16F, seq_len_kv,
-                     &beta_h,
-                     out_group,   CUDA_R_16F, MC::HEAD_DIM,
-                     CUDA_R_16F,
-                     CUBLAS_GEMM_DEFAULT_TENSOR_OP);
-
-        cudaFree(scores_h16);
-    }
-
-    cudaFree(scores);
+    gqa_decode_attention_kernel<<<MC::NUM_ATTN_HEADS, MC::HEAD_DIM, 0, stream>>>(
+        q_ptr, k_cache, v_cache_ptr, state.attn_out,
+        state.d_pos, max_kv_len, MC::HEAD_DIM, MC::NUM_KV_GROUPS, scale);
+    mark("fused QK+softmax+V@s");
 
     // 7. Attention gate: attn_out = attn_out * sigmoid(gate)
     sigmoid_gate(state.attn_out, gate_ptr, state.attn_out,
                  MC::ATTN_OUT_DIM, stream);
+    mark("sigmoid_gate");
 
-    // 8. o_proj: attn_out[6144] → hidden[5120]
-    // Store in attn_out temporarily, actual output goes to mlp_down for reuse
-    // Actually, write to attn_out buffer. The caller handles residual add.
-    // But attn_out is [6144] and o_proj output is [5120]... use a separate buf.
-    // Let's write o_proj output to norm_out (reusable scratch).
-    linear_forward(state.attn_out, attn.o_proj, state.norm_out, 1, stream);
+    // 8. o_proj: attn_out[6144] → norm_out[5120] (INT8 quantized)
+    int8_linear_forward(state.attn_out, attn.o_proj, state.norm_out, 1, stream);
+    mark("o_proj");
 
-    // Copy o_proj result to attn_out head area (actually, the orchestrator will
-    // read from norm_out for the residual add). We'll use a convention:
-    // After full_attention_forward, the attention output is in state.norm_out[0..5119].
+    if (trace) { cudaEventDestroy(t0); cudaEventDestroy(t1); }
 }
 
 // ============================================================================
@@ -300,8 +315,23 @@ __global__ void l2norm_kernel(__half* __restrict__ x, int head_dim, float eps) {
         float v = __half2float(h[i]);
         sum_sq += v * v;
     }
+
+    // Warp-level reduction
     for (int offset = 16; offset > 0; offset >>= 1)
         sum_sq += __shfl_down_sync(0xFFFFFFFF, sum_sq, offset);
+
+    // Cross-warp reduction via shared memory
+    __shared__ float warp_sums[4];  // max 128 threads = 4 warps
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+    if (lane_id == 0) warp_sums[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        sum_sq = (lane_id < (blockDim.x / 32)) ? warp_sums[lane_id] : 0.0f;
+        for (int offset = 16; offset > 0; offset >>= 1)
+            sum_sq += __shfl_down_sync(0xFFFFFFFF, sum_sq, offset);
+    }
 
     __shared__ float s_inv;
     if (threadIdx.x == 0)
@@ -310,6 +340,43 @@ __global__ void l2norm_kernel(__half* __restrict__ x, int head_dim, float eps) {
 
     for (int i = threadIdx.x; i < head_dim; i += blockDim.x)
         h[i] = __float2half(__half2float(h[i]) * s_inv);
+}
+
+// L2 normalize + scale: x[i] = x[i] / ||x|| * scale
+// Fused version that eliminates a separate scale_fp16 kernel launch.
+__global__ void l2norm_scaled_kernel(__half* __restrict__ x, int head_dim,
+                                     float eps, float scale) {
+    int head = blockIdx.x;
+    __half* h = x + head * head_dim;
+
+    float sum_sq = 0.0f;
+    for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        float v = __half2float(h[i]);
+        sum_sq += v * v;
+    }
+
+    for (int offset = 16; offset > 0; offset >>= 1)
+        sum_sq += __shfl_down_sync(0xFFFFFFFF, sum_sq, offset);
+
+    __shared__ float warp_sums[4];
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+    if (lane_id == 0) warp_sums[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        sum_sq = (lane_id < (blockDim.x / 32)) ? warp_sums[lane_id] : 0.0f;
+        for (int offset = 16; offset > 0; offset >>= 1)
+            sum_sq += __shfl_down_sync(0xFFFFFFFF, sum_sq, offset);
+    }
+
+    __shared__ float s_inv_scaled;
+    if (threadIdx.x == 0)
+        s_inv_scaled = rsqrtf(sum_sq + eps) * scale;
+    __syncthreads();
+
+    for (int i = threadIdx.x; i < head_dim; i += blockDim.x)
+        h[i] = __float2half(__half2float(h[i]) * s_inv_scaled);
 }
 
 // ============================================================================
@@ -353,10 +420,9 @@ __global__ void deltanet_recurrent_kernel(
     __half* out_h = out + head * v_dim;
 
     // Load k_h and v_h into shared memory
-    extern __shared__ float smem[];     // [k_dim + v_dim + v_dim]
+    extern __shared__ float smem[];     // [k_dim + v_dim]
     float* sk = smem;                   // [k_dim]
     float* sv = sk + k_dim;             // [v_dim]
-    float* s_kv_mem = sv + v_dim;       // [v_dim]
 
     for (int i = tid; i < k_dim; i += blockDim.x)
         sk[i] = __half2float(k_h[i]);
@@ -374,30 +440,247 @@ __global__ void deltanet_recurrent_kernel(
     // Then S[i,j] = S[i,j] * g + k[i] * delta[j] for all i
     // Then out[j] = sum_i(S[i,j] * q[i])
 
+    // Optimized: eliminate s_kv_mem shared memory and unnecessary __syncthreads.
+    // kv_mem[j] is computed per-thread (no cross-thread dependency on it).
+    // The update and output are fused into a single pass over the state,
+    // eliminating one full re-read of S from global/L2.
+
     for (int j = tid; j < v_dim; j += blockDim.x) {
-        // Compute kv_mem[j]
+        float v_j = sv[j];
+
+        // Pass 1+2 fused: decay, kv_mem, delta, update, output in one pass
         float mem = 0.0f;
         for (int i = 0; i < k_dim; i++) {
-            float s_ij = S[i * v_dim + j];
-            s_ij *= g_scalar;  // decay in-place
-            S[i * v_dim + j] = s_ij;
+            float s_ij = S[i * v_dim + j] * g_scalar;  // decay
             mem += s_ij * sk[i];
+            S[i * v_dim + j] = s_ij;  // write decayed state
         }
-        s_kv_mem[j] = mem;
-    }
-    __syncthreads();
 
-    // Compute delta and update state, then output
-    for (int j = tid; j < v_dim; j += blockDim.x) {
-        float delta = (sv[j] - s_kv_mem[j]) * beta_scalar;
+        float delta = (v_j - mem) * beta_scalar;
 
         float out_j = 0.0f;
         for (int i = 0; i < k_dim; i++) {
-            float update = sk[i] * delta;
-            S[i * v_dim + j] += update;
+            S[i * v_dim + j] += sk[i] * delta;
             out_j += S[i * v_dim + j] * __half2float(q_h[i]);
         }
         out_h[j] = __float2half(out_j);
+    }
+}
+
+// ============================================================================
+// Batched conv1d: one kernel processes all M tokens per channel
+// Each thread handles one channel across all tokens (sequential state update).
+// Eliminates M-1 kernel launches vs per-token conv1d.
+// ============================================================================
+__global__ void conv1d_batch_silu_kernel(
+    __half* __restrict__ qkv,           // [M, conv_dim] in/out (in-place)
+    __half* __restrict__ conv_state,    // [conv_dim, kernel-1]
+    const __half* __restrict__ conv_weight, // [conv_dim, kernel]
+    int M, int conv_dim, int kernel_size)
+{
+    int ch = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ch >= conv_dim) return;
+
+    const int km1 = kernel_size - 1;
+
+    // Load conv state and weights into registers
+    float st[3], wt[4];
+    #pragma unroll
+    for (int j = 0; j < 3; j++)
+        st[j] = __half2float(conv_state[ch * km1 + j]);
+    #pragma unroll
+    for (int j = 0; j < 4; j++)
+        wt[j] = __half2float(conv_weight[ch * kernel_size + j]);
+
+    // Process all M tokens sequentially for this channel
+    for (int t = 0; t < M; t++) {
+        float x_val = __half2float(qkv[t * conv_dim + ch]);
+        float acc = st[0]*wt[0] + st[1]*wt[1] + st[2]*wt[2] + x_val*wt[3];
+        float silu_out = acc / (1.0f + __expf(-acc));
+        qkv[t * conv_dim + ch] = __float2half(silu_out);
+        st[0] = st[1]; st[1] = st[2]; st[2] = x_val;
+    }
+
+    // Save final conv state
+    conv_state[ch * km1 + 0] = __float2half(st[0]);
+    conv_state[ch * km1 + 1] = __float2half(st[1]);
+    conv_state[ch * km1 + 2] = __float2half(st[2]);
+}
+
+// ============================================================================
+// Fused DeltaNet head kernel: processes all M tokens for one head
+// Fuses: repeat_interleave + compute_g_beta + l2norm_q + l2norm_k + recurrent
+// Grid: num_v_heads (48), Block: 128 threads
+// Register-cached state: S[128] floats per thread → eliminates ~132MB global
+// memory traffic across all heads × tokens. Only load once / store once.
+// ============================================================================
+__global__ void __launch_bounds__(128, 2)
+deltanet_fused_head_kernel(
+    const __half* __restrict__ qkv_batch,   // [M, conv_dim=10240] post-conv1d
+    const __half* __restrict__ a_batch,     // [M, num_v_heads=48]
+    const __half* __restrict__ b_batch,     // [M, num_v_heads=48]
+    const float* __restrict__ A_log,        // [48]
+    const __half* __restrict__ dt_bias,     // [48]
+    float* __restrict__ dn_state,           // [48, 128, 128] recurrent state
+    __half* __restrict__ output,            // [M, value_dim=6144]
+    int M, int num_k_heads, int num_v_heads,
+    int k_dim, int v_dim, int key_dim, int conv_dim, float eps)
+{
+    const int head = blockIdx.x;           // 0..47 (value head)
+    const int tid = threadIdx.x;           // 0..127
+    const int src_head = head / (num_v_heads / num_k_heads);  // Q/K source head
+    const float q_scale = rsqrtf((float)k_dim);  // 1/sqrt(128)
+
+    // Pre-load A_log and dt_bias for this head
+    const float a_log_h = A_log[head];
+    const float dt_bias_h = __half2float(dt_bias[head]);
+
+    // State pointer for this head: S[128][128], thread tid owns column tid
+    float* S = dn_state + (size_t)head * 128 * 128;
+
+    // Shared memory: [128] for q + [128] for k + [4] for warp reduction
+    extern __shared__ float smem[];
+    float* sq = smem;              // [128]
+    float* sk = sq + 128;          // [128]
+    float* warp_sums = sk + 128;   // [4]
+
+    const int warp_id = tid / 32;
+    const int lane_id = tid % 32;
+
+    // === Load entire state column into registers (one-time global read) ===
+    float S_col[128];
+    #pragma unroll
+    for (int i = 0; i < 128; i++)
+        S_col[i] = S[i * 128 + tid];
+
+    for (int t = 0; t < M; t++) {
+        // Pointers to this token's projected data
+        const __half* qkv_t = qkv_batch + t * conv_dim;
+        const __half* q_src = qkv_t + src_head * k_dim;
+        const __half* k_src = qkv_t + key_dim + src_head * k_dim;
+        const __half* v_src = qkv_t + 2 * key_dim + head * v_dim;
+
+        // === L2 normalize Q (with scale) ===
+        float q_val = __half2float(q_src[tid]);
+        float q_sq = q_val * q_val;
+        for (int offset = 16; offset > 0; offset >>= 1)
+            q_sq += __shfl_down_sync(0xFFFFFFFF, q_sq, offset);
+        if (lane_id == 0) warp_sums[warp_id] = q_sq;
+        __syncthreads();
+        if (warp_id == 0) {
+            q_sq = (lane_id < 4) ? warp_sums[lane_id] : 0.0f;
+            for (int offset = 16; offset > 0; offset >>= 1)
+                q_sq += __shfl_down_sync(0xFFFFFFFF, q_sq, offset);
+        }
+        if (tid == 0) warp_sums[0] = rsqrtf(q_sq + eps) * q_scale;
+        __syncthreads();
+        sq[tid] = q_val * warp_sums[0];
+
+        // === L2 normalize K ===
+        float k_val = __half2float(k_src[tid]);
+        float k_sq = k_val * k_val;
+        for (int offset = 16; offset > 0; offset >>= 1)
+            k_sq += __shfl_down_sync(0xFFFFFFFF, k_sq, offset);
+        if (lane_id == 0) warp_sums[warp_id] = k_sq;
+        __syncthreads();
+        if (warp_id == 0) {
+            k_sq = (lane_id < 4) ? warp_sums[lane_id] : 0.0f;
+            for (int offset = 16; offset > 0; offset >>= 1)
+                k_sq += __shfl_down_sync(0xFFFFFFFF, k_sq, offset);
+        }
+        if (tid == 0) warp_sums[0] = rsqrtf(k_sq + eps);
+        __syncthreads();
+        sk[tid] = k_val * warp_sums[0];
+
+        // === Compute g and beta for this head + token ===
+        float a_val = __half2float(a_batch[t * num_v_heads + head]);
+        float b_val = __half2float(b_batch[t * num_v_heads + head]);
+        // g = exp(-exp(A_log) * softplus(a + dt_bias))
+        float g_scalar = __expf(-__expf(a_log_h) * logf(1.0f + __expf(a_val + dt_bias_h)));
+        float beta_scalar = 1.0f / (1.0f + __expf(-b_val));
+
+        // === Load V into register ===
+        float v_j = __half2float(v_src[tid]);
+
+        // === Recurrent update (register-cached — zero intermediate global access) ===
+        __syncthreads();  // ensure sk/sq are ready
+
+        // Pass 1: decay + kv_mem dot product (all in registers + SMEM)
+        float mem = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < 128; i++) {
+            S_col[i] *= g_scalar;
+            mem += S_col[i] * sk[i];
+        }
+
+        float delta = (v_j - mem) * beta_scalar;
+
+        // Pass 2: rank-1 update + output dot product (all in registers + SMEM)
+        float out_j = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < 128; i++) {
+            S_col[i] += sk[i] * delta;
+            out_j += S_col[i] * sq[i];
+        }
+
+        output[t * num_v_heads * v_dim + head * v_dim + tid] = __float2half(out_j);
+
+        __syncthreads();  // sync before next token overwrites sq/sk
+    }
+
+    // === Store state column back (one-time global write) ===
+    #pragma unroll
+    for (int i = 0; i < 128; i++)
+        S[i * 128 + tid] = S_col[i];
+}
+
+// ============================================================================
+// DeltaNet forward (single-token decode)
+// ============================================================================
+// DeltaNet helper kernels
+// ============================================================================
+
+// Compute g and beta from a, b, A_log, dt_bias (all per-head scalars)
+// g[h] = -exp(A_log[h]) * softplus(a[h] + dt_bias[h])
+// beta[h] = sigmoid(b[h])
+__global__ void compute_g_beta_kernel(const __half* __restrict__ a,
+                                      const __half* __restrict__ b,
+                                      const float* __restrict__ A_log,
+                                      const __half* __restrict__ dt_bias,
+                                      float* __restrict__ g,
+                                      float* __restrict__ beta,
+                                      int n) {
+    int h = blockIdx.x * blockDim.x + threadIdx.x;
+    if (h >= n) return;
+    float a_val = __half2float(a[h]);
+    float b_val = __half2float(b[h]);
+    float dt_b  = __half2float(dt_bias[h]);
+    float A_val = expf(A_log[h]);
+    float x_ab = a_val + dt_b;
+    float sp = (x_ab > 20.0f) ? x_ab : logf(1.0f + expf(x_ab));
+    g[h] = -A_val * sp;
+    beta[h] = 1.0f / (1.0f + expf(-b_val));
+}
+
+// Scale FP16 array by a scalar: x[i] *= scale
+__global__ void scale_fp16_kernel(__half* __restrict__ x, int n, float scale) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        x[i] = __float2half(__half2float(x[i]) * scale);
+    }
+}
+
+// repeat_interleave: expand [num_k_heads, head_dim] → [num_v_heads, head_dim]
+// Each of num_k_heads gets repeated (num_v_heads/num_k_heads) times.
+__global__ void repeat_interleave_kernel(const __half* __restrict__ src,
+                                         __half* __restrict__ dst,
+                                         int num_k_heads, int head_dim,
+                                         int ratio) {
+    // blockIdx.x = destination head, threadIdx.x = element within head_dim
+    int dst_h = blockIdx.x;
+    int src_h = dst_h / ratio;
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        dst[dst_h * head_dim + d] = src[src_h * head_dim + d];
     }
 }
 
@@ -424,139 +707,62 @@ void deltanet_forward(const __half* x, const DeltaNetWeights& dn,
                       InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // 1. QKV projection
-    linear_forward(x, dn.in_proj_qkv, state.dn_qkv, 1, stream);
+    // 1. QKV projection (INT8 quantized)
+    int8_linear_forward(x, dn.in_proj_qkv, state.dn_qkv, 1, stream);
 
-    // Conv1d step (also applies SiLU)
-    causal_conv1d_step(state.dn_qkv, state.conv_states[dn_layer_idx],
-                       dn.conv1d_weight, state.dn_qkv,
-                       MC::LIN_CONV_DIM, MC::CONV_KERNEL, stream);
+    // Fused Conv1d step + SiLU (eliminates one kernel launch + intermediate R/W)
+    causal_conv1d_step_silu(state.dn_qkv, state.conv_states[dn_layer_idx],
+                            dn.conv1d_weight, state.dn_qkv,
+                            MC::LIN_CONV_DIM, MC::CONV_KERNEL, stream);
 
-    // SiLU on conv output
-    silu_inplace(state.dn_qkv, MC::LIN_CONV_DIM, stream);
-
-    // 2-3. Split qkv: the layout is [KEY_DIM, KEY_DIM, VALUE_DIM] = [2048, 2048, 6144]
-    // query = dn_qkv[0..2047]           → [16, 128]
-    // key   = dn_qkv[2048..4095]        → [16, 128]
-    // value = dn_qkv[4096..10239]       → [48, 128]
+    // 2-3. Split qkv: [KEY_DIM, KEY_DIM, VALUE_DIM] = [2048, 2048, 6144]
     __half* dn_query = state.dn_qkv;                         // [16, 128]
     __half* dn_key   = state.dn_qkv + MC::LIN_KEY_DIM;       // [16, 128]
     __half* dn_value = state.dn_qkv + 2 * MC::LIN_KEY_DIM;   // [48, 128]
 
-    // 4. repeat_interleave: q,k from 16 heads → 48 heads (ratio 3)
-    // We need expanded q,k of size [48, 128]. Use attn_out as temporary.
-    // attn_out is [6144], can hold [48, 128].
-    __half* q_expanded = state.attn_out;           // [48, 128]
-    __half* k_expanded = state.q_buf;              // [48, 128] (reuse q_buf, large enough)
-
-    // Repeat interleave on GPU: each of the 16 heads gets repeated 3 times
-    // Simple approach: cudaMemcpy in a loop
+    // 4. repeat_interleave: q,k from 16 heads → 48 heads (ratio 3) via GPU kernel
+    __half* q_expanded = state.attn_out;  // [48, 128] = [6144]
+    __half* k_expanded = state.q_buf;     // [48, 128] (reuse q_buf, large enough)
     int ratio = MC::LIN_NUM_V_HEADS / MC::LIN_NUM_K_HEADS;  // 3
-    for (int h = 0; h < MC::LIN_NUM_K_HEADS; h++) {
-        for (int r = 0; r < ratio; r++) {
-            int dst_h = h * ratio + r;
-            cudaMemcpyAsync(q_expanded + dst_h * MC::LIN_K_HEAD_DIM,
-                            dn_query + h * MC::LIN_K_HEAD_DIM,
-                            MC::LIN_K_HEAD_DIM * sizeof(__half),
-                            cudaMemcpyDeviceToDevice, stream);
-            cudaMemcpyAsync(k_expanded + dst_h * MC::LIN_K_HEAD_DIM,
-                            dn_key + h * MC::LIN_K_HEAD_DIM,
-                            MC::LIN_K_HEAD_DIM * sizeof(__half),
-                            cudaMemcpyDeviceToDevice, stream);
-        }
-    }
 
-    // 5. Projections for z, a, b
-    linear_forward(x, dn.in_proj_z, state.dn_z, 1, stream);           // → [6144]
-    linear_forward(x, dn.in_proj_a, state.dn_a, 1, stream);           // → [48] FP16
-    linear_forward(x, dn.in_proj_b, state.dn_b, 1, stream);           // → [48] FP16
+    repeat_interleave_kernel<<<MC::LIN_NUM_V_HEADS, 128, 0, stream>>>(
+        dn_query, q_expanded, MC::LIN_NUM_K_HEADS, MC::LIN_K_HEAD_DIM, ratio);
+    repeat_interleave_kernel<<<MC::LIN_NUM_V_HEADS, 128, 0, stream>>>(
+        dn_key, k_expanded, MC::LIN_NUM_K_HEADS, MC::LIN_K_HEAD_DIM, ratio);
 
-    // 6. Compute g and beta on CPU (only 48 values each)
-    // g = -exp(A_log) * softplus(a + dt_bias)
-    // beta = sigmoid(b)
-    float g_host[MC::LIN_NUM_V_HEADS];
-    float beta_host[MC::LIN_NUM_V_HEADS];
-    float A_log_host[MC::LIN_NUM_V_HEADS];
-    __half dt_bias_host_h[MC::LIN_NUM_V_HEADS];
-    __half a_host_h[MC::LIN_NUM_V_HEADS];
-    __half b_host_h[MC::LIN_NUM_V_HEADS];
+    // 5. z projection + fused a+b projection (single kernel, shared SMEM x)
+    int8_linear_forward(x, dn.in_proj_z, state.dn_z, 1, stream);
+    int8_dual_linear_forward(x, dn.in_proj_a, state.dn_a,
+                                dn.in_proj_b, state.dn_b, 1, stream);
 
-    cudaStreamSynchronize(stream);  // Need values on host
+    // 6. Compute g and beta entirely on GPU (pre-allocated buffers)
+    compute_g_beta_kernel<<<1, MC::LIN_NUM_V_HEADS, 0, stream>>>(
+        state.dn_a, state.dn_b, dn.A_log, dn.dt_bias,
+        state.dn_g, state.dn_beta, MC::LIN_NUM_V_HEADS);
 
-    cudaMemcpy(a_host_h, state.dn_a, MC::LIN_NUM_V_HEADS * sizeof(__half),
-               cudaMemcpyDeviceToHost);
-    cudaMemcpy(b_host_h, state.dn_b, MC::LIN_NUM_V_HEADS * sizeof(__half),
-               cudaMemcpyDeviceToHost);
-    cudaMemcpy(A_log_host, dn.A_log, MC::LIN_NUM_V_HEADS * sizeof(float),
-               cudaMemcpyDeviceToHost);
-    cudaMemcpy(dt_bias_host_h, dn.dt_bias, MC::LIN_NUM_V_HEADS * sizeof(__half),
-               cudaMemcpyDeviceToHost);
-
-    for (int h = 0; h < MC::LIN_NUM_V_HEADS; h++) {
-        float a_val = __half2float(a_host_h[h]);
-        float b_val = __half2float(b_host_h[h]);
-        float dt_b  = __half2float(dt_bias_host_h[h]);
-        float A_val = expf(A_log_host[h]);
-
-        float x_ab = a_val + dt_b;
-        float softplus = (x_ab > 20.0f) ? x_ab : logf(1.0f + expf(x_ab));
-        g_host[h] = -A_val * softplus;
-        beta_host[h] = 1.0f / (1.0f + expf(-b_val));
-    }
-
-    // Copy g and beta to device
-    float* g_dev = nullptr;
-    float* beta_dev = nullptr;
-    cudaMalloc(&g_dev, MC::LIN_NUM_V_HEADS * sizeof(float));
-    cudaMalloc(&beta_dev, MC::LIN_NUM_V_HEADS * sizeof(float));
-    cudaMemcpyAsync(g_dev, g_host, MC::LIN_NUM_V_HEADS * sizeof(float),
-                    cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(beta_dev, beta_host, MC::LIN_NUM_V_HEADS * sizeof(float),
-                    cudaMemcpyHostToDevice, stream);
-
-    // 7. L2 normalize q and k (per head)
-    l2norm_kernel<<<MC::LIN_NUM_V_HEADS, 128, 0, stream>>>(
-        q_expanded, MC::LIN_K_HEAD_DIM, 1e-6f);
+    // 7-8. L2 normalize q (with fused 1/sqrt(k_dim) scale) and k (per head)
+    float q_scale = 1.0f / sqrtf((float)MC::LIN_K_HEAD_DIM);
+    l2norm_scaled_kernel<<<MC::LIN_NUM_V_HEADS, 128, 0, stream>>>(
+        q_expanded, MC::LIN_K_HEAD_DIM, 1e-6f, q_scale);
     l2norm_kernel<<<MC::LIN_NUM_V_HEADS, 128, 0, stream>>>(
         k_expanded, MC::LIN_K_HEAD_DIM, 1e-6f);
 
-    // 8. Scale q by 1/sqrt(k_dim) — host roundtrip for 6144 values
-    float scale = 1.0f / sqrtf((float)MC::LIN_K_HEAD_DIM);
-    {
-        size_t n = MC::LIN_NUM_V_HEADS * MC::LIN_K_HEAD_DIM;
-        std::vector<uint16_t> q_host(n);
-        cudaMemcpy(q_host.data(), q_expanded, n * sizeof(__half), cudaMemcpyDeviceToHost);
-        for (size_t i = 0; i < n; i++) {
-            __half h;
-            memcpy(&h, &q_host[i], sizeof(__half));
-            h = __float2half(__half2float(h) * scale);
-            memcpy(&q_host[i], &h, sizeof(__half));
-        }
-        cudaMemcpyAsync(q_expanded, q_host.data(), n * sizeof(__half),
-                        cudaMemcpyHostToDevice, stream);
-    }
-
     // 9. Recurrent step
-    int smem_size = (MC::LIN_K_HEAD_DIM + MC::LIN_V_HEAD_DIM + MC::LIN_V_HEAD_DIM) * sizeof(float);
+    int smem_size = (MC::LIN_K_HEAD_DIM + MC::LIN_V_HEAD_DIM) * sizeof(float);
     deltanet_recurrent_kernel<<<MC::LIN_NUM_V_HEADS, 128, smem_size, stream>>>(
         q_expanded, k_expanded, dn_value,
-        g_dev, beta_dev,
+        state.dn_g, state.dn_beta,
         state.dn_states[dn_layer_idx],
         state.attn_out,  // output [48, 128] = [6144]
         MC::LIN_K_HEAD_DIM, MC::LIN_V_HEAD_DIM);
 
-    cudaFree(g_dev);
-    cudaFree(beta_dev);
-
     // 10. Gated RMSNorm: out[48, 128] with gate z[48, 128]
-    // attn_out holds the output [6144], dn_z holds z [6144]
-    // Reshape conceptually as [48 rows, 128 dim]
     rms_norm_gated(state.attn_out, state.dn_z,
                    dn.norm_weight, state.attn_out,
                    MC::LIN_NUM_V_HEADS, MC::LIN_V_HEAD_DIM, MC::RMS_EPS, stream);
 
-    // 11. out_proj: [6144] → [5120], write to norm_out (same convention as full_attn)
-    linear_forward(state.attn_out, dn.out_proj, state.norm_out, 1, stream);
+    // 11. out_proj: [6144] → [5120], write to norm_out (INT8 quantized)
+    int8_linear_forward(state.attn_out, dn.out_proj, state.norm_out, 1, stream);
 }
 
 // ============================================================================
@@ -569,15 +775,28 @@ void deltanet_forward(const __half* x, const DeltaNetWeights& dn,
 //             after MLP, output is in state.mlp_down[0..hidden-1]
 // ============================================================================
 
-int forward_one_token(const ModelWeights& model,
-                      InferenceState& state,
-                      __half* kv_cache,
-                      int token_id, int pos, int max_kv_len,
-                      cudaStream_t stream) {
+// ============================================================================
+// Graph-capturable forward body
+//
+// Contains ALL GPU operations for a single decode token, with NO host sync.
+// Reads token_id and pos from pinned staging buffers (set by caller before
+// graph launch). This function is called once during graph capture, then
+// the captured graph is replayed for all subsequent tokens.
+//
+// Prerequisite: h_token_pinned and h_pos_pinned are set by the caller.
+// ============================================================================
+
+static void forward_body(const ModelWeights& model,
+                         InferenceState& state,
+                         __half* kv_cache,
+                         int max_kv_len,
+                         cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // Copy token ID to device
-    cudaMemcpyAsync(state.token_ids, &token_id, sizeof(int),
+    // H2D from pinned staging (graph replays read current values from pinned memory)
+    cudaMemcpyAsync(state.token_ids, state.h_token_pinned, sizeof(int),
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(state.d_pos, state.h_pos_pinned, sizeof(int),
                     cudaMemcpyHostToDevice, stream);
 
     // Embedding lookup → hidden[0, 0..5119]
@@ -601,50 +820,835 @@ int forward_one_token(const ModelWeights& model,
         // Attention / DeltaNet
         if (lw.is_full_attention) {
             full_attention_forward(state.norm_out, lw.full_attn,
-                                   kv_cache, layer, pos, max_kv_len,
+                                   kv_cache, layer, 0 /*pos read from d_pos*/, max_kv_len,
                                    state, stream);
-            // Output in state.norm_out
         } else {
             deltanet_forward(state.norm_out, lw.delta_net,
                              dn_layer_idx, state, stream);
             dn_layer_idx++;
-            // Output in state.norm_out
         }
 
-        // Residual connection: residual = residual + attn_output
-        elementwise_add(state.residual, state.norm_out, state.residual,
-                        MC::HIDDEN_SIZE, stream);
+        // Fused: residual += attn_output; norm_out = RMSNorm(residual)
+        residual_rms_norm(state.residual, state.norm_out,
+                          lw.post_attn_layernorm, state.norm_out,
+                          1, MC::HIDDEN_SIZE, MC::RMS_EPS, stream);
 
-        // Post-attention RMSNorm
-        rms_norm(state.residual, lw.post_attn_layernorm, state.norm_out,
-                 1, MC::HIDDEN_SIZE, MC::RMS_EPS, stream);
-
-        // MLP
-        mlp_forward(state.norm_out, lw.mlp, state, stream);
-        // Output in state.mlp_down
-
-        // Residual connection: residual = residual + mlp_output
-        elementwise_add(state.residual, state.mlp_down, state.residual,
-                        MC::HIDDEN_SIZE, stream);
+        // MLP with fused residual add: residual += down_proj(silu(gate)*up)
+        mlp_forward(state.norm_out, lw.mlp, state.residual, state, stream);
     }
 
     // Final RMSNorm
     rms_norm(state.residual, model.final_norm, state.hidden,
              1, MC::HIDDEN_SIZE, MC::RMS_EPS, stream);
 
-    // LM head: hidden[5120] → logits[248320]
-    // lm_head is [vocab_size, hidden_size] — same as Linear
+    // LM head: hidden[5120] → logits[248320] (INT8 quantized — halves weight read)
+    int8_linear_forward(state.hidden, model.lm_head_int8, state.logits, 1, stream);
+
+    // GPU argmax (no sync — result extracted by caller after graph launch)
+    argmax_async(state.logits, MC::VOCAB_SIZE, state.sample_out, stream);
+}
+
+// ============================================================================
+// Single-token forward pass with CUDA Graph acceleration
+//
+// First call: captures the entire forward body into a CUDA Graph.
+// Subsequent calls: replay the graph (eliminates ~1400 kernel launch overhead).
+//
+// Per-token-changing parameters (token_id, pos) are passed via pinned host
+// staging → H2D memcpy (captured in graph; reads current pinned values at replay).
+// ============================================================================
+
+int forward_one_token(const ModelWeights& model,
+                      InferenceState& state,
+                      __half* kv_cache,
+                      int token_id, int pos, int max_kv_len,
+                      cudaStream_t stream) {
+    // Use non-default compute stream for graph capture/replay
+    // (cudaStreamBeginCapture requires non-default stream)
+    cudaStream_t s = state.compute_stream ? state.compute_stream : stream;
+
+    // Write per-token values to pinned staging buffers
+    *state.h_token_pinned = token_id;
+    *state.h_pos_pinned = pos;
+
+    if (!state.graph_captured) {
+        // First invocation: capture CUDA Graph
+        cudaError_t err;
+
+        err = cudaStreamBeginCapture(s, cudaStreamCaptureModeGlobal);
+        if (err != cudaSuccess) {
+            LOG_ERROR("Machina", "Graph BeginCapture failed: %s", cudaGetErrorString(err));
+        }
+
+        forward_body(model, state, kv_cache, max_kv_len, s);
+
+        err = cudaStreamEndCapture(s, &state.cuda_graph);
+        if (err != cudaSuccess) {
+            LOG_ERROR("Machina", "Graph EndCapture failed: %s", cudaGetErrorString(err));
+        }
+
+        // Check graph node count
+        size_t num_nodes = 0;
+        cudaGraphGetNodes(state.cuda_graph, nullptr, &num_nodes);
+        LOG_INFO("Machina", "CUDA Graph captured: %zu nodes", num_nodes);
+
+        err = cudaGraphInstantiate(&state.cuda_graph_exec, state.cuda_graph, 0);
+        if (err != cudaSuccess) {
+            LOG_ERROR("Machina", "Graph Instantiate failed: %s", cudaGetErrorString(err));
+        }
+
+        state.graph_captured = true;
+    }
+
+    // Replay captured graph (pinned staging contains current token_id & pos)
+    cudaError_t err = cudaGraphLaunch(state.cuda_graph_exec, s);
+    if (err != cudaSuccess) {
+        LOG_ERROR("Machina", "Graph Launch failed: %s", cudaGetErrorString(err));
+    }
+
+    // Extract result (outside graph — single D2H + sync)
+    int result;
+    cudaMemcpyAsync(&result, state.sample_out, sizeof(int),
+                    cudaMemcpyDeviceToHost, s);
+    cudaStreamSynchronize(s);
+    return result;
+}
+
+// ============================================================================
+// Single-token forward pass with configurable sampling (no CUDA Graph)
+//
+// Runs the full forward body then applies top-k/top-p sampling.
+// Intended for generation with non-greedy sampling strategies.
+// ============================================================================
+
+int forward_one_token_sampled(const ModelWeights& model,
+                              InferenceState& state,
+                              __half* kv_cache,
+                              int token_id, int pos, int max_kv_len,
+                              const SamplingParams& params,
+                              cudaStream_t stream) {
+    using MC = ModelConfig;
+    cudaStream_t s = state.compute_stream ? state.compute_stream : stream;
+
+    // Copy token_id and pos to device
+    cudaMemcpyAsync(state.token_ids, &token_id, sizeof(int),
+                    cudaMemcpyHostToDevice, s);
+    cudaMemcpyAsync(state.d_pos, &pos, sizeof(int),
+                    cudaMemcpyHostToDevice, s);
+
+    // Embedding lookup → hidden
+    embedding_lookup(model.embed_tokens, state.token_ids,
+                     state.hidden, 1, MC::HIDDEN_SIZE, s);
+
+    // Copy to residual
+    cudaMemcpyAsync(state.residual, state.hidden,
+                    MC::HIDDEN_SIZE * sizeof(__half),
+                    cudaMemcpyDeviceToDevice, s);
+
+    int dn_layer_idx = 0;
+    for (int layer = 0; layer < MC::NUM_LAYERS; layer++) {
+        const LayerWeights& lw = model.layers[layer];
+
+        rms_norm(state.residual, lw.input_layernorm, state.norm_out,
+                 1, MC::HIDDEN_SIZE, MC::RMS_EPS, s);
+
+        if (lw.is_full_attention) {
+            full_attention_forward(state.norm_out, lw.full_attn,
+                                   kv_cache, layer, pos, max_kv_len,
+                                   state, s);
+        } else {
+            deltanet_forward(state.norm_out, lw.delta_net,
+                             dn_layer_idx, state, s);
+            dn_layer_idx++;
+        }
+
+        residual_rms_norm(state.residual, state.norm_out,
+                          lw.post_attn_layernorm, state.norm_out,
+                          1, MC::HIDDEN_SIZE, MC::RMS_EPS, s);
+
+        mlp_forward(state.norm_out, lw.mlp, state.residual, state, s);
+    }
+
+    rms_norm(state.residual, model.final_norm, state.hidden,
+             1, MC::HIDDEN_SIZE, MC::RMS_EPS, s);
+
+    int8_linear_forward(state.hidden, model.lm_head_int8, state.logits, 1, s);
+
+    // Top-k/top-p sampling
+    unsigned long long seed = params.seed ? params.seed : ++state.rng_counter;
+    sample_top_k_top_p(state.logits, state.probs, MC::VOCAB_SIZE,
+                        params, seed, state.sample_out, s);
+
+    int result;
+    cudaMemcpyAsync(&result, state.sample_out, sizeof(int),
+                    cudaMemcpyDeviceToHost, s);
+    cudaStreamSynchronize(s);
+    return result;
+}
+
+// ============================================================================
+// Batched prefill: SwiGLU MLP (M>1)
+//
+// Uses gptq_linear auto-dispatch (GEMV for M=1, GEMM for M>1).
+// Residual add done separately (gptq_gemm_add not available for M>1).
+// ============================================================================
+
+static void mlp_forward_prefill(const __half* x, const MLPWeights& mlp,
+                                __half* residual, int M,
+                                InferenceState& state, cudaStream_t stream) {
+    using MC = ModelConfig;
+    int N_inter = MC::INTERMEDIATE_SIZE;
+
+    // gate_proj + up_proj (separate GEMM calls for M>1)
+    gptq_linear(x, mlp.gate_proj, state.mlp_gate, M, stream);
+    gptq_linear(x, mlp.up_proj, state.mlp_up, M, stream);
+
+    // SiLU: mlp_gate = silu(mlp_gate) * mlp_up
+    silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
+             M * N_inter, stream);
+
+    // Down projection
+    gptq_linear(state.mlp_gate, mlp.down_proj, state.mlp_down, M, stream);
+
+    // Residual add: residual[M, H] += mlp_down[M, H]
+    if (residual) {
+        elementwise_add(residual, state.mlp_down, residual,
+                        M * MC::HIDDEN_SIZE, stream);
+    }
+}
+
+// ============================================================================
+// Batched prefill: split_q_gate for M tokens
+// q_interleaved[M, 24, 512] → Q[M, 24, 256] + Gate[M, 24, 256]
+// ============================================================================
+
+__global__ void split_q_gate_batch_kernel(const __half* __restrict__ qg,
+                                          __half* __restrict__ q,
+                                          __half* __restrict__ gate,
+                                          int M, int num_heads, int head_dim) {
+    int token = blockIdx.y;
+    int h = blockIdx.x;
+    if (token >= M || h >= num_heads) return;
+    int interleaved_stride = num_heads * head_dim * 2;
+    int out_stride = num_heads * head_dim;
+    const __half* src = qg + token * interleaved_stride + h * head_dim * 2;
+    __half* q_dst = q + token * out_stride + h * head_dim;
+    __half* g_dst = gate + token * out_stride + h * head_dim;
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        q_dst[d] = src[d];
+        g_dst[d] = src[head_dim + d];
+    }
+}
+
+// ============================================================================
+// Batched prefill: kv_cache_write for M tokens at consecutive positions
+// ============================================================================
+
+__global__ void kv_cache_write_batch_kernel(
+    const __half* __restrict__ src_k,  // [M, num_kv_heads, head_dim]
+    const __half* __restrict__ src_v,  // [M, num_kv_heads, head_dim]
+    __half* __restrict__ k_cache,      // [num_kv_heads, max_kv_len, head_dim]
+    __half* __restrict__ v_cache,      // [num_kv_heads, max_kv_len, head_dim]
+    int pos_start, int M,
+    int max_kv_len, int head_dim, int num_kv_heads)
+{
+    int h = blockIdx.x;   // kv head
+    int t = blockIdx.y;   // token index within batch
+    if (h >= num_kv_heads || t >= M) return;
+    int pos = pos_start + t;
+    size_t src_offset = (size_t)t * num_kv_heads * head_dim + h * head_dim;
+    size_t cache_offset = (size_t)h * max_kv_len * head_dim + (size_t)pos * head_dim;
+    for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+        k_cache[cache_offset + d] = src_k[src_offset + d];
+        v_cache[cache_offset + d] = src_v[src_offset + d];
+    }
+}
+
+// ============================================================================
+// Batched prefill: RoPE for M tokens at consecutive positions
+// ============================================================================
+
+__global__ void rope_batch_kernel(__half* __restrict__ q,
+                                  __half* __restrict__ k,
+                                  int num_q_heads, int num_kv_heads,
+                                  int head_dim, int rotary_dim,
+                                  int pos_start, int M, float theta) {
+    int token = blockIdx.y;
+    int head = blockIdx.x;
+    int pair = threadIdx.x;
+    int num_pairs = rotary_dim / 2;
+    if (pair >= num_pairs || token >= M) return;
+
+    int pos = pos_start + token;
+    float freq = 1.0f / powf(theta, (2.0f * pair) / (float)rotary_dim);
+    float angle = pos * freq;
+    float cos_a = cosf(angle);
+    float sin_a = sinf(angle);
+
+    int q_stride = num_q_heads * head_dim;
+    int kv_stride = num_kv_heads * head_dim;
+
+    if (head < num_q_heads) {
+        int idx0 = token * q_stride + head * head_dim + pair;
+        int idx1 = token * q_stride + head * head_dim + pair + num_pairs;
+        float x0 = __half2float(q[idx0]);
+        float x1 = __half2float(q[idx1]);
+        q[idx0] = __float2half(x0 * cos_a - x1 * sin_a);
+        q[idx1] = __float2half(x1 * cos_a + x0 * sin_a);
+    }
+
+    if (head < num_kv_heads) {
+        int idx0 = token * kv_stride + head * head_dim + pair;
+        int idx1 = token * kv_stride + head * head_dim + pair + num_pairs;
+        float x0 = __half2float(k[idx0]);
+        float x1 = __half2float(k[idx1]);
+        k[idx0] = __float2half(x0 * cos_a - x1 * sin_a);
+        k[idx1] = __float2half(x1 * cos_a + x0 * sin_a);
+    }
+}
+
+// ============================================================================
+// Prefill causal attention kernel (M queries attending to their own KV)
+//
+// Simple implementation: one block per (query_head, token). Each block
+// computes attention for one query head at one token position.
+// For small M (≤ 128), this gives sufficient parallelism.
+//
+// Grid: (num_attn_heads, M), Block: head_dim (256)
+// ============================================================================
+
+__global__ void prefill_attention_kernel(
+    const __half* __restrict__ Q,        // [M, num_attn_heads, head_dim]
+    const __half* __restrict__ k_cache,  // [num_kv_heads, max_kv_len, head_dim]
+    const __half* __restrict__ v_cache,  // [num_kv_heads, max_kv_len, head_dim]
+    __half* __restrict__ out,            // [M, num_attn_heads, head_dim]
+    int pos_start, int M,
+    int max_kv_len, int head_dim, int num_kv_groups,
+    float scale)
+{
+    const int h = blockIdx.x;       // query head index
+    const int token = blockIdx.y;   // token within batch
+    const int kv_h = h / num_kv_groups;
+    const int d = threadIdx.x;
+    const int seq_len = pos_start + token + 1;   // causal: attend to 0..pos_start+token
+
+    int q_stride = gridDim.x * head_dim;  // num_attn_heads * head_dim
+    const __half* q = Q + token * q_stride + h * head_dim;
+    const __half* k = k_cache + (size_t)kv_h * max_kv_len * head_dim;
+    const __half* v = v_cache + (size_t)kv_h * max_kv_len * head_dim;
+
+    const float q_val = (d < head_dim) ? __half2float(q[d]) : 0.0f;
+    const int warp_id = d / 32;
+    const int lane = d % 32;
+    const int num_warps = (head_dim + 31) / 32;
+
+    __shared__ float warp_sums[8];
+    __shared__ float s_broadcast;
+
+    // Online softmax
+    float m_running = -FLT_MAX;
+    float l_running = 0.0f;
+    float o_val = 0.0f;
+
+    for (int t = 0; t < seq_len; t++) {
+        float k_val = (d < head_dim) ? __half2float(k[t * head_dim + d]) : 0.0f;
+        float qk = q_val * k_val;
+
+        #pragma unroll
+        for (int off = 16; off > 0; off /= 2)
+            qk += __shfl_xor_sync(0xFFFFFFFF, qk, off);
+
+        if (lane == 0) warp_sums[warp_id] = qk;
+        __syncthreads();
+
+        if (d == 0) {
+            float sum = 0;
+            for (int w = 0; w < num_warps; w++) sum += warp_sums[w];
+            s_broadcast = sum * scale;
+        }
+        __syncthreads();
+
+        float s_t = s_broadcast;
+        float m_new = fmaxf(m_running, s_t);
+        float alpha = __expf(m_running - m_new);
+        float p_t = __expf(s_t - m_new);
+
+        float v_val = (d < head_dim) ? __half2float(v[t * head_dim + d]) : 0.0f;
+        o_val = o_val * alpha + v_val * p_t;
+        l_running = l_running * alpha + p_t;
+        m_running = m_new;
+    }
+
+    if (d < head_dim && l_running > 0.0f) {
+        int out_idx = token * q_stride + h * head_dim + d;
+        out[out_idx] = __float2half(o_val / l_running);
+    }
+}
+
+// ============================================================================
+// Batched prefill: Full Attention GQA (M tokens)
+//
+// Strategy: batch projections (GEMM), batch element-wise ops,
+// batch causal self-attention, batch output projection.
+// ============================================================================
+
+static void full_attention_prefill(const __half* x, const FullAttentionWeights& attn,
+                                   __half* kv_cache, int layer_idx,
+                                   int pos_start, int M, int max_kv_len,
+                                   InferenceState& state, cudaStream_t stream) {
+    using MC = ModelConfig;
+
+    // 1. Batched Q, K, V projections (INT8 GEMM)
+    // Q: x[M, 5120] → q_buf[M, 12288]
+    int8_linear_forward(x, attn.q_proj, state.q_buf, M, stream);
+
+    // K, V: separate GEMM calls (dual not beneficial for M>1)
+    int8_linear_forward(x, attn.k_proj, state.kv_buf, M, stream);
+    int8_linear_forward(x, attn.v_proj, state.dn_z, M, stream);
+    // V stored in dn_z[M, 1024] (only first 1024 of each row used)
+
+    // 2. Batched split_q_gate: q_buf[M, 12288] → Q_sep[M, 6144] + Gate[M, 6144]
+    // Q_sep → dn_qkv[M, 10240] (only first 6144 per row used)
+    // Gate → mlp_gate[M, 17408] (only first 6144 per row used)
+    __half* Qsep = state.dn_qkv;
+    __half* Gate = state.mlp_gate;
+    {
+        dim3 grid(MC::NUM_ATTN_HEADS, M);
+        split_q_gate_batch_kernel<<<grid, 256, 0, stream>>>(
+            state.q_buf, Qsep, Gate,
+            M, MC::NUM_ATTN_HEADS, MC::HEAD_DIM);
+    }
+
+    // 3. Batched head_norm for Q (M * 24 heads) and K (M * 4 heads)
+    head_norm(Qsep, attn.q_norm, Qsep,
+              M * MC::NUM_ATTN_HEADS, MC::HEAD_DIM, MC::RMS_EPS, stream);
+    head_norm(state.kv_buf, attn.k_norm, state.kv_buf,
+              M * MC::NUM_KV_HEADS, MC::HEAD_DIM, MC::RMS_EPS, stream);
+
+    // 4. Batched RoPE for M tokens at consecutive positions
+    {
+        int max_heads = (MC::NUM_ATTN_HEADS > MC::NUM_KV_HEADS)
+                        ? MC::NUM_ATTN_HEADS : MC::NUM_KV_HEADS;
+        dim3 grid(max_heads, M);
+        rope_batch_kernel<<<grid, MC::ROTARY_DIM / 2, 0, stream>>>(
+            Qsep, state.kv_buf,
+            MC::NUM_ATTN_HEADS, MC::NUM_KV_HEADS,
+            MC::HEAD_DIM, MC::ROTARY_DIM,
+            pos_start, M, MC::ROPE_THETA);
+    }
+
+    // 5. Batched KV cache write
+    size_t kv_plane = (size_t)MC::NUM_KV_HEADS * max_kv_len * MC::HEAD_DIM;
+    __half* k_cache = kv_cache + (size_t)layer_idx * 2 * kv_plane;
+    __half* v_cache_ptr = k_cache + kv_plane;
+    {
+        dim3 grid(MC::NUM_KV_HEADS, M);
+        kv_cache_write_batch_kernel<<<grid, 256, 0, stream>>>(
+            state.kv_buf, state.dn_z, k_cache, v_cache_ptr,
+            pos_start, M, max_kv_len, MC::HEAD_DIM, MC::NUM_KV_HEADS);
+    }
+
+    // 6. Batched causal attention
+    // Grid: (num_attn_heads, M), each block does one head for one token
+    {
+        float scale_val = 1.0f / sqrtf((float)MC::HEAD_DIM);
+        dim3 grid(MC::NUM_ATTN_HEADS, M);
+        // Output to attn_out[M, 6144]
+        prefill_attention_kernel<<<grid, MC::HEAD_DIM, 0, stream>>>(
+            Qsep, k_cache, v_cache_ptr, state.attn_out,
+            pos_start, M, max_kv_len, MC::HEAD_DIM,
+            MC::NUM_KV_GROUPS, scale_val);
+    }
+
+    // 7. Batched sigmoid_gate: attn_out = attn_out * sigmoid(gate)
+    sigmoid_gate(state.attn_out, Gate, state.attn_out,
+                 M * MC::ATTN_OUT_DIM, stream);
+
+    // 8. Batched o_proj: attn_out[M, 6144] → norm_out[M, 5120]
+    int8_linear_forward(state.attn_out, attn.o_proj, state.norm_out, M, stream);
+}
+
+// ============================================================================
+// Batched prefill: DeltaNet (M tokens)
+//
+// Strategy: batch projections (INT8 GEMM), process conv1d + recurrent
+// sequentially per token, batch output (rms_norm_gated + out_proj).
+// ============================================================================
+
+static void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
+                             int dn_layer_idx, int M,
+                             InferenceState& state, cudaStream_t stream) {
+    using MC = ModelConfig;
+
+    // 1. Batched projections (INT8 batch GEMV)
+    // QKV: x[M, 5120] → dn_qkv[M, 10240]
+    int8_linear_forward(x, dn.in_proj_qkv, state.dn_qkv, M, stream);
+
+    // Z: x[M, 5120] → dn_z[M, 6144]
+    int8_linear_forward(x, dn.in_proj_z, state.dn_z, M, stream);
+
+    // A, B: x[M, 5120] → dn_a[M, 48], dn_b[M, 48]
+    int8_linear_forward(x, dn.in_proj_a, state.dn_a, M, stream);
+    int8_linear_forward(x, dn.in_proj_b, state.dn_b, M, stream);
+
+    // 2. Batch conv1d: all M tokens in one launch (vs M separate launches)
+    {
+        int conv_blocks = (MC::LIN_CONV_DIM + 255) / 256;
+        conv1d_batch_silu_kernel<<<conv_blocks, 256, 0, stream>>>(
+            state.dn_qkv, state.conv_states[dn_layer_idx],
+            dn.conv1d_weight, M, MC::LIN_CONV_DIM, MC::CONV_KERNEL);
+    }
+
+    // 3. Fused head kernel: repeat_interleave + g/beta + L2norm + recurrent
+    //    All M tokens processed per head in one launch
+    {
+        int fused_smem = (MC::LIN_K_HEAD_DIM + MC::LIN_K_HEAD_DIM + 4) * sizeof(float);
+        deltanet_fused_head_kernel<<<MC::LIN_NUM_V_HEADS, 128, fused_smem, stream>>>(
+            state.dn_qkv, state.dn_a, state.dn_b,
+            dn.A_log, dn.dt_bias,
+            state.dn_states[dn_layer_idx],
+            state.attn_out,
+            M, MC::LIN_NUM_K_HEADS, MC::LIN_NUM_V_HEADS,
+            MC::LIN_K_HEAD_DIM, MC::LIN_V_HEAD_DIM,
+            MC::LIN_KEY_DIM, MC::LIN_CONV_DIM, MC::RMS_EPS);
+    }
+
+    // 4. Batched gated RMSNorm: attn_out[M, 48, 128] with gate dn_z[M, 48, 128]
+    rms_norm_gated(state.attn_out, state.dn_z,
+                   dn.norm_weight, state.attn_out,
+                   M * MC::LIN_NUM_V_HEADS, MC::LIN_V_HEAD_DIM, MC::RMS_EPS, stream);
+
+    // 5. Batched out_proj: attn_out[M, 6144] → norm_out[M, 5120]
+    int8_linear_forward(state.attn_out, dn.out_proj, state.norm_out, M, stream);
+}
+
+// ============================================================================
+// Complete batched prefill forward pass
+//
+// embed[M] → for each layer: norm → attn/deltanet → residual → norm → MLP
+// → final_norm → lm_head (last token only) → greedy sample
+// ============================================================================
+
+int forward_prefill(const ModelWeights& model,
+                    InferenceState& state,
+                    __half* kv_cache,
+                    const int* h_token_ids, int M,
+                    int pos_start, int max_kv_len,
+                    cudaStream_t stream) {
+    using MC = ModelConfig;
+    cudaStream_t s = state.compute_stream ? state.compute_stream : stream;
+
+    // Copy token IDs to device
+    cudaMemcpyAsync(state.token_ids, h_token_ids, M * sizeof(int),
+                    cudaMemcpyHostToDevice, s);
+
+    // Embedding lookup → hidden[M, H]
+    embedding_lookup(model.embed_tokens, state.token_ids,
+                     state.hidden, M, MC::HIDDEN_SIZE, s);
+
+    // Copy to residual
+    cudaMemcpyAsync(state.residual, state.hidden,
+                    (size_t)M * MC::HIDDEN_SIZE * sizeof(__half),
+                    cudaMemcpyDeviceToDevice, s);
+
+    int dn_layer_idx = 0;
+
+    for (int layer = 0; layer < MC::NUM_LAYERS; layer++) {
+        const LayerWeights& lw = model.layers[layer];
+
+        // Pre-attention RMSNorm: residual[M, H] → norm_out[M, H]
+        rms_norm(state.residual, lw.input_layernorm, state.norm_out,
+                 M, MC::HIDDEN_SIZE, MC::RMS_EPS, s);
+
+        // Attention / DeltaNet (writes output to norm_out[M, H])
+        if (lw.is_full_attention) {
+            full_attention_prefill(state.norm_out, lw.full_attn,
+                                   kv_cache, layer, pos_start, M, max_kv_len,
+                                   state, s);
+        } else {
+            deltanet_prefill(state.norm_out, lw.delta_net,
+                             dn_layer_idx, M, state, s);
+            dn_layer_idx++;
+        }
+
+        // Fused: residual += attn_output; norm_out = RMSNorm(residual)
+        residual_rms_norm(state.residual, state.norm_out,
+                          lw.post_attn_layernorm, state.norm_out,
+                          M, MC::HIDDEN_SIZE, MC::RMS_EPS, s);
+
+        // MLP with residual add
+        mlp_forward_prefill(state.norm_out, lw.mlp, state.residual, M, state, s);
+    }
+
+    // Final RMSNorm — only the last token matters for logits
+    __half* last_hidden = state.residual + (size_t)(M - 1) * MC::HIDDEN_SIZE;
+    rms_norm(last_hidden, model.final_norm, state.hidden,
+             1, MC::HIDDEN_SIZE, MC::RMS_EPS, s);
+
+    // LM head: hidden[5120] → logits[248320] (last token only)
+    int8_linear_forward(state.hidden, model.lm_head_int8, state.logits, 1, s);
+
+    // GPU argmax
+    argmax_async(state.logits, MC::VOCAB_SIZE, state.sample_out, s);
+
+    // Extract result
+    int result;
+    cudaMemcpyAsync(&result, state.sample_out, sizeof(int),
+                    cudaMemcpyDeviceToHost, s);
+    cudaStreamSynchronize(s);
+
+    return result;
+}
+
+// ============================================================================
+// Profile prefill: records events at component boundaries, sync once at end.
+// No pipeline drain — events are async timestamps.
+// ============================================================================
+
+void profile_forward_prefill(const ModelWeights& model,
+                             InferenceState& state,
+                             __half* kv_cache,
+                             const int* h_token_ids, int M,
+                             int pos_start, int max_kv_len,
+                             cudaStream_t stream) {
+    using MC = ModelConfig;
+    cudaStream_t s = state.compute_stream ? state.compute_stream : stream;
+
+    // 4 events per layer + 1 final = 257
+    constexpr int EPL = 4;
+    constexpr int N_EV = MC::NUM_LAYERS * EPL + 1;
+    cudaEvent_t ev[N_EV];
+    for (int i = 0; i < N_EV; i++)
+        cudaEventCreateWithFlags(&ev[i], cudaEventDefault);
+
+    // Setup (same as forward_prefill)
+    cudaMemcpyAsync(state.token_ids, h_token_ids, M * sizeof(int),
+                    cudaMemcpyHostToDevice, s);
+    embedding_lookup(model.embed_tokens, state.token_ids,
+                     state.hidden, M, MC::HIDDEN_SIZE, s);
+    cudaMemcpyAsync(state.residual, state.hidden,
+                    (size_t)M * MC::HIDDEN_SIZE * sizeof(__half),
+                    cudaMemcpyDeviceToDevice, s);
+
+    int dn_layer_idx = 0;
+
+    for (int layer = 0; layer < MC::NUM_LAYERS; layer++) {
+        const LayerWeights& lw = model.layers[layer];
+        int base = layer * EPL;
+
+        // ev[0]: before pre_norm
+        cudaEventRecord(ev[base + 0], s);
+
+        rms_norm(state.residual, lw.input_layernorm, state.norm_out,
+                 M, MC::HIDDEN_SIZE, MC::RMS_EPS, s);
+
+        // ev[1]: after pre_norm, before attn/DN
+        cudaEventRecord(ev[base + 1], s);
+
+        if (lw.is_full_attention) {
+            full_attention_prefill(state.norm_out, lw.full_attn,
+                                   kv_cache, layer, pos_start, M, max_kv_len,
+                                   state, s);
+        } else {
+            deltanet_prefill(state.norm_out, lw.delta_net,
+                             dn_layer_idx, M, state, s);
+            dn_layer_idx++;
+        }
+
+        // ev[2]: after attn/DN, before residual+post_norm
+        cudaEventRecord(ev[base + 2], s);
+
+        residual_rms_norm(state.residual, state.norm_out,
+                          lw.post_attn_layernorm, state.norm_out,
+                          M, MC::HIDDEN_SIZE, MC::RMS_EPS, s);
+
+        // ev[3]: after post_norm, before MLP
+        cudaEventRecord(ev[base + 3], s);
+
+        mlp_forward_prefill(state.norm_out, lw.mlp, state.residual, M, state, s);
+    }
+
+    // Final event after last MLP
+    cudaEventRecord(ev[N_EV - 1], s);
+
+    // Single sync point — no pipeline drain during the loop
+    cudaStreamSynchronize(s);
+
+    // Aggregate
+    float t_norm = 0, t_dn = 0, t_fa = 0, t_mlp = 0;
+    for (int layer = 0; layer < MC::NUM_LAYERS; layer++) {
+        const LayerWeights& lw = model.layers[layer];
+        int base = layer * EPL;
+        float ms;
+
+        cudaEventElapsedTime(&ms, ev[base + 0], ev[base + 1]);
+        t_norm += ms;
+
+        cudaEventElapsedTime(&ms, ev[base + 1], ev[base + 2]);
+        if (lw.is_full_attention) t_fa += ms;
+        else t_dn += ms;
+
+        cudaEventElapsedTime(&ms, ev[base + 2], ev[base + 3]);
+        t_norm += ms;
+
+        // MLP end = next layer's ev[0], or final event
+        cudaEventElapsedTime(&ms, ev[base + 3], ev[base + EPL]);
+        t_mlp += ms;
+    }
+
+    float total;
+    cudaEventElapsedTime(&total, ev[0], ev[N_EV - 1]);
+
+    printf("\n=== Prefill profile (M=%d, %d layers) ===\n", M, MC::NUM_LAYERS);
+    printf("  DeltaNet SSM (48 layers):     %7.2f ms  (%4.1f%%)\n", t_dn, 100*t_dn/total);
+    printf("  Full Attention (16 layers):   %7.2f ms  (%4.1f%%)\n", t_fa, 100*t_fa/total);
+    printf("  MLP GPTQ (64 layers):         %7.2f ms  (%4.1f%%)\n", t_mlp, 100*t_mlp/total);
+    printf("  Norms (pre+post, 64 layers):  %7.2f ms  (%4.1f%%)\n", t_norm, 100*t_norm/total);
+    printf("  Total (layers only):          %7.2f ms\n", total);
+    printf("  Per token (M=%d):             %7.2f ms/tok\n", M, total / M);
+
+    for (int i = 0; i < N_EV; i++) cudaEventDestroy(ev[i]);
+}
+
+// ============================================================================
+// Profile forward pass — time each component type across all layers
+// ============================================================================
+
+void profile_forward(const ModelWeights& model,
+                     InferenceState& state,
+                     __half* kv_cache,
+                     int token_id, int pos, int max_kv_len,
+                     cudaStream_t stream) {
+    using MC = ModelConfig;
+
+    // Run a warmup token first to populate caches etc.
+    forward_one_token(model, state, kv_cache, token_id, pos, max_kv_len, stream);
+
+    // Now profile at pos+1
+    pos++;
+
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0);
+    cudaEventCreate(&e1);
+
+    auto timed = [&](const char* label, auto fn) {
+        cudaEventRecord(e0, stream);
+        fn();
+        cudaEventRecord(e1, stream);
+        cudaStreamSynchronize(stream);
+        float ms = 0;
+        cudaEventElapsedTime(&ms, e0, e1);
+        printf("  %-32s  %7.2f ms\n", label, ms);
+        return ms;
+    };
+
+    printf("\n=== Forward pass profile (pos=%d) ===\n", pos);
+
+    // Setup
+    cudaMemcpyAsync(state.token_ids, &token_id, sizeof(int),
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(state.d_pos, &pos, sizeof(int),
+                    cudaMemcpyHostToDevice, stream);
+    embedding_lookup(model.embed_tokens, state.token_ids,
+                     state.hidden, 1, MC::HIDDEN_SIZE, stream);
+    cudaMemcpyAsync(state.residual, state.hidden,
+                    MC::HIDDEN_SIZE * sizeof(__half),
+                    cudaMemcpyDeviceToDevice, stream);
+    cudaStreamSynchronize(stream);
+
+    float total_dn_attn = 0, total_fa_attn = 0, total_mlp = 0, total_norm = 0;
+    int dn_layer_idx = 0;
+
+    for (int layer = 0; layer < MC::NUM_LAYERS; layer++) {
+        const LayerWeights& lw = model.layers[layer];
+
+        // Norm + Attn + Norm + MLP timed as a unit per layer type
+        if (layer == 0 || layer == 3) {
+            // Time individual components for first DeltaNet (layer0) and first FullAttn (layer3)
+            const char* lt = lw.is_full_attention ? "FullAttn" : "DeltaNet";
+            char buf[64];
+
+            snprintf(buf, sizeof(buf), "L%d %s pre_norm", layer, lt);
+            timed(buf, [&]{ rms_norm(state.residual, lw.input_layernorm, state.norm_out,
+                                      1, MC::HIDDEN_SIZE, MC::RMS_EPS, stream); });
+
+            snprintf(buf, sizeof(buf), "L%d %s attn", layer, lt);
+            float attn_ms;
+            if (lw.is_full_attention) {
+                attn_ms = timed(buf, [&]{ full_attention_forward(state.norm_out, lw.full_attn,
+                                    kv_cache, layer, pos, max_kv_len, state, stream, true); });
+                total_fa_attn += attn_ms;
+            } else {
+                attn_ms = timed(buf, [&]{ deltanet_forward(state.norm_out, lw.delta_net,
+                                    dn_layer_idx, state, stream); });
+                dn_layer_idx++;
+                total_dn_attn += attn_ms;
+            }
+
+            elementwise_add(state.residual, state.norm_out, state.residual,
+                            MC::HIDDEN_SIZE, stream);
+
+            snprintf(buf, sizeof(buf), "L%d %s post_norm", layer, lt);
+            timed(buf, [&]{ rms_norm(state.residual, lw.post_attn_layernorm, state.norm_out,
+                                      1, MC::HIDDEN_SIZE, MC::RMS_EPS, stream); });
+
+            snprintf(buf, sizeof(buf), "L%d %s mlp", layer, lt);
+            float mlp_ms = timed(buf, [&]{ mlp_forward(state.norm_out, lw.mlp, nullptr, state, stream); });
+            total_mlp += mlp_ms;
+
+            elementwise_add(state.residual, state.mlp_down, state.residual,
+                            MC::HIDDEN_SIZE, stream);
+        } else {
+            // Bulk timing for remaining layers
+            cudaEventRecord(e0, stream);
+            rms_norm(state.residual, lw.input_layernorm, state.norm_out,
+                     1, MC::HIDDEN_SIZE, MC::RMS_EPS, stream);
+            if (lw.is_full_attention) {
+                full_attention_forward(state.norm_out, lw.full_attn,
+                                       kv_cache, layer, pos, max_kv_len, state, stream);
+            } else {
+                deltanet_forward(state.norm_out, lw.delta_net,
+                                 dn_layer_idx, state, stream);
+                dn_layer_idx++;
+            }
+            elementwise_add(state.residual, state.norm_out, state.residual,
+                            MC::HIDDEN_SIZE, stream);
+            rms_norm(state.residual, lw.post_attn_layernorm, state.norm_out,
+                     1, MC::HIDDEN_SIZE, MC::RMS_EPS, stream);
+            mlp_forward(state.norm_out, lw.mlp, state.residual, state, stream);
+            cudaEventRecord(e1, stream);
+            cudaStreamSynchronize(stream);
+            float ms;
+            cudaEventElapsedTime(&ms, e0, e1);
+            // Estimate split: ~70% attn, ~30% MLP based on weight sizes
+            if (lw.is_full_attention) total_fa_attn += ms * 0.55f;
+            else total_dn_attn += ms * 0.55f;
+            total_mlp += ms * 0.35f;
+            total_norm += ms * 0.10f;
+        }
+    }
+
+    // LM head
     Linear lm_head_linear;
     lm_head_linear.weight = model.lm_head;
     lm_head_linear.in_features = MC::HIDDEN_SIZE;
     lm_head_linear.out_features = MC::VOCAB_SIZE;
-    linear_forward(state.hidden, lm_head_linear, state.logits, 1, stream);
+    float lm_ms = timed("lm_head", [&]{ linear_forward(state.hidden, lm_head_linear, state.logits, 1, stream); });
 
-    // Synchronize before sampling
-    cudaStreamSynchronize(stream);
+    float sample_ms = timed("greedy_sample", [&]{ greedy_sample(state.logits, MC::VOCAB_SIZE, state.sample_out, stream); });
 
-    // Greedy sample
-    return greedy_sample(state.logits, MC::VOCAB_SIZE);
+    printf("\n  --- Summary ---\n");
+    printf("  DeltaNet attn (48 layers):    %7.1f ms\n", total_dn_attn);
+    printf("  FullAttn (16 layers):         %7.1f ms\n", total_fa_attn);
+    printf("  MLP (64 layers):              %7.1f ms\n", total_mlp);
+    printf("  Norms:                        %7.1f ms\n", total_norm);
+    printf("  LM Head:                      %7.1f ms\n", lm_ms);
+    printf("  Greedy sample:                %7.1f ms\n", sample_ms);
+    printf("  Estimated total:              %7.1f ms\n",
+           total_dn_attn + total_fa_attn + total_mlp + total_norm + lm_ms + sample_ms);
+
+    cudaEventDestroy(e0);
+    cudaEventDestroy(e1);
 }
 
 } // namespace deusridet

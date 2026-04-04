@@ -4,7 +4,7 @@
 //   - 16 SMs, 128 FP32 cores each, L2 = 4 MB
 //   - Memory BW ~192 GB/s (unified DRAM)
 //   - Shared memory: up to 164 KB/SM (48 KB default)
-//   - No FP4/FP8 tensor core, FP16 tensor core available
+//   - FP16 tensor core available (WMMA m16n16k16)
 //
 // GPTQ layout: qweight[K/8, N] (uint32), scales[K/128, N] (FP16)
 //   bits=4, group_size=128, sym=true, zero_point=8
@@ -14,16 +14,20 @@
 //   multiple K elements, accumulating in FP32 for numerical stability.
 //   Final warp reduction → FP16 output.
 //
-// GEMM strategy (M>1):
+// GEMM strategy (M>1, CUDA core fallback):
 //   Tile-based: each thread block computes a tile of Y[BM, BN].
-//   Load qweight tile into shared memory, dequant on the fly during
-//   the K-dimension accumulation. Uses FP16 accumulation with FP32
-//   master accumulators for critical paths.
+//   Load qweight tile into shared memory, dequant on the fly.
+//
+// WMMA GEMM strategy (M>1, tensor core):
+//   Tile-based with WMMA m16n16k16 fragments.
+//   BK=128 aligned to group_size → one scale per tile per column.
+//   INT4 dequant in registers during SMEM cooperative load.
 
 #include "gptq.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
+#include <mma.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -49,74 +53,159 @@ __device__ __forceinline__ __half dequant_int4(__half scale, int q_val) {
 // GEMV kernel — Decode path (M=1)
 // ============================================================================
 //
-// Grid:  (N / TILE_N) blocks
-// Block: (TILE_N, K_THREADS) where K_THREADS process the K dimension
+// Optimized INT4 GEMV with:
+//   1. x vector cached in shared memory (eliminates redundant DRAM reads)
+//   2. Scale hoisted: one load per group of 16 packed rows (15x fewer reads)
+//   3. 4-way loop unrolling for memory pipelining (4 qweight loads in-flight)
+//   4. 4 independent FP32 accumulators for ILP across FMA pipeline stages
+//   5. Block=512 (TILE_N=64, K_THREADS=8) for high occupancy on SM87
 //
-// Each thread block computes TILE_N output elements.
-// Within a block, K_THREADS threads split the K loop.
-// After the K loop, column-wise reduction across K_THREADS using shared mem.
+// Memory layout: qweight[K/8, N] row-major, scales[K/128, N] row-major.
+// Coalesced access: adjacent threads read adjacent N columns.
 //
-// Memory access: qweight[K/8, N] is read with coalesced access along N.
-// Each thread reads one uint32 (8 INT4 values sharing the same N column).
-// This gives 8 K-elements per load, amortizing memory access.
+// Shared mem modes:
+//   USE_SMEM_X=true:  x[K] (__half) + reduce[TILE_N * K_THREADS] (float)
+//     Gate/up (K=5120): 12.3KB → 3 blocks/SM, 48 warps (100% occupancy)
+//   USE_SMEM_X=false: reduce[TILE_N * K_THREADS] (float) only, x from L2
+//     Down (K=17408): 2KB → 3 blocks/SM, 48 warps (100% occupancy)
+//
+// Scale deferral: scale multiply hoisted to group boundary (once per 128
+// elements) instead of per-element. Reduces FP32 ops by ~15%, pushing
+// the kernel from borderline compute-bound to solidly memory-bound.
 
 constexpr int GEMV_TILE_N = 64;       // output columns per block
 constexpr int GEMV_K_THREADS = 8;     // threads splitting K dimension
 constexpr int GEMV_BLOCK_DIM = GEMV_TILE_N * GEMV_K_THREADS;  // 512 threads
 
+// Templatized for optional fused residual add (ADD_RES):
+//   false: y[n] = gemv_result
+//   true:  y[n] = gemv_result + residual[n]  (saves a separate add kernel)
+// Templatized for SMEM x vs L2 x (USE_SMEM_X):
+//   true:  x loaded to shared memory (best for small K ≤ 10240)
+//   false: x read from L2 cache directly (best for large K > 10240)
+template<bool ADD_RES, bool USE_SMEM_X>
 __global__ void gptq_gemv_kernel(
-    const __half*   __restrict__ x,       // [K]
-    const uint32_t* __restrict__ qweight, // [K/8, N]
-    const __half*   __restrict__ scales,  // [K/128, N]
-    __half*         __restrict__ y,       // [N]
+    const __half*   __restrict__ x,         // [K]
+    const uint32_t* __restrict__ qweight,   // [K/8, N]
+    const __half*   __restrict__ scales,    // [K/128, N]
+    __half*         __restrict__ y,         // [N]
+    const __half*   __restrict__ residual,  // [N] (only read if ADD_RES)
     int K, int N)
 {
-    const int n_base = blockIdx.x * GEMV_TILE_N;
-    const int local_n = threadIdx.x % GEMV_TILE_N;  // which output column
-    const int k_tid   = threadIdx.x / GEMV_TILE_N;  // which K-slice
+    extern __shared__ char smem_raw[];
+    __half* smem_x;
+    float*  smem_reduce;
 
-    const int n = n_base + local_n;
+    if constexpr (USE_SMEM_X) {
+        smem_x = reinterpret_cast<__half*>(smem_raw);
+        smem_reduce = reinterpret_cast<float*>(smem_raw + K * sizeof(__half));
+    } else {
+        smem_reduce = reinterpret_cast<float*>(smem_raw);
+    }
+
+    const int local_n = threadIdx.x % GEMV_TILE_N;
+    const int k_tid   = threadIdx.x / GEMV_TILE_N;
+    const int n = blockIdx.x * GEMV_TILE_N + local_n;
+
+    // Cooperative vectorized load of x into shared memory (float4 = 8 halves)
+    if constexpr (USE_SMEM_X) {
+        const int vec_elems = K / 8;
+        const float4* x_f4 = reinterpret_cast<const float4*>(x);
+        float4* smem_f4 = reinterpret_cast<float4*>(smem_x);
+        for (int i = threadIdx.x; i < vec_elems; i += GEMV_BLOCK_DIM)
+            smem_f4[i] = x_f4[i];
+        __syncthreads();
+    }
+
     if (n >= N) return;
 
-    // Number of packed K rows total
     const int packed_K = K / GPTQ_PACK_FACTOR;
-
-    // Each K-thread processes packed_K / GEMV_K_THREADS rows
-    // Each packed row = 8 INT4 values = 8 K elements
     const int rows_per_thread = (packed_K + GEMV_K_THREADS - 1) / GEMV_K_THREADS;
     const int pk_start = k_tid * rows_per_thread;
     const int pk_end   = min(pk_start + rows_per_thread, packed_K);
 
     float acc = 0.0f;
 
-    for (int pk = pk_start; pk < pk_end; pk++) {
-        uint32_t packed = qweight[pk * N + n];
-        int k_base = pk * GPTQ_PACK_FACTOR;
+    // Process packed rows with scale deferral: scale multiply hoisted to group
+    // boundary. Inside the inner loop, accumulate raw (unscaled) dot products.
+    // This removes one FP32 multiply per element from the hot path.
+    constexpr int ROWS_PER_GROUP = GPTQ_GROUP_SIZE / GPTQ_PACK_FACTOR; // 16
 
-        // Process 8 INT4 values from one packed uint32
-        #pragma unroll
-        for (int i = 0; i < GPTQ_PACK_FACTOR; i++) {
-            int k = k_base + i;
-            int q_val = extract_int4(packed, i);
-            int group = k / GPTQ_GROUP_SIZE;
-            __half s = scales[group * N + n];
-            __half w = dequant_int4(s, q_val);
-            acc += __half2float(w) * __half2float(x[k]);
+    int pk = pk_start;
+    while (pk < pk_end) {
+        const int group = (pk * GPTQ_PACK_FACTOR) / GPTQ_GROUP_SIZE;
+        const float s = __half2float(scales[group * N + n]);
+        const int group_end = min((group + 1) * ROWS_PER_GROUP, pk_end);
+
+        float raw0 = 0.0f, raw1 = 0.0f, raw2 = 0.0f, raw3 = 0.0f;
+
+        // 4-way unrolled inner loop
+        for (; pk + 3 < group_end; pk += 4) {
+            uint32_t p0 = qweight[(pk    ) * N + n];
+            uint32_t p1 = qweight[(pk + 1) * N + n];
+            uint32_t p2 = qweight[(pk + 2) * N + n];
+            uint32_t p3 = qweight[(pk + 3) * N + n];
+
+            int kb = pk * GPTQ_PACK_FACTOR;
+
+            #pragma unroll
+            for (int i = 0; i < GPTQ_PACK_FACTOR; i++) {
+                float xv;
+                if constexpr (USE_SMEM_X) xv = __half2float(smem_x[kb + i]);
+                else xv = __half2float(x[kb + i]);
+                raw0 += (float)((int)((p0 >> (i * 4)) & 0xF) - GPTQ_ZERO_POINT) * xv;
+            }
+            #pragma unroll
+            for (int i = 0; i < GPTQ_PACK_FACTOR; i++) {
+                float xv;
+                if constexpr (USE_SMEM_X) xv = __half2float(smem_x[kb + 8 + i]);
+                else xv = __half2float(x[kb + 8 + i]);
+                raw1 += (float)((int)((p1 >> (i * 4)) & 0xF) - GPTQ_ZERO_POINT) * xv;
+            }
+            #pragma unroll
+            for (int i = 0; i < GPTQ_PACK_FACTOR; i++) {
+                float xv;
+                if constexpr (USE_SMEM_X) xv = __half2float(smem_x[kb + 16 + i]);
+                else xv = __half2float(x[kb + 16 + i]);
+                raw2 += (float)((int)((p2 >> (i * 4)) & 0xF) - GPTQ_ZERO_POINT) * xv;
+            }
+            #pragma unroll
+            for (int i = 0; i < GPTQ_PACK_FACTOR; i++) {
+                float xv;
+                if constexpr (USE_SMEM_X) xv = __half2float(smem_x[kb + 24 + i]);
+                else xv = __half2float(x[kb + 24 + i]);
+                raw3 += (float)((int)((p3 >> (i * 4)) & 0xF) - GPTQ_ZERO_POINT) * xv;
+            }
         }
+
+        // Remainder within group (0-3 packed rows)
+        for (; pk < group_end; pk++) {
+            uint32_t packed = qweight[pk * N + n];
+            int kb = pk * GPTQ_PACK_FACTOR;
+            #pragma unroll
+            for (int i = 0; i < GPTQ_PACK_FACTOR; i++) {
+                float xv;
+                if constexpr (USE_SMEM_X) xv = __half2float(smem_x[kb + i]);
+                else xv = __half2float(x[kb + i]);
+                raw0 += (float)((int)((packed >> (i * 4)) & 0xF) - GPTQ_ZERO_POINT) * xv;
+            }
+        }
+
+        // Scale multiply deferred to group boundary (one multiply per group)
+        acc += s * (raw0 + raw1 + raw2 + raw3);
     }
 
-    // K-thread reduction using shared memory
-    __shared__ float smem[GEMV_TILE_N * GEMV_K_THREADS];
-    smem[k_tid * GEMV_TILE_N + local_n] = acc;
+    // K-thread reduction via shared memory
+    smem_reduce[k_tid * GEMV_TILE_N + local_n] = acc;
     __syncthreads();
 
-    // Thread 0 of each column reduces
     if (k_tid == 0) {
-        float sum = 0.0f;
+        float sum = smem_reduce[local_n];
         #pragma unroll
-        for (int t = 0; t < GEMV_K_THREADS; t++) {
-            sum += smem[t * GEMV_TILE_N + local_n];
-        }
+        for (int t = 1; t < GEMV_K_THREADS; t++)
+            sum += smem_reduce[t * GEMV_TILE_N + local_n];
+        if constexpr (ADD_RES)
+            sum += __half2float(residual[n]);
         y[n] = __float2half(sum);
     }
 }
@@ -127,11 +216,238 @@ void gptq_gemv(const __half* x,
                cudaStream_t stream)
 {
     int N = weight.N;
+    int K = weight.K;
     int grid = (N + GEMV_TILE_N - 1) / GEMV_TILE_N;
+    size_t smem = K * sizeof(__half) + GEMV_TILE_N * GEMV_K_THREADS * sizeof(float);
 
-    gptq_gemv_kernel<<<grid, GEMV_BLOCK_DIM, 0, stream>>>(
-        x, weight.qweight, weight.scales, y,
-        weight.K, weight.N);
+    gptq_gemv_kernel<false, true><<<grid, GEMV_BLOCK_DIM, smem, stream>>>(
+        x, weight.qweight, weight.scales, y, nullptr, K, N);
+}
+
+// Fused GEMV + residual add: y[n] = (x @ W_q)[n] + residual[n]
+// Eliminates a separate elementwise_add kernel + one full read/write pass.
+void gptq_gemv_add(const __half* x,
+                   const GptqWeight& weight,
+                   __half* y,
+                   const __half* residual,
+                   cudaStream_t stream)
+{
+    int N = weight.N;
+    int K = weight.K;
+    int grid = (N + GEMV_TILE_N - 1) / GEMV_TILE_N;
+    size_t smem = K * sizeof(__half) + GEMV_TILE_N * GEMV_K_THREADS * sizeof(float);
+
+    gptq_gemv_kernel<true, true><<<grid, GEMV_BLOCK_DIM, smem, stream>>>(
+        x, weight.qweight, weight.scales, y, residual, K, N);
+}
+
+// ============================================================================
+// Dual GEMV — gate_proj + up_proj computed together
+// ============================================================================
+// Both weight matrices must have the same K and N dimensions.
+// x cached in SMEM (broadcast to all threads).
+// Scale deferral + 2-way unrolled inner loop: 4 qweight loads per step
+// (2 gate + 2 up). 4-way was tested but causes register pressure
+// regression even with scale deferral.
+
+__global__ void gptq_dual_gemv_kernel(
+    const __half*   __restrict__ x,
+    const uint32_t* __restrict__ qw_a,    // gate_proj qweight
+    const __half*   __restrict__ sc_a,    // gate_proj scales
+    const uint32_t* __restrict__ qw_b,    // up_proj qweight
+    const __half*   __restrict__ sc_b,    // up_proj scales
+    __half*         __restrict__ y_a,     // gate output
+    __half*         __restrict__ y_b,     // up output
+    int K, int N)
+{
+    extern __shared__ char smem_raw[];
+    __half* smem_x = reinterpret_cast<__half*>(smem_raw);
+    float* smem_red_a = reinterpret_cast<float*>(smem_raw + K * sizeof(__half));
+    float* smem_red_b = smem_red_a + GEMV_TILE_N * GEMV_K_THREADS;
+
+    const int local_n = threadIdx.x % GEMV_TILE_N;
+    const int k_tid   = threadIdx.x / GEMV_TILE_N;
+    const int n = blockIdx.x * GEMV_TILE_N + local_n;
+
+    // Load x to SMEM (vectorized)
+    {
+        const int vec_elems = K / 8;
+        const float4* x_f4 = reinterpret_cast<const float4*>(x);
+        float4* smem_f4 = reinterpret_cast<float4*>(smem_x);
+        for (int i = threadIdx.x; i < vec_elems; i += GEMV_BLOCK_DIM)
+            smem_f4[i] = x_f4[i];
+    }
+    __syncthreads();
+
+    if (n >= N) return;
+
+    const int packed_K = K / GPTQ_PACK_FACTOR;
+    const int rows_per_thread = (packed_K + GEMV_K_THREADS - 1) / GEMV_K_THREADS;
+    const int pk_start = k_tid * rows_per_thread;
+    const int pk_end   = min(pk_start + rows_per_thread, packed_K);
+
+    float a_acc = 0.0f, b_acc = 0.0f;
+
+    constexpr int ROWS_PER_GROUP = GPTQ_GROUP_SIZE / GPTQ_PACK_FACTOR;
+    int pk = pk_start;
+    while (pk < pk_end) {
+        const int group = (pk * GPTQ_PACK_FACTOR) / GPTQ_GROUP_SIZE;
+        const float sa = __half2float(sc_a[group * N + n]);
+        const float sb = __half2float(sc_b[group * N + n]);
+        const int group_end = min((group + 1) * ROWS_PER_GROUP, pk_end);
+
+        float ra0 = 0, ra1 = 0;
+        float rb0 = 0, rb1 = 0;
+
+        // 2-way unrolled: 4 qweight loads per step (2 gate + 2 up)
+        for (; pk + 1 < group_end; pk += 2) {
+            uint32_t pa0 = qw_a[(pk    ) * N + n];
+            uint32_t pa1 = qw_a[(pk + 1) * N + n];
+            uint32_t pb0 = qw_b[(pk    ) * N + n];
+            uint32_t pb1 = qw_b[(pk + 1) * N + n];
+            int kb = pk * GPTQ_PACK_FACTOR;
+
+            #pragma unroll
+            for (int i = 0; i < GPTQ_PACK_FACTOR; i++) {
+                float xv = __half2float(smem_x[kb + i]);
+                ra0 += (float)((int)((pa0 >> (i*4)) & 0xF) - GPTQ_ZERO_POINT) * xv;
+                rb0 += (float)((int)((pb0 >> (i*4)) & 0xF) - GPTQ_ZERO_POINT) * xv;
+            }
+            #pragma unroll
+            for (int i = 0; i < GPTQ_PACK_FACTOR; i++) {
+                float xv = __half2float(smem_x[kb + 8 + i]);
+                ra1 += (float)((int)((pa1 >> (i*4)) & 0xF) - GPTQ_ZERO_POINT) * xv;
+                rb1 += (float)((int)((pb1 >> (i*4)) & 0xF) - GPTQ_ZERO_POINT) * xv;
+            }
+        }
+        for (; pk < group_end; pk++) {
+            uint32_t pa = qw_a[pk * N + n];
+            uint32_t pb = qw_b[pk * N + n];
+            int kb = pk * GPTQ_PACK_FACTOR;
+            #pragma unroll
+            for (int i = 0; i < GPTQ_PACK_FACTOR; i++) {
+                float xv = __half2float(smem_x[kb + i]);
+                ra0 += (float)((int)((pa >> (i*4)) & 0xF) - GPTQ_ZERO_POINT) * xv;
+                rb0 += (float)((int)((pb >> (i*4)) & 0xF) - GPTQ_ZERO_POINT) * xv;
+            }
+        }
+
+        // Scale multiply deferred to group boundary
+        a_acc += sa * (ra0 + ra1);
+        b_acc += sb * (rb0 + rb1);
+    }
+
+    smem_red_a[k_tid * GEMV_TILE_N + local_n] = a_acc;
+    smem_red_b[k_tid * GEMV_TILE_N + local_n] = b_acc;
+    __syncthreads();
+
+    if (k_tid == 0) {
+        float sum_a = smem_red_a[local_n], sum_b = smem_red_b[local_n];
+        #pragma unroll
+        for (int t = 1; t < GEMV_K_THREADS; t++) {
+            sum_a += smem_red_a[t * GEMV_TILE_N + local_n];
+            sum_b += smem_red_b[t * GEMV_TILE_N + local_n];
+        }
+        y_a[n] = __float2half(sum_a);
+        y_b[n] = __float2half(sum_b);
+    }
+}
+
+void gptq_dual_gemv(const __half* x,
+                    const GptqWeight& w_a, const GptqWeight& w_b,
+                    __half* y_a, __half* y_b,
+                    cudaStream_t stream)
+{
+    int N = w_a.N;
+    int K = w_a.K;
+    int grid = (N + GEMV_TILE_N - 1) / GEMV_TILE_N;
+    size_t smem = K * sizeof(__half)
+               + 2 * GEMV_TILE_N * GEMV_K_THREADS * sizeof(float);
+
+    gptq_dual_gemv_kernel<<<grid, GEMV_BLOCK_DIM, smem, stream>>>(
+        x, w_a.qweight, w_a.scales, w_b.qweight, w_b.scales,
+        y_a, y_b, K, N);
+}
+
+// ============================================================================
+// Batch GEMV — Prefill path (M>1, small M)
+//
+// Y[M,N] = X[M,K] @ W_q[K,N] with on-the-fly INT4 dequantization
+// Loads each weight row ONCE and computes M dot products simultaneously.
+// X rows read from L2 cache (M×K×2 ≤ ~256KB fits in 4MB L2).
+// Weight bandwidth identical to M=1 GEMV → near-M× speedup.
+//
+// Thread mapping: 4 warps/block, one output column per warp.
+// Each lane processes K/32 packed rows, accumulating M dot products.
+// Scale deferral: multiply by scale once per GPTQ group (every 128 elements).
+// ============================================================================
+
+__global__ void gptq_batch_gemv_kernel(
+    const __half*   __restrict__ X,        // [M, K] row-major FP16
+    const uint32_t* __restrict__ qweight,  // [K/8, N]
+    const __half*   __restrict__ scales,   // [K/128, N]
+    __half*         __restrict__ Y,        // [M, N] row-major FP16
+    int M, int K, int N)
+{
+    constexpr int WARPS = 4;
+    const int warp_id = threadIdx.x / 32;
+    const int lane_id = threadIdx.x % 32;
+    const int n = blockIdx.x * WARPS + warp_id;
+    if (n >= N) return;
+
+    const int packed_K = K / GPTQ_PACK_FACTOR;
+
+    // M accumulators
+    float acc[128];
+    for (int m = 0; m < M; m++) acc[m] = 0.0f;
+
+    constexpr int ROWS_PER_GROUP = GPTQ_GROUP_SIZE / GPTQ_PACK_FACTOR; // 16
+
+    // Each lane strides by 32 through packed_K
+    for (int pk = lane_id; pk < packed_K; pk += 32) {
+        int group = (pk * GPTQ_PACK_FACTOR) / GPTQ_GROUP_SIZE;
+        float s = __half2float(scales[group * N + n]);
+        uint32_t packed = qweight[pk * N + n];
+        int kb = pk * GPTQ_PACK_FACTOR;
+
+        // Dequantize 8 weight values (with deferred scale)
+        float w_raw[8];
+        #pragma unroll
+        for (int i = 0; i < GPTQ_PACK_FACTOR; i++)
+            w_raw[i] = (float)(extract_int4(packed, i) - GPTQ_ZERO_POINT);
+
+        // For each M row: dot product with these 8 weights
+        for (int m = 0; m < M; m++) {
+            float sum = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < GPTQ_PACK_FACTOR; i++)
+                sum += w_raw[i] * __half2float(X[(size_t)m * K + kb + i]);
+            acc[m] += s * sum;
+        }
+    }
+
+    // Warp reduction + write for each M row
+    for (int m = 0; m < M; m++) {
+        float val = acc[m];
+        #pragma unroll
+        for (int off = 16; off > 0; off /= 2)
+            val += __shfl_xor_sync(0xFFFFFFFF, val, off);
+        if (lane_id == 0)
+            Y[(size_t)m * N + n] = __float2half(val);
+    }
+}
+
+void gptq_batch_gemv(const __half* X,
+                     const GptqWeight& weight,
+                     __half* Y,
+                     int M,
+                     cudaStream_t stream)
+{
+    int N = weight.N;
+    int K = weight.K;
+    int grid = (N + 3) / 4;  // 4 warps per block
+    gptq_batch_gemv_kernel<<<grid, 128, 0, stream>>>(
+        X, weight.qweight, weight.scales, Y, M, K, N);
 }
 
 // ============================================================================
@@ -296,6 +612,176 @@ void gptq_gemm(const __half* X,
     gptq_gemm_kernel<<<grid, GEMM_BLOCK_DIM, 0, stream>>>(
         X, weight.qweight, weight.scales, Y,
         M, weight.K, weight.N);
+}
+
+// ============================================================================
+// WMMA GEMM kernel — Tensor core path (M>1)
+// ============================================================================
+//
+// Uses WMMA m16n16k16 FP16 tensor core instructions for GPTQ-Int4 GEMM.
+// Each block computes a [TC_BM, TC_BN] output tile.
+// INT4 weights are dequantized in shared memory during cooperative load.
+//
+// Tile: BM=16, BN=64, BK=64 (half a GPTQ group → one scale per tile/col)
+// Block: 128 threads = 4 warps, each warp → 16×16 output via WMMA
+// SMEM padded: X[16, 68] + W^T[64, 68] = 10.6 KB (pad +4 avoids SMEM bank conflicts)
+// Occupancy: 4 blocks/SM → 16 warps/SM
+//
+// Requirements: K % 64 == 0, N % 64 == 0 (both hold for all MLP projections)
+// M is padded to multiple of 16 internally (output buffers sized [max_seq, dim])
+
+constexpr int TC_BM = 16;
+constexpr int TC_BN = 64;
+constexpr int TC_BK = 64;
+constexpr int TC_BK_PAD = 72;  // +8 halfs: float4-aligned, bank shift 4/row
+constexpr int TC_WARPS = 4;
+constexpr int TC_BLOCK = TC_WARPS * 32;  // 128 threads
+
+__global__ void __launch_bounds__(TC_BLOCK, 2)
+gptq_wmma_gemm_kernel(
+    const __half*   __restrict__ X,       // [M_pad, K] row-major FP16
+    const uint32_t* __restrict__ qweight, // [K/8, N] packed INT4
+    const __half*   __restrict__ scales,  // [K/128, N] FP16
+    __half*         __restrict__ Y,       // [M_pad, N] row-major FP16
+    int K, int N)
+{
+    using namespace nvcuda;
+
+    const int bn = blockIdx.x * TC_BN;   // output column offset
+    const int bm = blockIdx.y * TC_BM;   // output row offset
+    const int warp_id = threadIdx.x / 32;
+    const int tid = threadIdx.x;
+
+    // Each warp handles a 16×16 output sub-tile at column bn + warp_id*16
+    const int warp_col = bn + warp_id * 16;
+
+    // Shared memory — K-inner layout for W: [BN, BK_PAD] enables float4 stores
+    __shared__ __half smem_x[TC_BM * TC_BK_PAD];       // 16×72 = 2.25 KB
+    __shared__ __half smem_w[TC_BN * TC_BK_PAD];        // 64×72 = 9 KB (K-inner)
+    // Base value table: base_values[i] = (i - 8) as FP16, 32 bytes
+    __shared__ __half base_values[16];
+    if (tid < 16) base_values[tid] = __int2half_rn((int)tid - GPTQ_ZERO_POINT);
+    __syncthreads();
+
+    // FP32 accumulator fragment
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+    wmma::fill_fragment(acc, 0.0f);
+
+    // Thread's constant column in the N-tile (tid % 64)
+    const int my_nc = tid & (TC_BN - 1);
+    const int pk_start = tid / TC_BN;  // 0 or 1
+
+    const int num_k_tiles = K / TC_BK;
+
+    // === Register-level double-buffer: prefetch next tile during WMMA ===
+    // Two register sets: cur (being written to SMEM) and nxt (being loaded from DRAM)
+    // With __launch_bounds__(128, 2), we have 64 regs/thread — enough for both sets.
+    float4 cur_x, nxt_x;
+    uint32_t cur_pk[4], nxt_pk[4];
+    half2 cur_s2, nxt_s2;
+
+    // Pre-load tile 0 into 'cur' registers
+    {
+        const int k_base = 0;
+        const int row = tid / 8, col = (tid & 7) * 8;
+        cur_x = *(const float4*)(X + (size_t)(bm + row) * K + k_base + col);
+
+        const int group = k_base / GPTQ_GROUP_SIZE;
+        const uint32_t* qw_ptr = qweight + (size_t)(k_base / GPTQ_PACK_FACTOR) * N + bn;
+        cur_s2 = __half2half2(scales[(size_t)group * N + bn + my_nc]);
+
+        cur_pk[0] = qw_ptr[(pk_start + 0) * N + my_nc];
+        cur_pk[1] = qw_ptr[(pk_start + 2) * N + my_nc];
+        cur_pk[2] = qw_ptr[(pk_start + 4) * N + my_nc];
+        cur_pk[3] = qw_ptr[(pk_start + 6) * N + my_nc];
+    }
+
+    for (int kt = 0; kt < num_k_tiles; kt++) {
+        // === Phase 1: write current tile from regs to SMEM ===
+        {
+            const int row = tid / 8, col = (tid & 7) * 8;
+            *(float4*)(smem_x + row * TC_BK_PAD + col) = cur_x;
+        }
+
+        #pragma unroll
+        for (int r = 0; r < 4; r++) {
+            uint32_t packed = cur_pk[r];
+            int pk_row = pk_start + r * 2;
+            __half vals[8];
+            #pragma unroll
+            for (int p = 0; p < 4; p++) {
+                int nib0 = (packed >> (p * 8)) & 0xF;
+                int nib1 = (packed >> (p * 8 + 4)) & 0xF;
+                half2 r2 = __hmul2(cur_s2, __halves2half2(base_values[nib0], base_values[nib1]));
+                vals[p * 2]     = __low2half(r2);
+                vals[p * 2 + 1] = __high2half(r2);
+            }
+            *(float4*)(smem_w + my_nc * TC_BK_PAD + pk_row * 8) = *(float4*)vals;
+        }
+
+        __syncthreads();
+
+        // === Phase 2: WMMA compute + prefetch next tile ===
+        // Issue DRAM loads for tile kt+1 BEFORE WMMA so loads overlap with compute
+        if (kt + 1 < num_k_tiles) {
+            const int k_next = (kt + 1) * TC_BK;
+            const int row = tid / 8, col = (tid & 7) * 8;
+            nxt_x = *(const float4*)(X + (size_t)(bm + row) * K + k_next + col);
+
+            const int group = k_next / GPTQ_GROUP_SIZE;
+            const uint32_t* qw_ptr = qweight + (size_t)(k_next / GPTQ_PACK_FACTOR) * N + bn;
+            nxt_s2 = __half2half2(scales[(size_t)group * N + bn + my_nc]);
+
+            nxt_pk[0] = qw_ptr[(pk_start + 0) * N + my_nc];
+            nxt_pk[1] = qw_ptr[(pk_start + 2) * N + my_nc];
+            nxt_pk[2] = qw_ptr[(pk_start + 4) * N + my_nc];
+            nxt_pk[3] = qw_ptr[(pk_start + 6) * N + my_nc];
+        }
+
+        // WMMA compute (reads SMEM, doesn't touch DRAM — loads overlap)
+        {
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
+
+            #pragma unroll
+            for (int wk = 0; wk < TC_BK / 16; wk++) {
+                wmma::load_matrix_sync(a_frag, smem_x + wk * 16, TC_BK_PAD);
+                wmma::load_matrix_sync(b_frag, smem_w + warp_id * 16 * TC_BK_PAD + wk * 16, TC_BK_PAD);
+                wmma::mma_sync(acc, a_frag, b_frag, acc);
+            }
+        }
+
+        __syncthreads();
+
+        // Swap: next becomes current for the next iteration
+        cur_x = nxt_x;
+        cur_s2 = nxt_s2;
+        cur_pk[0] = nxt_pk[0]; cur_pk[1] = nxt_pk[1];
+        cur_pk[2] = nxt_pk[2]; cur_pk[3] = nxt_pk[3];
+    }
+
+    // === Store: FP32 accum → FP16 output ===
+    wmma::fragment<wmma::accumulator, 16, 16, 16, __half> acc_h;
+    for (int i = 0; i < acc.num_elements; i++) {
+        acc_h.x[i] = __float2half(acc.x[i]);
+    }
+    wmma::store_matrix_sync(Y + (size_t)bm * N + warp_col, acc_h, N, wmma::mem_row_major);
+}
+
+void gptq_wmma_gemm(const __half* X,
+                     const GptqWeight& weight,
+                     __half* Y,
+                     int M,
+                     cudaStream_t stream)
+{
+    // Pad M to multiple of 16 (output buffers are sized [max_seq, dim])
+    int M_pad = (M + TC_BM - 1) / TC_BM * TC_BM;
+
+    dim3 grid(weight.N / TC_BN, M_pad / TC_BM);
+
+    gptq_wmma_gemm_kernel<<<grid, TC_BLOCK, 0, stream>>>(
+        X, weight.qweight, weight.scales, Y,
+        weight.K, weight.N);
 }
 
 // ============================================================================

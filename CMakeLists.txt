@@ -58,12 +58,14 @@ file(GLOB_RECURSE COMMUNIS_SOURCES
 )
 
 add_library(communis STATIC ${COMMUNIS_SOURCES})
+target_link_libraries(communis PRIVATE CUDA::cudart)
 
 # ============================================================================
 # Main executable
 # ============================================================================
 add_executable(deusridet
     src/main.cpp
+    src/commands.cpp
 )
 target_link_libraries(deusridet PRIVATE machina communis stdc++fs rt dl)
 

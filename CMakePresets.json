@@ -1,0 +1,21 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "orin",
+            "displayName": "Jetson AGX Orin (SM87, CUDA 12.9)",
+            "binaryDir": "${sourceDir}/build",
+            "cacheVariables": {
+                "CMAKE_CUDA_COMPILER": "/usr/local/cuda-12.9/bin/nvcc",
+                "CUDAToolkit_ROOT": "/usr/local/cuda-12.9",
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "orin",
+            "configurePreset": "orin"
+        }
+    ]
+}

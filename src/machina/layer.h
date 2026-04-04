@@ -27,6 +27,13 @@ void rms_norm(const __half* x, const __half* weight, __half* out,
               int rows, int dim, float eps,
               cudaStream_t stream = 0);
 
+// Fused Residual + RMSNorm: residual += x; out = norm(residual) * weight
+// Saves a kernel launch + memory round-trip over separate add + norm.
+void residual_rms_norm(__half* residual, const __half* x,
+                       const __half* weight, __half* out,
+                       int rows, int dim, float eps,
+                       cudaStream_t stream = 0);
+
 // Gated RMSNorm: out = weight * norm(x) * silu(gate)
 // x[n, dim], gate[n, dim], weight[dim], out[n, dim]
 void rms_norm_gated(const __half* x, const __half* gate,
@@ -54,6 +61,10 @@ void silu_inplace(__half* x, int n, cudaStream_t stream = 0);
 void elementwise_mul(const __half* a, const __half* b, __half* out,
                      int n, cudaStream_t stream = 0);
 
+// Fused SiLU + multiply: out = silu(gate) * up
+void silu_mul(const __half* gate, const __half* up, __half* out,
+              int n, cudaStream_t stream = 0);
+
 // Element-wise add: out = a + b
 void elementwise_add(const __half* a, const __half* b, __half* out,
                      int n, cudaStream_t stream = 0);
@@ -71,6 +82,24 @@ void sigmoid_gate(const __half* x, const __half* gate, __half* out,
 void linear_forward(const __half* X, const Linear& weight, __half* Y,
                     int M, cudaStream_t stream = 0);
 
+// INT8 quantized linear forward: Y[M,N] = X[M,K] @ W_int8^T[K,N] * scales[N]
+// For M=1: custom INT8 GEMV. For M>1: dequant to FP16 temp + cuBLAS.
+void int8_linear_forward(const __half* X, const Int8Linear& weight, __half* Y,
+                         int M, cudaStream_t stream = 0);
+
+// Dual INT8 linear forward: compute two matmuls sharing the same x in SMEM.
+// Y1 = w1 @ X, Y2 = w2 @ X. One kernel launch, one x load.
+void int8_dual_linear_forward(const __half* X,
+                               const Int8Linear& w1, __half* Y1,
+                               const Int8Linear& w2, __half* Y2,
+                               int M, cudaStream_t stream = 0);
+
+// Quantize FP16 weights to INT8 (per-channel symmetric) on GPU.
+// Allocates int8 weight + scales via cudaMalloc. src_fp16 is [N, K] row-major.
+void quantize_fp16_to_int8(const __half* src_fp16, Int8Linear& dst,
+                           int out_features, int in_features,
+                           cudaStream_t stream = 0);
+
 // ============================================================================
 // RoPE (partial rotary position embedding)
 // ============================================================================
@@ -81,7 +110,7 @@ void linear_forward(const __half* X, const Linear& weight, __half* Y,
 // pos: absolute position index.
 void apply_rope(__half* q, __half* k,
                 int num_heads, int num_kv_heads, int head_dim,
-                int rotary_dim, int pos, float theta,
+                int rotary_dim, const int* d_pos, float theta,
                 cudaStream_t stream = 0);
 
 // ============================================================================
@@ -117,11 +146,31 @@ void causal_conv1d_step(const __half* x_in, __half* conv_state,
                         int conv_dim, int kernel_size,
                         cudaStream_t stream = 0);
 
+// Fused conv1d step + SiLU: conv → silu in registers (no intermediate write)
+void causal_conv1d_step_silu(const __half* x_in, __half* conv_state,
+                              const __half* conv_weight, __half* x_out,
+                              int conv_dim, int kernel_size,
+                              cudaStream_t stream = 0);
+
 // ============================================================================
 // Sampling
 // ============================================================================
 
-// Greedy: return argmax of logits[vocab_size]
-int greedy_sample(const __half* logits, int vocab_size);
+// Launch argmax kernel without sync (graph-capturable)
+void argmax_async(const __half* logits, int vocab_size, int* d_token_out,
+                  cudaStream_t stream = 0);
+
+// Greedy: return argmax of logits[vocab_size] (includes D2H + sync)
+int greedy_sample(const __half* logits, int vocab_size, int* d_token_out,
+                  cudaStream_t stream = 0);
+
+// Top-k / Top-p sampling (GPU, single block)
+// probs_workspace: pre-allocated float[vocab_size] for intermediate probabilities.
+// rng_seed: per-call seed for PRNG (caller should increment each call).
+// Result written to d_token_out[0].
+void sample_top_k_top_p(const __half* logits, float* probs_workspace,
+                         int vocab_size, const SamplingParams& params,
+                         unsigned long long rng_seed,
+                         int* d_token_out, cudaStream_t stream = 0);
 
 } // namespace deusridet

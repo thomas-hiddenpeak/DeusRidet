@@ -54,6 +54,37 @@ deliberate choice: consciousness should not be locked behind closed doors.
 
 A `LICENSE` file must be present at the repository root.
 
+## Performance Optimization Principle
+
+**Do not use "hardware limitations" as an excuse to skip optimizations.**
+Every CUDA kernel must pursue maximum memory bandwidth utilization. The target
+is at least 60% of theoretical DRAM bandwidth (192 GB/s on Orin). Specific
+mandatory practices:
+
+- **Vectorized memory access**: All elementwise and GEMV kernels must use
+  `float4` (128-bit) loads/stores. Scalar `__half` loads are prohibited in
+  performance-critical paths
+- **Shared memory for broadcast data**: Any input vector read by multiple
+  threads (e.g., x in GEMV) must be loaded to SMEM, not read redundantly
+  from global/L1
+- **Register caching**: Two-pass kernels (e.g., RMSNorm) must cache
+  intermediate values in registers between passes — never re-read from
+  global memory
+- **Kernel fusion**: Fuse adjacent elementwise operations into GEMV output
+  writes or norm kernels. Every standalone elementwise kernel on a small
+  buffer (< 64KB) is a red flag — launch overhead dominates
+- **Scale/constant hoisting**: Values constant within a loop iteration group
+  must be loaded once and reused (e.g., GPTQ scales per group of 16 rows)
+- **Loop unrolling for memory pipelining**: Inner loops with global memory
+  loads must be unrolled (≥ 4-way) to keep multiple loads in-flight
+- **Fast math intrinsics**: Use `__expf`, `__logf`, `exp2f` instead of
+  `expf`, `logf` where precision permits (SiLU, softmax, etc.)
+- **Reduce kernel launches**: Prefer fused kernels over sequential launches.
+  One kernel doing 3 operations > 3 kernels doing 1 each
+
+When profiling shows a kernel below 40% bandwidth utilization, it must be
+investigated and optimized before moving on to new features.
+
 ## Reference Projects
 
 | Project | Role | Location |

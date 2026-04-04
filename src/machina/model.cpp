@@ -3,10 +3,14 @@
 // Loads weights from multi-shard safetensors into device memory.
 // BF16 → FP16 conversion at load time. RMSNorm weights precomputed as (1+w).
 // Pool allocation: one cudaMalloc per shard, sub-allocate tensors from pool.
+// Shard streaming: each shard's mmap is released immediately after copy,
+// reclaiming physical pages for GPU use (critical on Tegra unified memory).
 
 #include "model.h"
+#include "layer.h"
 #include "safetensors.h"
 #include "allocator.h"
+#include "convert.h"
 #include "../communis/log.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -18,409 +22,377 @@
 
 namespace deusridet {
 
+// BF16→FP16 conversion is done on-device via convert.cu kernels.
+// Raw BF16 bytes are copied to GPU first, then converted in-place.
+// This avoids the scalar CPU loop bottleneck on ARM.
+
 // ============================================================================
-// BF16 → FP16 conversion helpers
+// Tensor name classification and parsing
 // ============================================================================
 
-static inline float bf16_to_float(uint16_t bf16) {
-    uint32_t bits = (uint32_t)bf16 << 16;
-    float f;
-    memcpy(&f, &bits, sizeof(f));
-    return f;
+static const char* LAYER_PREFIX = "model.language_model.layers.";
+static const size_t LAYER_PREFIX_LEN = 28;  // strlen("model.language_model.layers.")
+
+// Parse layer index from "model.language_model.layers.{i}...."
+static int parse_layer_idx(const char* name) {
+    return atoi(name + LAYER_PREFIX_LEN);
 }
 
-// Convert BF16 buffer to FP16 in-place on host, then copy to device.
-// Also optionally adds 1.0 to each element (for RMSNorm precompute).
-static void load_bf16_to_fp16(const void* src, __half* dst_device,
-                              size_t numel, bool add_one = false) {
-    std::vector<__half> host(numel);
-    const uint16_t* bf16 = static_cast<const uint16_t*>(src);
-    for (size_t i = 0; i < numel; i++) {
-        float val = bf16_to_float(bf16[i]);
-        if (add_one) val += 1.0f;
-        host[i] = __float2half(val);
-    }
-    cudaMemcpy(dst_device, host.data(), numel * sizeof(__half),
-               cudaMemcpyHostToDevice);
+// Extract suffix after "model.language_model.layers.{i}."
+static const char* layer_suffix(const char* name) {
+    const char* p = name + LAYER_PREFIX_LEN;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p == '.') p++;
+    return p;
 }
 
-// Copy F32 buffer directly to device F32.
-static void load_f32(const void* src, float* dst_device, size_t numel) {
-    cudaMemcpy(dst_device, src, numel * sizeof(float), cudaMemcpyHostToDevice);
-}
+// Check if a tensor name is part of the model we load
+static bool is_model_tensor(const std::string& name) {
+    if (name == "model.language_model.embed_tokens.weight") return true;
+    if (name == "lm_head.weight") return true;
+    if (name == "model.language_model.norm.weight") return true;
 
-// Copy F16 buffer directly to device.
-static void load_f16(const void* src, __half* dst_device, size_t numel) {
-    cudaMemcpy(dst_device, src, numel * sizeof(__half), cudaMemcpyHostToDevice);
-}
+    if (name.compare(0, LAYER_PREFIX_LEN, LAYER_PREFIX) != 0) return false;
 
-// Copy I32 buffer directly to device.
-static void load_i32(const void* src, uint32_t* dst_device, size_t numel) {
-    cudaMemcpy(dst_device, src, numel * sizeof(uint32_t), cudaMemcpyHostToDevice);
-}
+    const char* suffix = layer_suffix(name.c_str());
 
-// ============================================================================
-// Device memory allocation with tracking
-// ============================================================================
+    // Layer norms
+    if (strcmp(suffix, "input_layernorm.weight") == 0) return true;
+    if (strcmp(suffix, "post_attention_layernorm.weight") == 0) return true;
+    // Full Attention
+    if (strcmp(suffix, "self_attn.q_proj.weight") == 0) return true;
+    if (strcmp(suffix, "self_attn.k_proj.weight") == 0) return true;
+    if (strcmp(suffix, "self_attn.v_proj.weight") == 0) return true;
+    if (strcmp(suffix, "self_attn.o_proj.weight") == 0) return true;
+    if (strcmp(suffix, "self_attn.q_norm.weight") == 0) return true;
+    if (strcmp(suffix, "self_attn.k_norm.weight") == 0) return true;
+    // DeltaNet
+    if (strcmp(suffix, "linear_attn.in_proj_qkv.weight") == 0) return true;
+    if (strcmp(suffix, "linear_attn.in_proj_z.weight") == 0) return true;
+    if (strcmp(suffix, "linear_attn.in_proj_a.weight") == 0) return true;
+    if (strcmp(suffix, "linear_attn.in_proj_b.weight") == 0) return true;
+    if (strcmp(suffix, "linear_attn.out_proj.weight") == 0) return true;
+    if (strcmp(suffix, "linear_attn.conv1d.weight") == 0) return true;
+    if (strcmp(suffix, "linear_attn.A_log") == 0) return true;
+    if (strcmp(suffix, "linear_attn.dt_bias") == 0) return true;
+    if (strcmp(suffix, "linear_attn.norm.weight") == 0) return true;
+    // MLP GPTQ
+    if (strcmp(suffix, "mlp.gate_proj.qweight") == 0) return true;
+    if (strcmp(suffix, "mlp.gate_proj.scales") == 0) return true;
+    if (strcmp(suffix, "mlp.up_proj.qweight") == 0) return true;
+    if (strcmp(suffix, "mlp.up_proj.scales") == 0) return true;
+    if (strcmp(suffix, "mlp.down_proj.qweight") == 0) return true;
+    if (strcmp(suffix, "mlp.down_proj.scales") == 0) return true;
 
-struct DevicePool {
-    size_t total = 0;
-
-    __half* alloc_fp16(size_t numel) {
-        size_t bytes = numel * sizeof(__half);
-        void* ptr = nullptr;
-        cudaError_t err = cudaMalloc(&ptr, bytes);
-        if (err != cudaSuccess) {
-            LOG_ERROR("Model", "cudaMalloc failed (%zu bytes): %s",
-                      bytes, cudaGetErrorString(err));
-            return nullptr;
-        }
-        total += bytes;
-        return static_cast<__half*>(ptr);
-    }
-
-    float* alloc_f32(size_t numel) {
-        size_t bytes = numel * sizeof(float);
-        void* ptr = nullptr;
-        cudaError_t err = cudaMalloc(&ptr, bytes);
-        if (err != cudaSuccess) {
-            LOG_ERROR("Model", "cudaMalloc failed (%zu bytes): %s",
-                      bytes, cudaGetErrorString(err));
-            return nullptr;
-        }
-        total += bytes;
-        return static_cast<float*>(ptr);
-    }
-
-    uint32_t* alloc_i32(size_t numel) {
-        size_t bytes = numel * sizeof(uint32_t);
-        void* ptr = nullptr;
-        cudaError_t err = cudaMalloc(&ptr, bytes);
-        if (err != cudaSuccess) {
-            LOG_ERROR("Model", "cudaMalloc failed (%zu bytes): %s",
-                      bytes, cudaGetErrorString(err));
-            return nullptr;
-        }
-        total += bytes;
-        return static_cast<uint32_t*>(ptr);
-    }
-};
-
-// ============================================================================
-// Tensor name helpers
-// ============================================================================
-
-static std::string layer_prefix(int i) {
-    return "model.language_model.layers." + std::to_string(i);
+    return false;
 }
 
 // ============================================================================
-// Load a single Linear (BF16 → FP16)
+// Dispatch: assign device pointer to the correct ModelWeights field
 // ============================================================================
 
-static bool load_linear(SafetensorsLoader& loader, DevicePool& pool,
-                        const std::string& name, Linear& linear) {
-    std::string wname = name + ".weight";
-    if (!loader.has_tensor(wname)) {
-        LOG_ERROR("Model", "Missing tensor: %s", wname.c_str());
-        return false;
-    }
-    auto tensor = loader.get_tensor(wname);
-    auto& shape = tensor->shape();
-    linear.out_features = (int)shape[0];
-    linear.in_features  = (int)shape[1];
-    size_t numel = (size_t)linear.out_features * linear.in_features;
+// Set Linear fields from a weight tensor (BF16/FP16 → FP16)
+static void assign_linear(Linear& linear, void* d_ptr, const Tensor& tensor) {
+    linear.weight = static_cast<__half*>(d_ptr);
+    linear.out_features = (int)tensor.shape()[0];
+    linear.in_features  = (int)tensor.shape()[1];
+}
 
-    linear.weight = pool.alloc_fp16(numel);
-    if (!linear.weight) return false;
+// Load FP16/BF16 weight, then quantize to INT8 per-channel.
+// d_ptr holds the temporary FP16 data (from copy_tensor_to_device).
+static void assign_int8_linear(Int8Linear& int8, void* d_ptr, const Tensor& tensor,
+                               cudaStream_t stream) {
+    int N = (int)tensor.shape()[0];
+    int K = (int)tensor.shape()[1];
+    quantize_fp16_to_int8(static_cast<const __half*>(d_ptr), int8, N, K, stream);
+}
 
-    if (tensor->dtype() == DataType::BF16) {
-        load_bf16_to_fp16(tensor->data(), linear.weight, numel);
-    } else if (tensor->dtype() == DataType::FP16) {
-        load_f16(tensor->data(), linear.weight, numel);
-    } else {
-        LOG_ERROR("Model", "Unexpected dtype for %s", wname.c_str());
-        return false;
+// Set GPTQ qweight fields
+static void assign_gptq_qweight(GptqWeight& gptq, void* d_ptr, const Tensor& tensor) {
+    gptq.qweight = static_cast<const uint32_t*>(d_ptr);
+    gptq.K = (int)tensor.shape()[0] * 8;  // unpack INT4
+    gptq.N = (int)tensor.shape()[1];
+}
+
+// Set GPTQ scales fields
+static void assign_gptq_scales(GptqWeight& gptq, void* d_ptr) {
+    gptq.scales = static_cast<const __half*>(d_ptr);
+}
+
+// Copy tensor data to device.  All data types are raw-copied first.
+// BF16→FP16 and +1 (RMSNorm) transforms run as GPU kernels after the copy.
+static void copy_tensor_to_device(void* d_ptr, const Tensor& tensor,
+                                  bool add_one, cudaStream_t stream) {
+    DataType dt = tensor.dtype();
+
+    // Always raw memcpy first — uniform throughput for all dtypes
+    cudaMemcpyAsync(d_ptr, tensor.data(), tensor.nbytes(),
+                    cudaMemcpyHostToDevice, stream);
+
+    // Post-copy GPU transforms
+    if (dt == DataType::BF16) {
+        bf16_to_fp16_gpu(d_ptr, tensor.numel(), add_one, stream);
+    } else if (dt == DataType::FP16 && add_one) {
+        fp16_add_one_gpu(static_cast<__half*>(d_ptr), tensor.numel(), stream);
     }
-    return true;
+}
+
+// Dispatch a tensor: assign pointer to ModelWeights field + copy data
+static void dispatch_tensor(const std::string& name, Tensor& tensor,
+                            void* d_ptr, ModelWeights& weights,
+                            cudaStream_t stream) {
+    // Global tensors
+    if (name == "model.language_model.embed_tokens.weight") {
+        weights.embed_tokens = static_cast<__half*>(d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+        return;
+    }
+    if (name == "lm_head.weight") {
+        weights.lm_head = static_cast<__half*>(d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+        // Quantize lm_head to INT8 for decode GEMV (halves weight data: 2.54GB → 1.27GB)
+        quantize_fp16_to_int8(weights.lm_head, weights.lm_head_int8,
+                              ModelConfig::VOCAB_SIZE, ModelConfig::HIDDEN_SIZE, stream);
+        return;
+    }
+    if (name == "model.language_model.norm.weight") {
+        weights.final_norm = static_cast<__half*>(d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, true, stream);  // +1
+        return;
+    }
+
+    // Layer tensors
+    int li = parse_layer_idx(name.c_str());
+    const char* suffix = layer_suffix(name.c_str());
+    auto& lw = weights.layers[li];
+
+    // Layer norms (BF16 → FP16, +1)
+    if (strcmp(suffix, "input_layernorm.weight") == 0) {
+        lw.input_layernorm = static_cast<__half*>(d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, true, stream);
+    }
+    else if (strcmp(suffix, "post_attention_layernorm.weight") == 0) {
+        lw.post_attn_layernorm = static_cast<__half*>(d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, true, stream);
+    }
+    // Full Attention
+    else if (strcmp(suffix, "self_attn.q_proj.weight") == 0) {
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+        assign_int8_linear(lw.full_attn.q_proj, d_ptr, tensor, stream);
+    }
+    else if (strcmp(suffix, "self_attn.k_proj.weight") == 0) {
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+        assign_int8_linear(lw.full_attn.k_proj, d_ptr, tensor, stream);
+    }
+    else if (strcmp(suffix, "self_attn.v_proj.weight") == 0) {
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+        assign_int8_linear(lw.full_attn.v_proj, d_ptr, tensor, stream);
+    }
+    else if (strcmp(suffix, "self_attn.o_proj.weight") == 0) {
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+        assign_int8_linear(lw.full_attn.o_proj, d_ptr, tensor, stream);
+    }
+    else if (strcmp(suffix, "self_attn.q_norm.weight") == 0) {
+        lw.full_attn.q_norm = static_cast<__half*>(d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, true, stream);  // +1
+    }
+    else if (strcmp(suffix, "self_attn.k_norm.weight") == 0) {
+        lw.full_attn.k_norm = static_cast<__half*>(d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, true, stream);  // +1
+    }
+    // DeltaNet
+    else if (strcmp(suffix, "linear_attn.in_proj_qkv.weight") == 0) {
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+        assign_int8_linear(lw.delta_net.in_proj_qkv, d_ptr, tensor, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.in_proj_z.weight") == 0) {
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+        assign_int8_linear(lw.delta_net.in_proj_z, d_ptr, tensor, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.in_proj_a.weight") == 0) {
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+        assign_int8_linear(lw.delta_net.in_proj_a, d_ptr, tensor, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.in_proj_b.weight") == 0) {
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+        assign_int8_linear(lw.delta_net.in_proj_b, d_ptr, tensor, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.out_proj.weight") == 0) {
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+        assign_int8_linear(lw.delta_net.out_proj, d_ptr, tensor, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.conv1d.weight") == 0) {
+        lw.delta_net.conv1d_weight = static_cast<__half*>(d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.A_log") == 0) {
+        lw.delta_net.A_log = static_cast<float*>(d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.dt_bias") == 0) {
+        lw.delta_net.dt_bias = static_cast<__half*>(d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.norm.weight") == 0) {
+        lw.delta_net.norm_weight = static_cast<float*>(d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    // MLP GPTQ
+    else if (strcmp(suffix, "mlp.gate_proj.qweight") == 0) {
+        assign_gptq_qweight(lw.mlp.gate_proj, d_ptr, tensor);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "mlp.gate_proj.scales") == 0) {
+        assign_gptq_scales(lw.mlp.gate_proj, d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "mlp.up_proj.qweight") == 0) {
+        assign_gptq_qweight(lw.mlp.up_proj, d_ptr, tensor);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "mlp.up_proj.scales") == 0) {
+        assign_gptq_scales(lw.mlp.up_proj, d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "mlp.down_proj.qweight") == 0) {
+        assign_gptq_qweight(lw.mlp.down_proj, d_ptr, tensor);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "mlp.down_proj.scales") == 0) {
+        assign_gptq_scales(lw.mlp.down_proj, d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
 }
 
 // ============================================================================
-// Load GPTQ weight (qweight I32 + scales F16)
-// ============================================================================
-
-static bool load_gptq(SafetensorsLoader& loader, DevicePool& pool,
-                      const std::string& name, GptqWeight& gptq) {
-    std::string qw_name = name + ".qweight";
-    std::string sc_name = name + ".scales";
-
-    if (!loader.has_tensor(qw_name) || !loader.has_tensor(sc_name)) {
-        LOG_ERROR("Model", "Missing GPTQ tensors for %s", name.c_str());
-        return false;
-    }
-
-    auto qw = loader.get_tensor(qw_name);
-    auto sc = loader.get_tensor(sc_name);
-
-    int packed_K = (int)qw->shape()[0];
-    int N = (int)qw->shape()[1];
-    gptq.K = packed_K * 8;  // unpack INT4
-    gptq.N = N;
-
-    size_t qw_numel = (size_t)packed_K * N;
-    size_t sc_numel = (size_t)sc->shape()[0] * sc->shape()[1];
-
-    gptq.qweight = pool.alloc_i32(qw_numel);
-    gptq.scales  = pool.alloc_fp16(sc_numel);
-    if (!gptq.qweight || !gptq.scales) return false;
-
-    load_i32(qw->data(), const_cast<uint32_t*>(gptq.qweight), qw_numel);
-    load_f16(sc->data(), const_cast<__half*>(gptq.scales), sc_numel);
-
-    return true;
-}
-
-// ============================================================================
-// Load RMSNorm weight (BF16 → FP16, with optional +1 precompute)
-// ============================================================================
-
-static bool load_norm(SafetensorsLoader& loader, DevicePool& pool,
-                      const std::string& name, __half*& dst, bool add_one) {
-    if (!loader.has_tensor(name)) {
-        LOG_ERROR("Model", "Missing tensor: %s", name.c_str());
-        return false;
-    }
-    auto tensor = loader.get_tensor(name);
-    size_t numel = tensor->numel();
-    dst = pool.alloc_fp16(numel);
-    if (!dst) return false;
-
-    if (tensor->dtype() == DataType::BF16) {
-        load_bf16_to_fp16(tensor->data(), dst, numel, add_one);
-    } else if (tensor->dtype() == DataType::FP16) {
-        // F16: convert through float to apply +1 if needed
-        if (add_one) {
-            std::vector<__half> host(numel);
-            const __half* src = static_cast<const __half*>(tensor->data());
-            for (size_t i = 0; i < numel; i++) {
-                host[i] = __float2half(__half2float(src[i]) + 1.0f);
-            }
-            cudaMemcpy(dst, host.data(), numel * sizeof(__half),
-                       cudaMemcpyHostToDevice);
-        } else {
-            load_f16(tensor->data(), dst, numel);
-        }
-    } else {
-        LOG_ERROR("Model", "Unexpected dtype for %s", name.c_str());
-        return false;
-    }
-    return true;
-}
-
-// ============================================================================
-// Load F32 small tensors (A_log, gated norm weight)
-// ============================================================================
-
-static bool load_f32_tensor(SafetensorsLoader& loader, DevicePool& pool,
-                            const std::string& name, float*& dst) {
-    if (!loader.has_tensor(name)) {
-        LOG_ERROR("Model", "Missing tensor: %s", name.c_str());
-        return false;
-    }
-    auto tensor = loader.get_tensor(name);
-    size_t numel = tensor->numel();
-    dst = pool.alloc_f32(numel);
-    if (!dst) return false;
-
-    if (tensor->dtype() == DataType::FP32) {
-        load_f32(tensor->data(), dst, numel);
-    } else {
-        LOG_ERROR("Model", "Expected F32 for %s", name.c_str());
-        return false;
-    }
-    return true;
-}
-
-// ============================================================================
-// Load BF16 small tensors (dt_bias, conv1d_weight) → FP16
-// ============================================================================
-
-static bool load_small_bf16(SafetensorsLoader& loader, DevicePool& pool,
-                            const std::string& name, __half*& dst) {
-    if (!loader.has_tensor(name)) {
-        LOG_ERROR("Model", "Missing tensor: %s", name.c_str());
-        return false;
-    }
-    auto tensor = loader.get_tensor(name);
-    size_t numel = tensor->numel();
-    dst = pool.alloc_fp16(numel);
-    if (!dst) return false;
-
-    if (tensor->dtype() == DataType::BF16) {
-        load_bf16_to_fp16(tensor->data(), dst, numel);
-    } else if (tensor->dtype() == DataType::FP16) {
-        load_f16(tensor->data(), dst, numel);
-    } else {
-        LOG_ERROR("Model", "Unexpected dtype for %s", name.c_str());
-        return false;
-    }
-    return true;
-}
-
-// ============================================================================
-// Public API: load_model_weights
+// Public API: load_model_weights (stream_load + pool allocation)
 // ============================================================================
 
 bool load_model_weights(const std::string& model_dir, ModelWeights& weights) {
     using Clock = std::chrono::steady_clock;
     auto t0 = Clock::now();
-
-    LOG_INFO("Model", "Loading Qwen3.5-27B weights from %s", model_dir.c_str());
-
-    SafetensorsLoader loader(model_dir);
-    DevicePool pool;
-    bool ok = true;
     using MC = ModelConfig;
 
-    // --- Embedding + LM head (BF16, large) ---
-    {
-        size_t embed_numel = (size_t)MC::VOCAB_SIZE * MC::HIDDEN_SIZE;
-        weights.embed_tokens = pool.alloc_fp16(embed_numel);
-        weights.lm_head      = pool.alloc_fp16(embed_numel);
-        if (!weights.embed_tokens || !weights.lm_head) return false;
+    LOG_INFO("Model", "Loading Qwen3.5-27B weights from %s", model_dir.c_str());
+    LOG_INFO("Model", "  Strategy: shard-streaming + pool allocation + async copy");
 
-        auto et = loader.get_tensor("model.language_model.embed_tokens.weight");
-        load_bf16_to_fp16(et->data(), weights.embed_tokens, embed_numel);
-        LOG_INFO("Model", "  embed_tokens: [%d, %d] → FP16 (%.1f MB)",
-                 MC::VOCAB_SIZE, MC::HIDDEN_SIZE,
-                 embed_numel * 2 / 1048576.0);
+    // Pre-init is_full_attention flags
+    for (int i = 0; i < MC::NUM_LAYERS; i++)
+        weights.layers[i].is_full_attention = MC::is_full_attention(i);
 
-        auto lh = loader.get_tensor("lm_head.weight");
-        load_bf16_to_fp16(lh->data(), weights.lm_head, embed_numel);
-        LOG_INFO("Model", "  lm_head: [%d, %d] → FP16 (%.1f MB)",
-                 MC::VOCAB_SIZE, MC::HIDDEN_SIZE,
-                 embed_numel * 2 / 1048576.0);
-    }
+    // Dedicated stream for async H2D copies
+    cudaStream_t copy_stream;
+    cudaStreamCreate(&copy_stream);
 
-    // --- Final norm ---
-    ok = ok && load_norm(loader, pool,
-                         "model.language_model.norm.weight",
-                         weights.final_norm, /*add_one=*/true);
+    bool ok = true;
+    int total_tensors = 0;
+    int total_cudamallocs = 0;
 
-    // --- Per-layer weights ---
-    for (int i = 0; i < MC::NUM_LAYERS && ok; i++) {
-        std::string lp = layer_prefix(i);
-        LayerWeights& lw = weights.layers[i];
-        lw.is_full_attention = MC::is_full_attention(i);
+    SafetensorsLoader::stream_load(model_dir,
+        [&](size_t shard_idx, SafetensorsFile& shard) {
+            if (!ok) return;
+            auto shard_t0 = Clock::now();
+            auto all_names = shard.tensor_names();
 
-        // Layer norms (both layer types have these)
-        ok = ok && load_norm(loader, pool, lp + ".input_layernorm.weight",
-                             lw.input_layernorm, true);
-        ok = ok && load_norm(loader, pool, lp + ".post_attention_layernorm.weight",
-                             lw.post_attn_layernorm, true);
+            // Filter to model tensors only (skip MTP, visual, etc.)
+            std::vector<std::string> names;
+            names.reserve(all_names.size());
+            for (const auto& n : all_names)
+                if (is_model_tensor(n)) names.push_back(n);
 
-        // Attention weights
-        if (lw.is_full_attention) {
-            auto& fa = lw.full_attn;
-            ok = ok && load_linear(loader, pool, lp + ".self_attn.q_proj", fa.q_proj);
-            ok = ok && load_linear(loader, pool, lp + ".self_attn.k_proj", fa.k_proj);
-            ok = ok && load_linear(loader, pool, lp + ".self_attn.v_proj", fa.v_proj);
-            ok = ok && load_linear(loader, pool, lp + ".self_attn.o_proj", fa.o_proj);
-            ok = ok && load_norm(loader, pool, lp + ".self_attn.q_norm.weight",
-                                 fa.q_norm, true);
-            ok = ok && load_norm(loader, pool, lp + ".self_attn.k_norm.weight",
-                                 fa.k_norm, true);
-        } else {
-            auto& dn = lw.delta_net;
-            ok = ok && load_linear(loader, pool, lp + ".linear_attn.in_proj_qkv", dn.in_proj_qkv);
-            ok = ok && load_linear(loader, pool, lp + ".linear_attn.in_proj_z", dn.in_proj_z);
-            ok = ok && load_linear(loader, pool, lp + ".linear_attn.in_proj_a", dn.in_proj_a);
-            ok = ok && load_linear(loader, pool, lp + ".linear_attn.in_proj_b", dn.in_proj_b);
-            ok = ok && load_linear(loader, pool, lp + ".linear_attn.out_proj", dn.out_proj);
-            ok = ok && load_small_bf16(loader, pool,
-                                       lp + ".linear_attn.conv1d.weight",
-                                       dn.conv1d_weight);
-            ok = ok && load_f32_tensor(loader, pool,
-                                       lp + ".linear_attn.A_log", dn.A_log);
-            ok = ok && load_small_bf16(loader, pool,
-                                       lp + ".linear_attn.dt_bias", dn.dt_bias);
-            ok = ok && load_f32_tensor(loader, pool,
-                                       lp + ".linear_attn.norm.weight",
-                                       dn.norm_weight);
-        }
+            if (names.empty()) return;
 
-        // MLP (GPTQ quantized, all layers)
-        ok = ok && load_gptq(loader, pool, lp + ".mlp.gate_proj", lw.mlp.gate_proj);
-        ok = ok && load_gptq(loader, pool, lp + ".mlp.up_proj", lw.mlp.up_proj);
-        ok = ok && load_gptq(loader, pool, lp + ".mlp.down_proj", lw.mlp.down_proj);
+            // First pass: compute total device bytes for this shard (256-byte aligned)
+            size_t shard_total = 0;
+            for (const auto& n : names) {
+                auto tensor = shard.get_tensor(n);
+                size_t aligned = (tensor->nbytes() + 255) & ~(size_t)255;
+                shard_total += aligned;
+            }
 
-        if (ok && (i % 8 == 7 || i == MC::NUM_LAYERS - 1)) {
-            LOG_INFO("Model", "  Layers 0..%d loaded (%.1f GB device)",
-                     i, pool.total / 1073741824.0);
-        }
-    }
+            // Single cudaMalloc for the entire shard
+            void* pool_base = nullptr;
+            cudaError_t err = cudaMalloc(&pool_base, shard_total);
+            if (err != cudaSuccess) {
+                LOG_ERROR("Model", "cudaMalloc failed for shard %zu (%.1f MB): %s",
+                          shard_idx, shard_total / 1048576.0, cudaGetErrorString(err));
+                ok = false;
+                return;
+            }
+            weights.pool_blocks.push_back(pool_base);
+            total_cudamallocs++;
 
-    weights.total_bytes = pool.total;
+            // Second pass: sub-allocate, dispatch, and async-copy each tensor
+            size_t offset = 0;
+            for (const auto& n : names) {
+                auto tensor = shard.get_tensor(n);
+                size_t nbytes = tensor->nbytes();
+                void* d_ptr = static_cast<char*>(pool_base) + offset;
+
+                dispatch_tensor(n, *tensor, d_ptr, weights, copy_stream);
+
+                size_t aligned = (nbytes + 255) & ~(size_t)255;
+                offset += aligned;
+                total_tensors++;
+            }
+
+            weights.total_bytes += shard_total;
+
+            // Wait for all copies from this shard before mmap is released.
+            // When callback returns, ~SafetensorsFile triggers munmap + FADV_DONTNEED,
+            // reclaiming physical pages for future cudaMalloc use on Tegra.
+            cudaStreamSynchronize(copy_stream);
+
+            double shard_sec = std::chrono::duration<double>(Clock::now() - shard_t0).count();
+            LOG_INFO("Model", "  Shard %2zu: %3zu tensors, %7.1f MB, 1 cudaMalloc, %.1fs (%.0f MB/s)",
+                     shard_idx, names.size(), shard_total / 1048576.0,
+                     shard_sec, (shard_total / 1048576.0) / shard_sec);
+        });
+
+    cudaStreamDestroy(copy_stream);
+
     double elapsed = std::chrono::duration<double>(Clock::now() - t0).count();
 
     if (ok) {
-        LOG_INFO("Model", "All weights loaded: %.2f GB in %.1fs",
-                 pool.total / 1073741824.0, elapsed);
+        LOG_INFO("Model", "All weights loaded: %.2f GB in %d cudaMalloc calls, %.1fs (%.0f MB/s)",
+                 weights.total_bytes / 1073741824.0, total_cudamallocs,
+                 elapsed, (weights.total_bytes / 1048576.0) / elapsed);
     } else {
-        LOG_ERROR("Model", "Weight loading FAILED at %.2f GB",
-                  pool.total / 1073741824.0);
+        LOG_ERROR("Model", "Weight loading FAILED");
     }
 
     return ok;
 }
 
 // ============================================================================
-// free_model_weights
+// free_model_weights — release pool blocks
 // ============================================================================
 
-static void free_linear(Linear& l) {
-    if (l.weight) { cudaFree(l.weight); l.weight = nullptr; }
-}
-
-static void free_gptq(GptqWeight& g) {
-    if (g.qweight) { cudaFree(const_cast<uint32_t*>(g.qweight)); g.qweight = nullptr; }
-    if (g.scales)  { cudaFree(const_cast<__half*>(g.scales));     g.scales = nullptr; }
-}
-
 void free_model_weights(ModelWeights& w) {
-    if (w.embed_tokens) { cudaFree(w.embed_tokens); w.embed_tokens = nullptr; }
-    if (w.final_norm)   { cudaFree(w.final_norm);   w.final_norm = nullptr; }
-    if (w.lm_head)      { cudaFree(w.lm_head);      w.lm_head = nullptr; }
+    // All tensor pointers are sub-allocated from pool blocks.
+    // Only free the pool blocks themselves.
+    for (void* block : w.pool_blocks) {
+        cudaFree(block);
+    }
+    w.pool_blocks.clear();
 
+    // Free separately-allocated INT8 lm_head (not in pool)
+    if (w.lm_head_int8.weight) { cudaFree(w.lm_head_int8.weight); }
+    if (w.lm_head_int8.scales) { cudaFree(w.lm_head_int8.scales); }
+    w.lm_head_int8 = Int8Linear{};
+
+    // Zero out all pointers (they pointed into freed pool blocks)
+    w.embed_tokens = nullptr;
+    w.final_norm   = nullptr;
+    w.lm_head      = nullptr;
     for (int i = 0; i < ModelConfig::NUM_LAYERS; i++) {
         auto& lw = w.layers[i];
-        if (lw.input_layernorm)    { cudaFree(lw.input_layernorm);    lw.input_layernorm = nullptr; }
-        if (lw.post_attn_layernorm) { cudaFree(lw.post_attn_layernorm); lw.post_attn_layernorm = nullptr; }
-
-        if (lw.is_full_attention) {
-            free_linear(lw.full_attn.q_proj);
-            free_linear(lw.full_attn.k_proj);
-            free_linear(lw.full_attn.v_proj);
-            free_linear(lw.full_attn.o_proj);
-            if (lw.full_attn.q_norm) { cudaFree(lw.full_attn.q_norm); }
-            if (lw.full_attn.k_norm) { cudaFree(lw.full_attn.k_norm); }
-        } else {
-            free_linear(lw.delta_net.in_proj_qkv);
-            free_linear(lw.delta_net.in_proj_z);
-            free_linear(lw.delta_net.in_proj_a);
-            free_linear(lw.delta_net.in_proj_b);
-            free_linear(lw.delta_net.out_proj);
-            if (lw.delta_net.conv1d_weight) { cudaFree(lw.delta_net.conv1d_weight); }
-            if (lw.delta_net.A_log)         { cudaFree(lw.delta_net.A_log); }
-            if (lw.delta_net.dt_bias)       { cudaFree(lw.delta_net.dt_bias); }
-            if (lw.delta_net.norm_weight)   { cudaFree(lw.delta_net.norm_weight); }
-        }
-
-        free_gptq(lw.mlp.gate_proj);
-        free_gptq(lw.mlp.up_proj);
-        free_gptq(lw.mlp.down_proj);
+        lw.input_layernorm = nullptr;
+        lw.post_attn_layernorm = nullptr;
+        lw.full_attn = FullAttentionWeights{};
+        lw.delta_net = DeltaNetWeights{};
+        lw.mlp = MLPWeights{};
     }
-
     w.total_bytes = 0;
 }
 
@@ -467,7 +439,14 @@ bool InferenceState::allocate(int max_seq) {
     dn_z     = alloc_fp16(S * MC::LIN_VALUE_DIM);
     dn_a     = alloc_fp16(S * MC::LIN_NUM_V_HEADS);
     dn_b     = alloc_fp16(S * MC::LIN_NUM_V_HEADS);
+    dn_g     = alloc_f32(MC::LIN_NUM_V_HEADS);
+    dn_beta  = alloc_f32(MC::LIN_NUM_V_HEADS);
     logits   = alloc_fp16(MC::VOCAB_SIZE);
+    probs    = alloc_f32(MC::VOCAB_SIZE);  // Sampling workspace (FP32)
+
+    // Full Attention scratch: scores and FP16 conversion buffer
+    attn_scores = alloc_f32((size_t)MC::NUM_ATTN_HEADS * S);
+    scores_h16  = alloc_fp16((size_t)MC::NUM_KV_GROUPS * S);
 
     // Token IDs on device
     {
@@ -478,6 +457,29 @@ bool InferenceState::allocate(int max_seq) {
         token_ids = static_cast<int*>(p);
         total += bytes;
     }
+
+    // Sample output (single int for GPU argmax)
+    {
+        void* p = nullptr;
+        if (cudaMalloc(&p, sizeof(int)) != cudaSuccess) return false;
+        sample_out = static_cast<int*>(p);
+        total += sizeof(int);
+    }
+
+    // Device pos for graph-capturable kernels
+    {
+        void* p = nullptr;
+        if (cudaMalloc(&p, sizeof(int)) != cudaSuccess) return false;
+        d_pos = static_cast<int*>(p);
+        total += sizeof(int);
+    }
+
+    // Pinned host staging for CUDA Graph
+    cudaHostAlloc(&h_pos_pinned, sizeof(int), cudaHostAllocDefault);
+    cudaHostAlloc(&h_token_pinned, sizeof(int), cudaHostAllocDefault);
+
+    // Compute stream for graph capture (cannot capture on default stream 0)
+    cudaStreamCreate(&compute_stream);
 
     // DeltaNet recurrent states: one [128, 128] per head per layer (F32)
     // Count linear attention layers
@@ -519,7 +521,16 @@ void InferenceState::free() {
     safe_free(attn_out); safe_free(q_buf);     safe_free(kv_buf);
     safe_free(mlp_gate); safe_free(mlp_up);    safe_free(mlp_down);
     safe_free(dn_qkv);  safe_free(dn_z);      safe_free(dn_a);
-    safe_free(dn_b);    safe_free(token_ids);  safe_free(logits);
+    safe_free(dn_b);    safe_free(dn_g);       safe_free(dn_beta);
+    safe_free(token_ids);  safe_free(sample_out);  safe_free(logits);  safe_free(probs);
+    safe_free(attn_scores); safe_free(scores_h16);
+    safe_free(d_pos);
+    if (h_pos_pinned) { cudaFreeHost(h_pos_pinned); h_pos_pinned = nullptr; }
+    if (h_token_pinned) { cudaFreeHost(h_token_pinned); h_token_pinned = nullptr; }
+    if (cuda_graph_exec) { cudaGraphExecDestroy(cuda_graph_exec); cuda_graph_exec = nullptr; }
+    if (cuda_graph) { cudaGraphDestroy(cuda_graph); cuda_graph = nullptr; }
+    if (compute_stream) { cudaStreamDestroy(compute_stream); compute_stream = nullptr; }
+    graph_captured = false;
 
     if (dn_states) {
         for (int i = 0; i < num_dn_layers; i++) safe_free(dn_states[i]);
