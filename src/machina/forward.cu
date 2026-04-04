@@ -999,7 +999,8 @@ static void mlp_forward_prefill(const __half* x, const MLPWeights& mlp,
     using MC = ModelConfig;
     int N_inter = MC::INTERMEDIATE_SIZE;
 
-    // gate_proj + up_proj (separate GEMM calls for M>1)
+    // gate_proj + up_proj: sequential on same stream for L1 cache locality
+    // (concurrent dual-stream tested: causes 4 blocks/SM, L1 degradation on SM87)
     gptq_linear(x, mlp.gate_proj, state.mlp_gate, M, stream);
     gptq_linear(x, mlp.up_proj, state.mlp_up, M, stream);
 

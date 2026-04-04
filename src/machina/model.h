@@ -227,6 +227,10 @@ struct InferenceState {
     int*    h_token_pinned  = nullptr;  // pinned host — token_id staging
     // Compute stream (non-default, required for graph capture)
     cudaStream_t compute_stream = nullptr;
+    // Auxiliary stream for concurrent MLP gate+up projections
+    cudaStream_t aux_stream     = nullptr;
+    cudaEvent_t  aux_fork_event = nullptr;  // main→aux dependency (X is ready)
+    cudaEvent_t  aux_join_event = nullptr;  // aux→main dependency (up_proj done)
     // Graph state
     cudaGraph_t     cuda_graph      = nullptr;
     cudaGraphExec_t cuda_graph_exec = nullptr;

@@ -481,6 +481,11 @@ bool InferenceState::allocate(int max_seq) {
     // Compute stream for graph capture (cannot capture on default stream 0)
     cudaStreamCreate(&compute_stream);
 
+    // Auxiliary stream for concurrent MLP gate+up projections (prefill only)
+    cudaStreamCreate(&aux_stream);
+    cudaEventCreateWithFlags(&aux_fork_event, cudaEventDisableTiming);
+    cudaEventCreateWithFlags(&aux_join_event, cudaEventDisableTiming);
+
     // DeltaNet recurrent states: one [128, 128] per head per layer (F32)
     // Count linear attention layers
     num_dn_layers = 0;
@@ -530,6 +535,9 @@ void InferenceState::free() {
     if (cuda_graph_exec) { cudaGraphExecDestroy(cuda_graph_exec); cuda_graph_exec = nullptr; }
     if (cuda_graph) { cudaGraphDestroy(cuda_graph); cuda_graph = nullptr; }
     if (compute_stream) { cudaStreamDestroy(compute_stream); compute_stream = nullptr; }
+    if (aux_stream) { cudaStreamDestroy(aux_stream); aux_stream = nullptr; }
+    if (aux_fork_event) { cudaEventDestroy(aux_fork_event); aux_fork_event = nullptr; }
+    if (aux_join_event) { cudaEventDestroy(aux_join_event); aux_join_event = nullptr; }
     graph_captured = false;
 
     if (dn_states) {

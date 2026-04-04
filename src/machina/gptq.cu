@@ -624,8 +624,9 @@ void gptq_gemm(const __half* X,
 //
 // Tile: BM=16, BN=64, BK=64 (half a GPTQ group → one scale per tile/col)
 // Block: 128 threads = 4 warps, each warp → 16×16 output via WMMA
-// SMEM padded: X[16, 68] + W^T[64, 68] = 10.6 KB (pad +4 avoids SMEM bank conflicts)
-// Occupancy: 4 blocks/SM → 16 warps/SM
+// SMEM padded: X[16, 72] + W^T[64, 72] = 11.5 KB → 2 blocks/SM = 23 KB, L1 = 105 KB
+// Note: BK=64 (not 128) is optimal — larger BK increases SMEM, reducing L1 cache
+// for X tensor reuse. SM87's 128 KB L1+SMEM budget makes L1 the limiting factor.
 //
 // Requirements: K % 64 == 0, N % 64 == 0 (both hold for all MLP projections)
 // M is padded to multiple of 16 internally (output buffers sized [max_seq, dim])
@@ -656,7 +657,7 @@ gptq_wmma_gemm_kernel(
     const int warp_col = bn + warp_id * 16;
 
     // Shared memory — K-inner layout for W: [BN, BK_PAD] enables float4 stores
-    __shared__ __half smem_x[TC_BM * TC_BK_PAD];       // 16×72 = 2.25 KB
+    __shared__ __half smem_x[TC_BM * TC_BK_PAD];        // 16×72 = 2.25 KB
     __shared__ __half smem_w[TC_BN * TC_BK_PAD];        // 64×72 = 9 KB (K-inner)
     // Base value table: base_values[i] = (i - 8) as FP16, 32 bytes
     __shared__ __half base_values[16];
@@ -675,7 +676,6 @@ gptq_wmma_gemm_kernel(
 
     // === Register-level double-buffer: prefetch next tile during WMMA ===
     // Two register sets: cur (being written to SMEM) and nxt (being loaded from DRAM)
-    // With __launch_bounds__(128, 2), we have 64 regs/thread — enough for both sets.
     float4 cur_x, nxt_x;
     uint32_t cur_pk[4], nxt_pk[4];
     half2 cur_s2, nxt_s2;
@@ -722,7 +722,6 @@ gptq_wmma_gemm_kernel(
         __syncthreads();
 
         // === Phase 2: WMMA compute + prefetch next tile ===
-        // Issue DRAM loads for tile kt+1 BEFORE WMMA so loads overlap with compute
         if (kt + 1 < num_k_tiles) {
             const int k_next = (kt + 1) * TC_BK;
             const int row = tid / 8, col = (tid & 7) * 8;
@@ -753,7 +752,7 @@ gptq_wmma_gemm_kernel(
 
         __syncthreads();
 
-        // Swap: next becomes current for the next iteration
+        // Swap: next becomes current
         cur_x = nxt_x;
         cur_s2 = nxt_s2;
         cur_pk[0] = nxt_pk[0]; cur_pk[1] = nxt_pk[1];

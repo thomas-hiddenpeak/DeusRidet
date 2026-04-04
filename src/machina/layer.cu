@@ -358,16 +358,41 @@ void elementwise_mul(const __half* a, const __half* b, __half* out,
 __global__ void add_kernel(const __half* __restrict__ a,
                            const __half* __restrict__ b,
                            __half* __restrict__ out, int n) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) {
-        out[i] = __float2half(__half2float(a[i]) + __half2float(b[i]));
+    // Vectorized float4 path: process 8 halves per thread (4 half2 in a float4)
+    const int vec_n = n / 8;
+    const float4* a4 = reinterpret_cast<const float4*>(a);
+    const float4* b4 = reinterpret_cast<const float4*>(b);
+    float4* o4 = reinterpret_cast<float4*>(out);
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < vec_n) {
+        float4 av = a4[idx];
+        float4 bv = b4[idx];
+        const __half2* ap = reinterpret_cast<const __half2*>(&av);
+        const __half2* bp = reinterpret_cast<const __half2*>(&bv);
+        __half2 result[4];
+        #pragma unroll
+        for (int i = 0; i < 4; i++) {
+            result[i] = __hadd2(ap[i], bp[i]);
+        }
+        o4[idx] = *reinterpret_cast<float4*>(result);
+    }
+
+    // Scalar tail for remaining elements
+    const int tail_start = vec_n * 8;
+    const int tail_idx = tail_start + (blockIdx.x * blockDim.x + threadIdx.x) - vec_n * blockDim.x;
+    // Only last block handles tail
+    if (idx >= vec_n && tail_idx < n) {
+        out[tail_idx] = __hadd(a[tail_idx], b[tail_idx]);
     }
 }
 
 void elementwise_add(const __half* a, const __half* b, __half* out,
                      int n, cudaStream_t stream) {
     int threads = 256;
-    int blocks = (n + threads - 1) / threads;
+    int vec_n = n / 8;
+    int blocks = (vec_n + threads - 1) / threads;
+    if (blocks < 1) blocks = 1;
     add_kernel<<<blocks, threads, 0, stream>>>(a, b, out, n);
 }
 
@@ -836,64 +861,97 @@ int8_wmma_gemm_kernel(
     wmma::fill_fragment(acc, 0.0f);
 
     const int num_k_tiles = K / I8TC_BK;
+    const int x_row = tid / 8, x_col = (tid & 7) * 16;
+
+    // Pre-compute per-channel scales: constant across all K-tiles (hoist from loop)
+    // Each warp processes 16 rows of W (4 groups × 4 rows)
+    half2 cached_s2[16];
+    #pragma unroll
+    for (int grp = 0; grp < I8TC_BN / 4 / 4; grp++) {
+        #pragma unroll
+        for (int i = 0; i < 4; i++) {
+            const int n_local = warp_id + (grp * 4 + i) * 4;
+            const int n_global = bn + n_local;
+            cached_s2[grp * 4 + i] = __half2half2(__float2half(scales[n_global]));
+        }
+    }
+
+    // === Register-level double-buffer: prefetch next tile during WMMA ===
+    float4 cur_x0, cur_x1, nxt_x0, nxt_x1;
+    uint32_t cur_pk[16], nxt_pk[16];
+
+    // Pre-load tile 0 into 'cur' registers
+    {
+        const __half* src = X + (size_t)(bm + x_row) * K + x_col;
+        cur_x0 = *(const float4*)(src);
+        cur_x1 = *(const float4*)(src + 8);
+    }
+    #pragma unroll
+    for (int grp = 0; grp < I8TC_BN / 4 / 4; grp++) {
+        #pragma unroll
+        for (int i = 0; i < 4; i++) {
+            const int n_local = warp_id + (grp * 4 + i) * 4;
+            const int n_global = bn + n_local;
+            cur_pk[grp * 4 + i] = *reinterpret_cast<const uint32_t*>(
+                W + (size_t)n_global * K + lane_id * 4);
+        }
+    }
 
     for (int kt = 0; kt < num_k_tiles; kt++) {
-        const int k_base = kt * I8TC_BK;
+        // === Phase 1: write current tile to SMEM (dequant from registers) ===
 
-        // === Pre-load X tile into registers (2 float4 per thread) ===
-        float4 x_pre0, x_pre1;
+        // Write X to SMEM
         {
-            const int row = tid / 8;
-            const int col = (tid & 7) * 16;
-            const __half* src = X + (size_t)(bm + row) * K + k_base + col;
-            x_pre0 = *(const float4*)(src);
-            x_pre1 = *(const float4*)(src + 8);
+            __half* dst = smem_x + x_row * I8TC_BK_PAD + x_col;
+            *(float4*)(dst)     = cur_x0;
+            *(float4*)(dst + 8) = cur_x1;
         }
 
-        // === Pre-load W: 4 rows at a time into registers, then dequant ===
-        // FP16 dequant: __int2half_rn + __hmul2 (eliminates FP32 multiply + CVT)
-        // half2 stores (2 per uint32, 2× fewer SMEM writes)
+        // Dequant W: registers → FP16 → SMEM (using cached scales)
         #pragma unroll
         for (int grp = 0; grp < I8TC_BN / 4 / 4; grp++) {
-            // Pre-load 4 packed uint32s (4 rows × 1 uint32 per lane)
-            uint32_t pk[4];
-            __half sh[4];
             #pragma unroll
             for (int i = 0; i < 4; i++) {
+                const int idx = grp * 4 + i;
                 const int n_local = warp_id + (grp * 4 + i) * 4;
-                const int n_global = bn + n_local;
-                pk[i] = *reinterpret_cast<const uint32_t*>(
-                    W + (size_t)n_global * K + k_base + lane_id * 4);
-                sh[i] = __float2half(scales[n_global]);
-            }
-            // Dequant all 4 rows (data already in registers)
-            #pragma unroll
-            for (int i = 0; i < 4; i++) {
-                const int n_local = warp_id + (grp * 4 + i) * 4;
-                const half2 s2 = __half2half2(sh[i]);
+                const half2 s2 = cached_s2[idx];
+                uint32_t pk = cur_pk[idx];
                 half2 v01 = __hmul2(s2, __halves2half2(
-                    __int2half_rn((int)(int8_t)(pk[i] & 0xFF)),
-                    __int2half_rn((int)(int8_t)((pk[i] >> 8) & 0xFF))));
+                    __int2half_rn((int)(int8_t)(pk & 0xFF)),
+                    __int2half_rn((int)(int8_t)((pk >> 8) & 0xFF))));
                 half2 v23 = __hmul2(s2, __halves2half2(
-                    __int2half_rn((int)(int8_t)((pk[i] >> 16) & 0xFF)),
-                    __int2half_rn((int)(int8_t)((pk[i] >> 24) & 0xFF))));
+                    __int2half_rn((int)(int8_t)((pk >> 16) & 0xFF)),
+                    __int2half_rn((int)(int8_t)((pk >> 24) & 0xFF))));
                 __half* dst = smem_w + n_local * I8TC_BK_PAD + lane_id * 4;
                 *(half2*)(dst)     = v01;
                 *(half2*)(dst + 2) = v23;
             }
         }
 
-        // Write X to SMEM
-        {
-            const int row = tid / 8, col = (tid & 7) * 16;
-            __half* dst = smem_x + row * I8TC_BK_PAD + col;
-            *(float4*)(dst)     = x_pre0;
-            *(float4*)(dst + 8) = x_pre1;
-        }
-
         __syncthreads();
 
-        // === WMMA compute: 8 K-chunks ===
+        // === Phase 2: WMMA compute + prefetch next tile ===
+        // Issue DRAM loads for tile kt+1 BEFORE WMMA so loads overlap with tensor core
+        if (kt + 1 < num_k_tiles) {
+            const int k_next = (kt + 1) * I8TC_BK;
+            {
+                const __half* src = X + (size_t)(bm + x_row) * K + k_next + x_col;
+                nxt_x0 = *(const float4*)(src);
+                nxt_x1 = *(const float4*)(src + 8);
+            }
+            #pragma unroll
+            for (int grp = 0; grp < I8TC_BN / 4 / 4; grp++) {
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    const int n_local = warp_id + (grp * 4 + i) * 4;
+                    const int n_global = bn + n_local;
+                    nxt_pk[grp * 4 + i] = *reinterpret_cast<const uint32_t*>(
+                        W + (size_t)n_global * K + k_next + lane_id * 4);
+                }
+            }
+        }
+
+        // WMMA compute: 8 K-chunks (reads SMEM, concurrent with DRAM prefetch)
         {
             wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> a_frag;
             wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> b_frag;
@@ -908,6 +966,12 @@ int8_wmma_gemm_kernel(
         }
 
         __syncthreads();
+
+        // Swap: nxt → cur
+        cur_x0 = nxt_x0; cur_x1 = nxt_x1;
+        #pragma unroll
+        for (int i = 0; i < 16; i++)
+            cur_pk[i] = nxt_pk[i];
     }
 
     // === Store: FP32 → FP16 ===

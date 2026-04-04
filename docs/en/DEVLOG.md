@@ -1567,3 +1567,138 @@ at end. Near-zero overhead — events are async GPU timestamps.
 - Possible: fuse silu_mul/add into GEMM I/O, merge gate+up projections, CUDA
   graph for launch overhead (~3 ms), double-buffer SMEM with BK=32 at 3 blocks/SM.
 - Target: <10 ms/tok = 110 ms total. Current 162 ms is 1.47× above.
+
+---
+
+## 2026-04-05 — Phase 3.5: SM87 Structural Analysis & INT8 Register Prefetch
+
+### Context
+
+Continuing from Phase 3.4 (162 ms, 14.7 ms/tok). Target: 110 ms (10 ms/tok).
+Systematic search for GPTQ kernel improvements, plus applying proven register
+prefetch pattern to INT8 WMMA kernel.
+
+### Experiments Summary
+
+**6 experiments attempted, 2 succeeded, 4 failed:**
+
+#### ❌ SMEM Double-Buffer GPTQ (92→102 ms, -10% regression)
+- Concept: Use 2 SMEM buffers (ping-pong) so dequant writes to buffer B while
+  WMMA reads from buffer A. Eliminates Phase 1→Phase 2 serialization.
+- SMEM per block: 11.5 KB → 23 KB. L1: 105 KB → 82 KB.
+- Result: 10% regression. L1 reduction caused more cache misses for X tensor
+  (160 KB). The bandwidth gained from overlap was less than the bandwidth lost
+  from L1 misses.
+
+#### ❌ GPTQ BK=128 (92→97 ms, regression)
+- Concept: Match INT8 kernel's BK=128 to halve tiles (80→40) and syncs.
+- SMEM: 11.5→21.3 KB/block. L1: 105→85 KB.
+- Used 64 registers, 0 spills. Occupancy maintained at 2 blocks/SM.
+- Result: Still regressed. Same L1 pressure story despite matching INT8 parameters.
+  INT8 works at BK=128 because its dequant is simpler, not because of BK alone.
+
+#### ❌ GPTQ 4 blocks/SM via launch_bounds(128,4) (92→98 ms, regression)
+- Concept: More warps (8→16) for better DRAM latency hiding. Needed ~17 warps/SM
+  to saturate bandwidth based on DRAM latency analysis.
+- SMEM: 4×11.5=46 KB. L1: 128-46=82 KB. Same issue.
+- Result: Regression. L1 is the common wall for all SMEM-increasing optimizations.
+
+#### ❌ Concurrent gate+up on separate CUDA streams (158→163 ms, regression)
+- Concept: Launch gate_proj and up_proj on separate streams for DRAM bank
+  diversity. Required fork-join events for proper synchronization (initial
+  attempt without fork caused data race — wrong output tokens).
+- Result: GPU scheduler placed 4 blocks/SM (2 from each kernel), triggering
+  the same L1 degradation. Plus event overhead (~1.3 ms across 64 layers).
+
+#### ✅ INT8 WMMA Register Prefetch + Scale Hoisting (-3.6 ms)
+- Applied same register-level double-buffer from GPTQ to INT8 kernel.
+- Pre-load all 16 packed uint32 weights + 2 float4 X into cur registers.
+- Prefetch next tile during WMMA (Phase 2), swap after sync.
+- Hoisted per-channel scales out of tile loop (they're constant across K-tiles).
+  Cached as `half2 cached_s2[16]` — eliminates 16 DRAM/L2 loads per tile.
+- DN: 52.1→49.6 ms (-4.7%), FA: 14.5→13.3 ms (-8.3%).
+
+#### ✅ Vectorized add_kernel (negligible)
+- Changed scalar `out[i] = __float2half(...)` to float4 path with `__hadd2`.
+- Processing: 8 halves/thread via reinterpreted float4.
+- Impact: <0.4 ms — too few elements (11×5120=56K) to matter.
+
+### DRAM Bandwidth Profiling
+
+Custom streaming kernel measured true Orin DRAM bandwidth:
+
+| Size | BW (GB/s) | % of 204.8 theoretical |
+|------|-----------|------------------------|
+| 64 MB | 172 | 84% |
+| 128 MB | 175 | 85% |
+| 256 MB | 177 | 86% |
+| 512 MB | 158 | 77% |
+
+**Peak achievable: 175 GB/s** (for reads, 128-256 MB working set).
+cudaMemcpy D2D: 153 GB/s (combined read+write).
+
+### Root Cause Analysis: GPTQ 55% Bandwidth Utilization
+
+GPTQ kernel achieves 97 GB/s (55% of 175 peak). Analysis:
+
+- **Phase 1 (dequant → SMEM)**: ~100 cycles. DRAM bus IDLE.
+- **Sync 1**: ~50 cycles. DRAM IDLE.
+- **Phase 2 (WMMA + prefetch)**: ~200 cycles. DRAM ACTIVE.
+- **Sync 2**: ~50 cycles. DRAM IDLE.
+- **Total**: 400 cycles/tile. DRAM active: 200/400 = **50%**.
+- Predicted BW: 175 × 50% = 87.5 GB/s. Measured: 97 GB/s. Close match.
+
+The fundamental bottleneck is structural: dequant must complete before WMMA can
+read SMEM. SMEM double-buffering would fix this but requires 2× SMEM, which
+triggers L1 degradation on SM87's 128 KB L1+SMEM unified budget.
+
+### The SM87 Structural Wall
+
+**All SMEM-increasing optimizations fail for the same reason:**
+
+- SM87 has 128 KB unified L1 cache + shared memory per SM
+- GPTQ optimal: 2 blocks × 11.5 KB = 23 KB SMEM → 105 KB L1
+- X tensor (M=16, K=5120): 160 KB > 105 KB L1 → ~35% miss rate
+- Any SMEM increase (double-buffer, BK=128, 4 blocks/SM, concurrent streams)
+  reduces L1 further → more X misses → regression
+
+This wall cannot be overcome at the kernel level on SM87. Options:
+1. Different quantization (INT8: simpler dequant, single-phase pipeline)
+2. Model with smaller hidden_size (X fits in L1 entirely)
+3. Hardware upgrade: Thor SM110a has larger L1+SMEM budget
+
+### Results
+
+| Component      | Phase 3.4 | Phase 3.5 | Improvement |
+|----------------|-----------|-----------|-------------|
+| MLP GPTQ       | 92.7 ms   | 92.4 ms   | ~same       |
+| DeltaNet SSM   | 52.2 ms   | 49.6 ms   | **-5.0%**   |
+| Full Attention | 14.4 ms   | 13.3 ms   | **-7.6%**   |
+| Norms          | 2.3 ms    | 2.3 ms    | same        |
+| **Total**      | **162 ms**| **158 ms**| **-2.5%**   |
+| **Per token**  | **14.7**  | **14.3**  | **-2.7%**   |
+
+### Performance Journey (Updated)
+
+| Phase | Prefill (ms/tok) | Key Change |
+|-------|------------------|------------|
+| 3.0 (batched prefill) | 92.0 | INT8 batch GEMV + batched attn |
+| 3.1 (tensor core WMMA) | 46.9 | WMMA GPTQ + INT8 tensor core |
+| 3.2 (SMEM bank fix) | 29.8 | +8 padding, BK=64, 4 blocks/SM |
+| 3.3 (DeltaNet fused) | 27.1 | Register-cached state, 2 fused kernels |
+| 3.4 (deep kernel opt) | 14.7 | FP16 dequant, pre-load, register prefetch |
+| **3.5 (INT8 prefetch)** | **14.3** | **INT8 reg prefetch, scale hoisting** |
+
+**Overall: 1012 → 158 ms (layers), 6.4× speedup since Phase 3.0.**
+
+### Theoretical Limits
+
+At 175 GB/s peak streaming bandwidth:
+- MLP theoretical min: 8.92 GB / 175 = 51 ms (current 92, 54% util)
+- DN theoretical min: 5.57 GB / 175 = 32 ms (current 50, 64% util)
+- FA theoretical min: 1.68 GB / 175 = 10 ms (current 13, 73% util)
+- **Total theoretical min: ~95 ms** (current 158, 60% overall util)
+
+110 ms target requires ~86% average bandwidth utilization. Achievable with
+architectural changes (different quant, persistent kernels, or next-gen HW)
+but not with incremental kernel tuning on SM87.
