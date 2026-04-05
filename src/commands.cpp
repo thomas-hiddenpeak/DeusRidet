@@ -533,6 +533,7 @@ int cmd_test_forward(const std::string& model_dir) {
         fprintf(stderr, "[test-forward] Weight load failed\n");
         return 1;
     }
+    merge_projection_weights(weights);
     printf("[test-forward] Weights loaded: %.2f GB\n",
            weights.total_bytes / 1073741824.0);
 
@@ -667,6 +668,7 @@ int cmd_test_sample(const std::string& model_dir) {
         fprintf(stderr, "[test-sample] Weight load failed\n");
         return 1;
     }
+    merge_projection_weights(weights);
 
     InferenceState state;
     int max_kv_len = 128;
@@ -875,6 +877,7 @@ int cmd_profile_prefill(const std::string& model_dir) {
         fprintf(stderr, "[profile-prefill] Weight load failed\n");
         return 1;
     }
+    merge_projection_weights(weights);
 
     InferenceState state;
     int max_kv_len = 128;

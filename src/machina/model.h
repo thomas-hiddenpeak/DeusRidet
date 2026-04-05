@@ -53,6 +53,10 @@ struct ModelConfig {
     static constexpr int LIN_CONV_DIM       = 10240; // KEY_DIM*2 + VALUE_DIM
     static constexpr int CONV_KERNEL        = 4;
 
+    // Merged projection dimensions (padded to WMMA tile boundary, 64)
+    static constexpr int LIN_QKV_AB_DIM     = 10368; // 10240+48+48=10336, padded→10368 (162×64)
+    static constexpr int FA_KV_DIM          = 2048;  // 1024+1024 (already aligned)
+
     static constexpr bool is_full_attention(int layer_idx) {
         return (layer_idx % FULL_ATTN_INTERVAL) == (FULL_ATTN_INTERVAL - 1);
     }
@@ -93,6 +97,10 @@ struct DeltaNetWeights {
     Int8Linear in_proj_b;     // 5120 → 48    (num_v_heads, for beta)
     Int8Linear out_proj;      // 6144 → 5120
 
+    // Merged qkv+a+b projection for prefill (created post-load)
+    // [10368, 5120] = qkv[0:10240] + a[10240:10288] + b[10288:10336] + pad[10336:10368]
+    Int8Linear in_proj_qkv_ab;  // 5120 → 10368 (prefill only)
+
     __half* conv1d_weight = nullptr;  // [conv_dim, kernel] = [10240, 4]
     float*  A_log         = nullptr;  // [48]
     __half* dt_bias       = nullptr;  // [48]
@@ -104,6 +112,10 @@ struct FullAttentionWeights {
     Int8Linear k_proj;   // 5120 → 1024
     Int8Linear v_proj;   // 5120 → 1024
     Int8Linear o_proj;   // 6144 → 5120
+
+    // Merged k+v projection for prefill (created post-load)
+    // [2048, 5120] = k[0:1024] + v[1024:2048]
+    Int8Linear kv_proj;  // 5120 → 2048 (prefill only)
 
     __half* q_norm = nullptr;  // [256] precomputed (1+w)
     __half* k_norm = nullptr;  // [256] precomputed (1+w)
@@ -153,6 +165,12 @@ struct ModelWeights {
 // BF16 weights are converted to FP16. RMSNorm weights are precomputed as (1+w).
 bool load_model_weights(const std::string& model_dir, ModelWeights& weights);
 
+// Create merged projection weights for prefill optimization.
+// Must be called after load_model_weights. Creates:
+//   - DN in_proj_qkv_ab: qkv+a+b merged [10368, 5120] × 48 layers
+//   - FA kv_proj: k+v merged [2048, 5120] × 16 layers
+bool merge_projection_weights(ModelWeights& weights);
+
 // Release all device memory held by the model.
 void free_model_weights(ModelWeights& weights);
 
@@ -193,7 +211,7 @@ struct InferenceState {
     __half* mlp_down    = nullptr;  // [max_seq, hidden_size]
 
     // DeltaNet scratch
-    __half* dn_qkv      = nullptr;  // [max_seq, lin_conv_dim] (10240)
+    __half* dn_qkv      = nullptr;  // [max_seq, qkv_ab_dim] (10368, merged for prefill)
     __half* dn_z        = nullptr;  // [max_seq, lin_value_dim] (6144)
     __half* dn_a        = nullptr;  // [max_seq, num_v_heads] (48)
     __half* dn_b        = nullptr;  // [max_seq, num_v_heads] (48)

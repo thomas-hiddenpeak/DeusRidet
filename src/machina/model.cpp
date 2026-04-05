@@ -365,6 +365,82 @@ bool load_model_weights(const std::string& model_dir, ModelWeights& weights) {
 }
 
 // ============================================================================
+// merge_projection_weights — create merged INT8 weights for prefill
+//
+// DN: qkv[10240,5120] + a[48,5120] + b[48,5120] → merged[10368,5120]
+// FA: k[1024,5120] + v[1024,5120] → merged[2048,5120]
+// ============================================================================
+
+static bool create_merged_int8(const Int8Linear* src, int nsrc,
+                               Int8Linear& merged, int merged_N, int K) {
+    size_t weight_bytes = (size_t)merged_N * K * sizeof(int8_t);
+    size_t scales_bytes = (size_t)merged_N * sizeof(float);
+
+    if (cudaMalloc(&merged.weight, weight_bytes) != cudaSuccess) return false;
+    if (cudaMalloc(&merged.scales, scales_bytes) != cudaSuccess) {
+        cudaFree(merged.weight); merged.weight = nullptr;
+        return false;
+    }
+
+    // Zero-fill (handles padding rows automatically)
+    cudaMemset(merged.weight, 0, weight_bytes);
+    cudaMemset(merged.scales, 0, scales_bytes);
+
+    // Copy rows from each source
+    int row_offset = 0;
+    for (int i = 0; i < nsrc; i++) {
+        int N_src = src[i].out_features;
+        cudaMemcpy(merged.weight + (size_t)row_offset * K,
+                   src[i].weight, (size_t)N_src * K * sizeof(int8_t),
+                   cudaMemcpyDeviceToDevice);
+        cudaMemcpy(merged.scales + row_offset,
+                   src[i].scales, (size_t)N_src * sizeof(float),
+                   cudaMemcpyDeviceToDevice);
+        row_offset += N_src;
+    }
+
+    merged.in_features  = K;
+    merged.out_features = merged_N;
+    return true;
+}
+
+bool merge_projection_weights(ModelWeights& weights) {
+    using MC = ModelConfig;
+    size_t total_bytes = 0;
+
+    for (int i = 0; i < MC::NUM_LAYERS; i++) {
+        auto& lw = weights.layers[i];
+
+        if (!MC::is_full_attention(i)) {
+            // DN: merge qkv + a + b
+            auto& dn = lw.delta_net;
+            Int8Linear srcs[3] = { dn.in_proj_qkv, dn.in_proj_a, dn.in_proj_b };
+            if (!create_merged_int8(srcs, 3, dn.in_proj_qkv_ab,
+                                    MC::LIN_QKV_AB_DIM, MC::HIDDEN_SIZE)) {
+                LOG_ERROR("Model", "Failed to merge DN qkv+ab for layer %d", i);
+                return false;
+            }
+            total_bytes += (size_t)MC::LIN_QKV_AB_DIM * MC::HIDDEN_SIZE + MC::LIN_QKV_AB_DIM * 4;
+        } else {
+            // FA: merge k + v
+            auto& fa = lw.full_attn;
+            Int8Linear srcs[2] = { fa.k_proj, fa.v_proj };
+            if (!create_merged_int8(srcs, 2, fa.kv_proj,
+                                    MC::FA_KV_DIM, MC::HIDDEN_SIZE)) {
+                LOG_ERROR("Model", "Failed to merge FA kv for layer %d", i);
+                return false;
+            }
+            total_bytes += (size_t)MC::FA_KV_DIM * MC::HIDDEN_SIZE + MC::FA_KV_DIM * 4;
+        }
+    }
+
+    cudaDeviceSynchronize();
+    LOG_INFO("Model", "Merged projection weights: %.1f MB (DN %d layers, FA %d layers)",
+             total_bytes / 1048576.0, MC::NUM_LAYERS * 3 / 4, MC::NUM_LAYERS / 4);
+    return true;
+}
+
+// ============================================================================
 // free_model_weights — release pool blocks
 // ============================================================================
 
@@ -380,6 +456,18 @@ void free_model_weights(ModelWeights& w) {
     if (w.lm_head_int8.weight) { cudaFree(w.lm_head_int8.weight); }
     if (w.lm_head_int8.scales) { cudaFree(w.lm_head_int8.scales); }
     w.lm_head_int8 = Int8Linear{};
+
+    // Free merged projection weights (allocated by merge_projection_weights)
+    auto free_int8 = [](Int8Linear& l) {
+        if (l.weight) cudaFree(l.weight);
+        if (l.scales) cudaFree(l.scales);
+        l = Int8Linear{};
+    };
+    for (int i = 0; i < ModelConfig::NUM_LAYERS; i++) {
+        auto& lw = w.layers[i];
+        free_int8(lw.delta_net.in_proj_qkv_ab);
+        free_int8(lw.full_attn.kv_proj);
+    }
 
     // Zero out all pointers (they pointed into freed pool blocks)
     w.embed_tokens = nullptr;
@@ -435,7 +523,7 @@ bool InferenceState::allocate(int max_seq) {
     mlp_gate = alloc_fp16(S * MC::INTERMEDIATE_SIZE);
     mlp_up   = alloc_fp16(S * MC::INTERMEDIATE_SIZE);
     mlp_down = alloc_fp16(S * H);
-    dn_qkv   = alloc_fp16(S * MC::LIN_CONV_DIM);
+    dn_qkv   = alloc_fp16(S * MC::LIN_QKV_AB_DIM);  // wider for merged qkv+ab prefill
     dn_z     = alloc_fp16(S * MC::LIN_VALUE_DIM);
     dn_a     = alloc_fp16(S * MC::LIN_NUM_V_HEADS);
     dn_b     = alloc_fp16(S * MC::LIN_NUM_V_HEADS);

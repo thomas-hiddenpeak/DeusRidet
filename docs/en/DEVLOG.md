@@ -1874,3 +1874,73 @@ qkv and out_proj are at 78% — likely wave scheduling + L2 contention effects.
 2. Weight format change (INT8 at 2× size but native WMMA)
 3. CUTLASS integration for professional tiling pipeline
 4. Next-generation hardware (SM110a, 273 GB/s)
+
+---
+
+## 2026-04-06 — Phase 3.7: Merged Projection Weights
+
+### Context
+
+Sub-layer profiling (Phase 3.6) revealed that the DeltaNet ab_proj (in_proj_a +
+in_proj_b, each 5120→48) consumed 0.065 ms/layer × 48 = 3.12 ms — entirely
+dominated by redundant X reads in the batch GEMV kernel (97% BW of its access
+pattern, but the pattern itself reads X 96 times). Meanwhile, the Full Attention
+k_proj and v_proj (each 5120→1024) were executed as two separate WMMA calls at
+0.142 ms/layer × 16 = 2.27 ms, each only filling half the waves.
+
+### Approach: Post-Load Weight Merging
+
+Created `merge_projection_weights()` that runs after model loading:
+
+1. **DN qkv+ab merge**: Concatenate in_proj_qkv [10240, 5120] + in_proj_a [48, 5120]
+   + in_proj_b [48, 5120] → single INT8 [10368, 5120] weight (10336 padded to
+   next WMMA-aligned 64-multiple). One WMMA call replaces qkv + dual batch GEMV.
+
+2. **FA k+v merge**: Concatenate k_proj [1024, 5120] + v_proj [1024, 5120] → single
+   INT8 [2048, 5120] weight. One WMMA call (32 tiles = 2 full waves) replaces
+   two separate WMMA calls (16 tiles = 1 wave each).
+
+Memory cost: 2592 MB extra (merged weights; originals cannot be freed from pool).
+
+### Kernel Modifications
+
+- `conv1d_batch_silu_kernel`: Added `stride` parameter to support 10368-wide merged
+  buffer (vs previous hardcoded conv_dim=10240)
+- `deltanet_fused_head_kernel`: Changed a/b access from separate `a_batch[t * 48 + h]`
+  to inline `qkv_batch[t * qkv_stride + a_offset + h]`, reading directly from
+  the merged output buffer
+- `full_attention_prefill`: Merged WMMA → attn_out[M, 2048] temp, then
+  cudaMemcpy2DAsync split to kv_buf and dn_z (22 KB each, ~0.2 μs)
+
+### Results
+
+| Component | Phase 3.6 | Phase 3.7 | Improvement |
+|-----------|-----------|-----------|-------------|
+| DeltaNet SSM | 48.3 ms | 46.0 ms | **-2.3 ms (-4.7%)** |
+| Full Attention | 13.6 ms | 12.5 ms | **-1.1 ms (-8.1%)** |
+| MLP GPTQ | 86.1 ms | 86.1 ms | same |
+| Norms | 2.3 ms | 2.3 ms | same |
+| **Total** | **150.3 ms** | **147.0 ms** | **-3.3 ms (-2.2%)** |
+| **Per token** | **13.66** | **13.36** | **-0.30 ms/tok** |
+
+DN sub-layer: qkv_ab merged 0.360 ms (was qkv 0.382 + ab 0.065 = 0.447 ms):
+**-19.5% for the projection step**. fused_head slightly slower (0.116 vs 0.101 ms)
+due to strided a/b access from the wider buffer.
+
+FA sub-layer: kv merged 0.104 ms (was 0.142 ms): **-26.8%**. 32 tiles in 2 waves
+vs 2 × 16 tiles in 1 wave gives better wave scheduling.
+
+### Performance Journey (Updated)
+
+| Phase | Prefill (ms/tok) | Key Change |
+|-------|------------------|------------|
+| 3.0 (batched prefill) | 92.0 | INT8 batch GEMV + batched attn |
+| 3.1 (tensor core WMMA) | 46.9 | WMMA GPTQ + INT8 tensor core |
+| 3.2 (SMEM bank fix) | 29.8 | +8 padding, BK=64, 4 blocks/SM |
+| 3.3 (DeltaNet fused) | 27.1 | Register-cached state, 2 fused kernels |
+| 3.4 (deep kernel opt) | 14.7 | FP16 dequant, pre-load, register prefetch |
+| 3.5 (INT8 prefetch) | 14.3 | INT8 reg prefetch, scale hoisting |
+| 3.6 (sub-layer prof) | 13.7 | Inline dequant, dual GEMV, fused add |
+| **3.7 (merged weights)** | **13.4** | **qkv+ab merge, k+v merge** |
+
+**Overall: 1012 → 147 ms (layers), 6.9× speedup since Phase 3.0.**

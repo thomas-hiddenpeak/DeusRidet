@@ -473,10 +473,10 @@ __global__ void deltanet_recurrent_kernel(
 // Eliminates M-1 kernel launches vs per-token conv1d.
 // ============================================================================
 __global__ void conv1d_batch_silu_kernel(
-    __half* __restrict__ qkv,           // [M, conv_dim] in/out (in-place)
+    __half* __restrict__ qkv,           // [M, stride] in/out (in-place)
     __half* __restrict__ conv_state,    // [conv_dim, kernel-1]
     const __half* __restrict__ conv_weight, // [conv_dim, kernel]
-    int M, int conv_dim, int kernel_size)
+    int M, int conv_dim, int kernel_size, int stride)
 {
     int ch = blockIdx.x * blockDim.x + threadIdx.x;
     if (ch >= conv_dim) return;
@@ -494,10 +494,10 @@ __global__ void conv1d_batch_silu_kernel(
 
     // Process all M tokens sequentially for this channel
     for (int t = 0; t < M; t++) {
-        float x_val = __half2float(qkv[t * conv_dim + ch]);
+        float x_val = __half2float(qkv[t * stride + ch]);
         float acc = st[0]*wt[0] + st[1]*wt[1] + st[2]*wt[2] + x_val*wt[3];
         float silu_out = acc / (1.0f + __expf(-acc));
-        qkv[t * conv_dim + ch] = __float2half(silu_out);
+        qkv[t * stride + ch] = __float2half(silu_out);
         st[0] = st[1]; st[1] = st[2]; st[2] = x_val;
     }
 
@@ -516,15 +516,14 @@ __global__ void conv1d_batch_silu_kernel(
 // ============================================================================
 __global__ void __launch_bounds__(128, 2)
 deltanet_fused_head_kernel(
-    const __half* __restrict__ qkv_batch,   // [M, conv_dim=10240] post-conv1d
-    const __half* __restrict__ a_batch,     // [M, num_v_heads=48]
-    const __half* __restrict__ b_batch,     // [M, num_v_heads=48]
+    const __half* __restrict__ qkv_batch,   // [M, qkv_stride] post-conv1d
     const float* __restrict__ A_log,        // [48]
     const __half* __restrict__ dt_bias,     // [48]
     float* __restrict__ dn_state,           // [48, 128, 128] recurrent state
     __half* __restrict__ output,            // [M, value_dim=6144]
     int M, int num_k_heads, int num_v_heads,
-    int k_dim, int v_dim, int key_dim, int conv_dim, float eps)
+    int k_dim, int v_dim, int key_dim, int qkv_stride,
+    int a_offset, int b_offset, int ab_stride, float eps)
 {
     const int head = blockIdx.x;           // 0..47 (value head)
     const int tid = threadIdx.x;           // 0..127
@@ -555,7 +554,7 @@ deltanet_fused_head_kernel(
 
     for (int t = 0; t < M; t++) {
         // Pointers to this token's projected data
-        const __half* qkv_t = qkv_batch + t * conv_dim;
+        const __half* qkv_t = qkv_batch + t * qkv_stride;
         const __half* q_src = qkv_t + src_head * k_dim;
         const __half* k_src = qkv_t + key_dim + src_head * k_dim;
         const __half* v_src = qkv_t + 2 * key_dim + head * v_dim;
@@ -593,8 +592,9 @@ deltanet_fused_head_kernel(
         sk[tid] = k_val * warp_sums[0];
 
         // === Compute g and beta for this head + token ===
-        float a_val = __half2float(a_batch[t * num_v_heads + head]);
-        float b_val = __half2float(b_batch[t * num_v_heads + head]);
+        // a/b accessed via offset within qkv buffer (merged) or separate (ab_stride)
+        float a_val = __half2float(qkv_batch[t * ab_stride + a_offset + head]);
+        float b_val = __half2float(qkv_batch[t * ab_stride + b_offset + head]);
         // g = exp(-exp(A_log) * softplus(a + dt_bias))
         float g_scalar = __expf(-__expf(a_log_h) * logf(1.0f + __expf(a_val + dt_bias_h)));
         float beta_scalar = 1.0f / (1.0f + __expf(-b_val));
@@ -1207,10 +1207,17 @@ static void full_attention_prefill(const __half* x, const FullAttentionWeights& 
     // Q: x[M, 5120] → q_buf[M, 12288]
     int8_linear_forward(x, attn.q_proj, state.q_buf, M, stream);
 
-    // K, V: dual kernel — one launch (saves 1 dispatch for N=1024 each)
-    int8_dual_linear_forward(x, attn.k_proj, state.kv_buf,
-                                attn.v_proj, state.dn_z, M, stream);
-    // V stored in dn_z[M, 1024] (only first 1024 of each row used)
+    // K+V: merged projection → attn_out[M, 2048], then split
+    int8_linear_forward(x, attn.kv_proj, state.attn_out, M, stream);
+    // Split: attn_out[M, 2048] → kv_buf[M, 1024] (K) + dn_z[M, 1024] (V)
+    cudaMemcpy2DAsync(state.kv_buf, MC::KV_PROJ_DIM * sizeof(__half),
+                      state.attn_out, MC::FA_KV_DIM * sizeof(__half),
+                      MC::KV_PROJ_DIM * sizeof(__half), M,
+                      cudaMemcpyDeviceToDevice, stream);
+    cudaMemcpy2DAsync(state.dn_z, MC::KV_PROJ_DIM * sizeof(__half),
+                      state.attn_out + MC::KV_PROJ_DIM, MC::FA_KV_DIM * sizeof(__half),
+                      MC::KV_PROJ_DIM * sizeof(__half), M,
+                      cudaMemcpyDeviceToDevice, stream);
 
     // 2. Batched split_q_gate: q_buf[M, 12288] → Q_sep[M, 6144] + Gate[M, 6144]
     // Q_sep → dn_qkv[M, 10240] (only first 6144 per row used)
@@ -1285,37 +1292,36 @@ static void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
                              InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // 1. Batched projections (INT8 batch GEMV)
-    // QKV: x[M, 5120] → dn_qkv[M, 10240]
-    int8_linear_forward(x, dn.in_proj_qkv, state.dn_qkv, M, stream);
+    // 1. Merged qkv+a+b projection: x[M, 5120] → dn_qkv[M, 10368]
+    //    Eliminates separate ab_proj launch. a/b at columns 10240..10335.
+    int8_linear_forward(x, dn.in_proj_qkv_ab, state.dn_qkv, M, stream);
 
     // Z: x[M, 5120] → dn_z[M, 6144]
     int8_linear_forward(x, dn.in_proj_z, state.dn_z, M, stream);
 
-    // A, B: x[M, 5120] → dn_a[M, 48], dn_b[M, 48] (dual kernel — one launch)
-    int8_dual_linear_forward(x, dn.in_proj_a, state.dn_a,
-                                dn.in_proj_b, state.dn_b, M, stream);
-
-    // 2. Batch conv1d: all M tokens in one launch (vs M separate launches)
+    // 2. Batch conv1d: all M tokens in one launch (stride=10368 for merged buffer)
     {
         int conv_blocks = (MC::LIN_CONV_DIM + 255) / 256;
         conv1d_batch_silu_kernel<<<conv_blocks, 256, 0, stream>>>(
             state.dn_qkv, state.conv_states[dn_layer_idx],
-            dn.conv1d_weight, M, MC::LIN_CONV_DIM, MC::CONV_KERNEL);
+            dn.conv1d_weight, M, MC::LIN_CONV_DIM, MC::CONV_KERNEL,
+            MC::LIN_QKV_AB_DIM);
     }
 
     // 3. Fused head kernel: repeat_interleave + g/beta + L2norm + recurrent
-    //    All M tokens processed per head in one launch
+    //    a/b read from within dn_qkv buffer at offsets 10240 and 10288
     {
         int fused_smem = (MC::LIN_K_HEAD_DIM + MC::LIN_K_HEAD_DIM + 4) * sizeof(float);
         deltanet_fused_head_kernel<<<MC::LIN_NUM_V_HEADS, 128, fused_smem, stream>>>(
-            state.dn_qkv, state.dn_a, state.dn_b,
+            state.dn_qkv,
             dn.A_log, dn.dt_bias,
             state.dn_states[dn_layer_idx],
             state.attn_out,
             M, MC::LIN_NUM_K_HEADS, MC::LIN_NUM_V_HEADS,
             MC::LIN_K_HEAD_DIM, MC::LIN_V_HEAD_DIM,
-            MC::LIN_KEY_DIM, MC::LIN_CONV_DIM, MC::RMS_EPS);
+            MC::LIN_KEY_DIM, MC::LIN_QKV_AB_DIM,
+            MC::LIN_CONV_DIM, MC::LIN_CONV_DIM + MC::LIN_NUM_V_HEADS,
+            MC::LIN_QKV_AB_DIM, MC::RMS_EPS);
     }
 
     // 4. Batched gated RMSNorm: attn_out[M, 48, 128] with gate dn_z[M, 48, 128]
@@ -1443,50 +1449,50 @@ void profile_sublayer_prefill(const ModelWeights& model,
         const __half* x = state.norm_out;
         int e = 0;
         cudaEventRecord(ev[e++], s);  // 0
-        int8_linear_forward(x, dn.in_proj_qkv, state.dn_qkv, M, s);
+        int8_linear_forward(x, dn.in_proj_qkv_ab, state.dn_qkv, M, s);
         cudaEventRecord(ev[e++], s);  // 1
         int8_linear_forward(x, dn.in_proj_z, state.dn_z, M, s);
         cudaEventRecord(ev[e++], s);  // 2
-        int8_dual_linear_forward(x, dn.in_proj_a, state.dn_a,
-                                    dn.in_proj_b, state.dn_b, M, s);
-        cudaEventRecord(ev[e++], s);  // 3
+        // (ab_proj merged into qkv_ab — no separate event)
         {
             int conv_blocks = (MC::LIN_CONV_DIM + 255) / 256;
             conv1d_batch_silu_kernel<<<conv_blocks, 256, 0, s>>>(
                 state.dn_qkv, state.conv_states[0],
-                dn.conv1d_weight, M, MC::LIN_CONV_DIM, MC::CONV_KERNEL);
+                dn.conv1d_weight, M, MC::LIN_CONV_DIM, MC::CONV_KERNEL,
+                MC::LIN_QKV_AB_DIM);
         }
-        cudaEventRecord(ev[e++], s);  // 4
+        cudaEventRecord(ev[e++], s);  // 3
         {
             int fused_smem = (MC::LIN_K_HEAD_DIM + MC::LIN_K_HEAD_DIM + 4) * sizeof(float);
             deltanet_fused_head_kernel<<<MC::LIN_NUM_V_HEADS, 128, fused_smem, s>>>(
-                state.dn_qkv, state.dn_a, state.dn_b,
+                state.dn_qkv,
                 dn.A_log, dn.dt_bias,
                 state.dn_states[0],
                 state.attn_out,
                 M, MC::LIN_NUM_K_HEADS, MC::LIN_NUM_V_HEADS,
                 MC::LIN_K_HEAD_DIM, MC::LIN_V_HEAD_DIM,
-                MC::LIN_KEY_DIM, MC::LIN_CONV_DIM, MC::RMS_EPS);
+                MC::LIN_KEY_DIM, MC::LIN_QKV_AB_DIM,
+                MC::LIN_CONV_DIM, MC::LIN_CONV_DIM + MC::LIN_NUM_V_HEADS,
+                MC::LIN_QKV_AB_DIM, MC::RMS_EPS);
         }
-        cudaEventRecord(ev[e++], s);  // 5
+        cudaEventRecord(ev[e++], s);  // 4
         rms_norm_gated(state.attn_out, state.dn_z,
                        dn.norm_weight, state.attn_out,
                        M * MC::LIN_NUM_V_HEADS, MC::LIN_V_HEAD_DIM, MC::RMS_EPS, s);
-        cudaEventRecord(ev[e++], s);  // 6
+        cudaEventRecord(ev[e++], s);  // 5
         int8_linear_forward(state.attn_out, dn.out_proj, state.norm_out, M, s);
-        cudaEventRecord(ev[e++], s);  // 7
+        cudaEventRecord(ev[e++], s);  // 6
         cudaStreamSynchronize(s);
 
-        float dn_total = ms(0, 7);
+        float dn_total = ms(0, 6);
         printf("\n=== DN Sub-layer (layer %d, M=%d) ===\n", first_dn, M);
-        printf("  qkv_proj  (INT8 5120→10240): %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/dn_total);
-        printf("  z_proj    (INT8 5120→6144):  %6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/dn_total);
-        printf("  ab_proj   (INT8 5120→48×2):  %6.3f ms  (%4.1f%%)\n", ms(2,3), 100*ms(2,3)/dn_total);
-        printf("  conv1d_silu:                 %6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/dn_total);
-        printf("  fused_head (recurrent):      %6.3f ms  (%4.1f%%)\n", ms(4,5), 100*ms(4,5)/dn_total);
-        printf("  rms_norm_gated:              %6.3f ms  (%4.1f%%)\n", ms(5,6), 100*ms(5,6)/dn_total);
-        printf("  out_proj  (INT8 6144→5120):  %6.3f ms  (%4.1f%%)\n", ms(6,7), 100*ms(6,7)/dn_total);
-        printf("  TOTAL (1 DN layer):          %6.3f ms  (×48 = %.1f ms)\n", dn_total, dn_total*48);
+        printf("  qkv_ab_proj (INT8 5120→10368): %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/dn_total);
+        printf("  z_proj    (INT8 5120→6144):    %6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/dn_total);
+        printf("  conv1d_silu:                   %6.3f ms  (%4.1f%%)\n", ms(2,3), 100*ms(2,3)/dn_total);
+        printf("  fused_head (recurrent):        %6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/dn_total);
+        printf("  rms_norm_gated:                %6.3f ms  (%4.1f%%)\n", ms(4,5), 100*ms(4,5)/dn_total);
+        printf("  out_proj  (INT8 6144→5120):    %6.3f ms  (%4.1f%%)\n", ms(5,6), 100*ms(5,6)/dn_total);
+        printf("  TOTAL (1 DN layer):            %6.3f ms  (×48 = %.1f ms)\n", dn_total, dn_total*48);
     }
 
     // === MLP Sub-layer (one layer) ===
@@ -1530,8 +1536,15 @@ void profile_sublayer_prefill(const ModelWeights& model,
         cudaEventRecord(ev[e++], s);  // 0
         int8_linear_forward(x, attn.q_proj, state.q_buf, M, s);
         cudaEventRecord(ev[e++], s);  // 1
-        int8_dual_linear_forward(x, attn.k_proj, state.kv_buf,
-                                    attn.v_proj, state.dn_z, M, s);
+        int8_linear_forward(x, attn.kv_proj, state.attn_out, M, s);
+        cudaMemcpy2DAsync(state.kv_buf, MC::KV_PROJ_DIM * sizeof(__half),
+                          state.attn_out, MC::FA_KV_DIM * sizeof(__half),
+                          MC::KV_PROJ_DIM * sizeof(__half), M,
+                          cudaMemcpyDeviceToDevice, s);
+        cudaMemcpy2DAsync(state.dn_z, MC::KV_PROJ_DIM * sizeof(__half),
+                          state.attn_out + MC::KV_PROJ_DIM, MC::FA_KV_DIM * sizeof(__half),
+                          MC::KV_PROJ_DIM * sizeof(__half), M,
+                          cudaMemcpyDeviceToDevice, s);
         cudaEventRecord(ev[e++], s);  // 2
         // split + norm + RoPE + KV write
         {
