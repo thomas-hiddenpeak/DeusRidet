@@ -210,8 +210,12 @@ __global__ void Marlin(
           int4* __restrict__ C,   // FP16 output [M, N]
     const int4* __restrict__ s,   // FP16 scales [K/groupsize, N] Marlin-permuted
     int prob_m, int prob_n, int prob_k,
-    int* locks
+    int* locks,
+    const int4* residual          // fused add: C[i] = residual[i] + result (nullptr = disabled)
 ) {
+    // Local copy for parallel-batch offset tracking
+    const int4* res_ptr = residual;
+
     // Striped partitioning: each threadblock processes one "stripe" of B.
     // Stripes ensure good utilization across all SMs with minimal global reductions.
     int parallel = 1;
@@ -238,9 +242,11 @@ __global__ void Marlin(
 
     // Handle parallel batch problem instances
     if (slice_col_par >= n_tiles) {
-        A += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_k / 8;
-        C += (slice_col_par / n_tiles) * 16 * thread_m_blocks * prob_n / 8;
-        locks += (slice_col_par / n_tiles) * n_tiles;
+        int par_idx = slice_col_par / n_tiles;
+        A += par_idx * 16 * thread_m_blocks * prob_k / 8;
+        C += par_idx * 16 * thread_m_blocks * prob_n / 8;
+        if (res_ptr) res_ptr += par_idx * 16 * thread_m_blocks * prob_n / 8;
+        locks += par_idx * n_tiles;
         slice_col = slice_col_par % n_tiles;
     }
 
@@ -270,6 +276,7 @@ __global__ void Marlin(
         if (slice_col == n_tiles) {
             A += 16 * thread_m_blocks * prob_k / 8;
             C += 16 * thread_m_blocks * prob_n / 8;
+            if (res_ptr) res_ptr += 16 * thread_m_blocks * prob_n / 8;
             locks += n_tiles;
             slice_col = 0;
         }
@@ -622,7 +629,20 @@ __global__ void Marlin(
              i++)
         {
             if (c_gl_wr < c_gl_wr_end) {
-                C[c_gl_wr] = sh[c_sh_rd];
+                if (res_ptr) {
+                    // Fused residual add: C[i] = residual[i] + gemm_result[i]
+                    int4 r = sh[c_sh_rd];
+                    int4 o = res_ptr[c_gl_wr];
+                    half2* rh = reinterpret_cast<half2*>(&r);
+                    const half2* oh = reinterpret_cast<const half2*>(&o);
+                    rh[0] = __hadd2(rh[0], oh[0]);
+                    rh[1] = __hadd2(rh[1], oh[1]);
+                    rh[2] = __hadd2(rh[2], oh[2]);
+                    rh[3] = __hadd2(rh[3], oh[3]);
+                    C[c_gl_wr] = r;
+                } else {
+                    C[c_gl_wr] = sh[c_sh_rd];
+                }
                 c_gl_wr += c_gl_wr_delta;
                 c_sh_rd += c_sh_rd_delta;
             }
@@ -718,7 +738,13 @@ __global__ void Marlin(
 
 static const int THREADS = 256;
 static const int STAGES = 4;
-static const int SHARED_MEM = 96 * 1024;  // 96 KB dynamic SMEM
+
+// Compute exact SMEM per config instead of flat 96 KB.
+// SM87 has 128 KB unified L1/SMEM — right-sizing frees L1 for register spills
+// and global store traffic. E.g. config (1,8,8,8) uses 49 KB → 79 KB L1
+// vs old 96 KB SMEM → only 32 KB L1.
+#define MARLIN_SMEM_BYTES(M, N, K) \
+    (STAGES * ((16*(K)/8 * 16*(M)) + (32*(N)/4 * (K)) + (16*(N)/8)) * 16)
 
 #define CALL_IF(THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, GROUP_BLOCKS) \
     else if (                                                                     \
@@ -727,14 +753,17 @@ static const int SHARED_MEM = 96 * 1024;  // 96 KB dynamic SMEM
         thread_k_blocks == THREAD_K_BLOCKS &&                                     \
         group_blocks == GROUP_BLOCKS                                              \
     ) {                                                                           \
+        constexpr int _smem = MARLIN_SMEM_BYTES(                                  \
+            THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS);                   \
         cudaFuncSetAttribute(                                                     \
             Marlin<THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS,                     \
                    THREAD_K_BLOCKS, STAGES, GROUP_BLOCKS>,                        \
-            cudaFuncAttributeMaxDynamicSharedMemorySize, SHARED_MEM);             \
+            cudaFuncAttributeMaxDynamicSharedMemorySize, _smem);                  \
         Marlin<THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS,                         \
                THREAD_K_BLOCKS, STAGES, GROUP_BLOCKS>                             \
-            <<<blocks, THREADS, SHARED_MEM, stream>>>(                            \
-                A_ptr, B_ptr, C_ptr, s_ptr, prob_m, prob_n, prob_k, locks);       \
+            <<<blocks, THREADS, _smem, stream>>>(                                 \
+                A_ptr, B_ptr, C_ptr, s_ptr, prob_m, prob_n, prob_k, locks,        \
+                residual_ptr);                                                    \
     }
 
 // Cached SM count — queried once, reused for all marlin_gemm calls
@@ -748,10 +777,11 @@ static int get_sm_count() {
     return sms;
 }
 
-void marlin_gemm(
+static void marlin_gemm_impl(
     const __half* A, const uint32_t* B, __half* C, const __half* s,
     int* workspace, int M, int K, int N,
-    int groupsize, cudaStream_t stream)
+    int groupsize, cudaStream_t stream,
+    const int4* residual_ptr)
 {
     int sms = get_sm_count();
 
@@ -759,15 +789,12 @@ void marlin_gemm(
     int tot_m_blocks = ceildiv(tot_m, 16);
     int pad = 16 * tot_m_blocks - tot_m;
 
-    // Auto-select tile dimensions based on batch size
-    int thread_k, thread_n;
-    if (M <= 16) {
-        thread_k = 128;
-        thread_n = 128;
-    } else {
-        thread_k = 64;
-        thread_n = 256;
-    }
+    // All batch sizes use thread_k=64, thread_n=256. For M≤16 this selects
+    // config (1,16,4,8): 42KB SMEM → 86KB L1 on SM87, higher compute intensity
+    // per pipeline iteration (6KB data/iter vs 12KB for old k=128,n=128).
+    // N must be divisible by 256 — pad if needed (see LIN_QKV_AB_DIM).
+    int thread_k = 64;
+    int thread_n = 256;
 
     int thread_k_blocks = thread_k / 16;
     int thread_n_blocks = thread_n / 16;
@@ -822,14 +849,20 @@ void marlin_gemm(
         if (false) {}
         CALL_IF(1,  8,  8,  8)
         CALL_IF(1, 16,  4,  8)
+        CALL_IF(2,  8,  8,  8)
         CALL_IF(2, 16,  4,  8)
+        CALL_IF(3,  8,  8,  8)
         CALL_IF(3, 16,  4,  8)
+        CALL_IF(4,  8,  8,  8)
         CALL_IF(4, 16,  4,  8)
         // Also support per-column quantization for potential future use
         CALL_IF(1,  8,  8, -1)
         CALL_IF(1, 16,  4, -1)
+        CALL_IF(2,  8,  8, -1)
         CALL_IF(2, 16,  4, -1)
+        CALL_IF(3,  8,  8, -1)
         CALL_IF(3, 16,  4, -1)
+        CALL_IF(4,  8,  8, -1)
         CALL_IF(4, 16,  4, -1)
         else {
             fprintf(stderr, "marlin_gemm: no kernel for m_blocks=%d n_blocks=%d k_blocks=%d g=%d\n",
@@ -838,10 +871,30 @@ void marlin_gemm(
 
         A_ptr += 16 * thread_m_blocks * (prob_k / 8) * par;
         C_ptr += 16 * thread_m_blocks * (prob_n / 8) * par;
+        if (residual_ptr)
+            residual_ptr += 16 * thread_m_blocks * (prob_n / 8) * par;
     }
 }
 
 #undef CALL_IF
+#undef MARLIN_SMEM_BYTES
+
+void marlin_gemm(
+    const __half* A, const uint32_t* B, __half* C, const __half* s,
+    int* workspace, int M, int K, int N,
+    int groupsize, cudaStream_t stream)
+{
+    marlin_gemm_impl(A, B, C, s, workspace, M, K, N, groupsize, stream, nullptr);
+}
+
+void marlin_gemm_add(
+    const __half* A, const uint32_t* B, __half* C, const __half* s,
+    int* workspace, int M, int K, int N,
+    int groupsize, cudaStream_t stream)
+{
+    marlin_gemm_impl(A, B, C, s, workspace, M, K, N, groupsize, stream,
+                     reinterpret_cast<const int4*>(C));
+}
 
 // ============================================================================
 // Section 5: Weight repacking (GPTQ → Marlin format)
@@ -981,6 +1034,16 @@ void repack_gptq_to_marlin(
     int s_blocks = ceildiv(s_size, threads_per_block);
     repack_scales_kernel<<<s_blocks, threads_per_block, 0, stream>>>(
         temp_s, scales, d_scale_perm, num_groups, N);
+}
+
+// Upload Marlin permutation tables to device memory.
+void upload_marlin_perm_tables(int** d_perm, int** d_scale_perm) {
+    static std::vector<int> h_perm = compute_marlin_perm();
+    static std::vector<int> h_scale_perm = compute_scale_perm();
+    cudaMalloc(d_perm, 1024 * sizeof(int));
+    cudaMemcpy(*d_perm, h_perm.data(), 1024 * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc(d_scale_perm, 64 * sizeof(int));
+    cudaMemcpy(*d_scale_perm, h_scale_perm.data(), 64 * sizeof(int), cudaMemcpyHostToDevice);
 }
 
 // Repack all MLP weights in the model. Returns workspace bytes allocated.

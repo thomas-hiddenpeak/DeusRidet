@@ -53,8 +53,8 @@ struct ModelConfig {
     static constexpr int LIN_CONV_DIM       = 10240; // KEY_DIM*2 + VALUE_DIM
     static constexpr int CONV_KERNEL        = 4;
 
-    // Merged projection dimensions (padded to WMMA tile boundary, 64)
-    static constexpr int LIN_QKV_AB_DIM     = 10368; // 10240+48+48=10336, padded→10368 (162×64)
+    // Merged projection dimensions (padded to Marlin tile boundary, 256)
+    static constexpr int LIN_QKV_AB_DIM     = 10496; // 10240+48+48=10336, padded→10496 (41×256)
     static constexpr int FA_KV_DIM          = 2048;  // 1024+1024 (already aligned)
 
     static constexpr bool is_full_attention(int layer_idx) {
@@ -101,6 +101,11 @@ struct DeltaNetWeights {
     // [10368, 5120] = qkv[0:10240] + a[10240:10288] + b[10288:10336] + pad[10336:10368]
     Int8Linear in_proj_qkv_ab;  // 5120 → 10368 (prefill only)
 
+    // Marlin INT4 weights for prefill (re-quantized from INT8 at load time)
+    GptqWeight marlin_qkv_ab;  // 5120 → 10368 (Marlin tile format)
+    GptqWeight marlin_z;       // 5120 → 6144
+    GptqWeight marlin_out;     // 6144 → 5120
+
     __half* conv1d_weight = nullptr;  // [conv_dim, kernel] = [10240, 4]
     float*  A_log         = nullptr;  // [48]
     __half* dt_bias       = nullptr;  // [48]
@@ -116,6 +121,11 @@ struct FullAttentionWeights {
     // Merged k+v projection for prefill (created post-load)
     // [2048, 5120] = k[0:1024] + v[1024:2048]
     Int8Linear kv_proj;  // 5120 → 2048 (prefill only)
+
+    // Marlin INT4 weights for prefill (re-quantized from INT8 at load time)
+    GptqWeight marlin_q;    // 5120 → 12288
+    GptqWeight marlin_kv;   // 5120 → 2048
+    GptqWeight marlin_o;    // 6144 → 5120
 
     __half* q_norm = nullptr;  // [256] precomputed (1+w)
     __half* k_norm = nullptr;  // [256] precomputed (1+w)
@@ -170,6 +180,12 @@ bool load_model_weights(const std::string& model_dir, ModelWeights& weights);
 //   - DN in_proj_qkv_ab: qkv+a+b merged [10368, 5120] × 48 layers
 //   - FA kv_proj: k+v merged [2048, 5120] × 16 layers
 bool merge_projection_weights(ModelWeights& weights);
+
+// Re-quantize attention INT8 projections to GPTQ INT4 and repack to Marlin
+// tile format for high-throughput prefill. Must be called after
+// merge_projection_weights. Creates GptqWeight (Marlin format) for all
+// attention projections used in prefill.
+bool quantize_attn_to_marlin(ModelWeights& weights);
 
 // Release all device memory held by the model.
 void free_model_weights(ModelWeights& weights);

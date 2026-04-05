@@ -1201,12 +1201,16 @@ static void full_attention_prefill(const __half* x, const FullAttentionWeights& 
                                    InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // 1. Batched Q, K, V projections (INT8 GEMM)
+    // 1. Batched Q, K, V projections (Marlin INT4)
     // Q: x[M, 5120] → q_buf[M, 12288]
-    int8_linear_forward(x, attn.q_proj, state.q_buf, M, stream);
+    marlin_gemm(x, attn.marlin_q.qweight, state.q_buf, attn.marlin_q.scales,
+                state.marlin_workspace, M, attn.marlin_q.K, attn.marlin_q.N,
+                GPTQ_GROUP_SIZE, stream);
 
     // K+V: merged projection → attn_out[M, 2048], then split
-    int8_linear_forward(x, attn.kv_proj, state.attn_out, M, stream);
+    marlin_gemm(x, attn.marlin_kv.qweight, state.attn_out, attn.marlin_kv.scales,
+                state.marlin_workspace, M, attn.marlin_kv.K, attn.marlin_kv.N,
+                GPTQ_GROUP_SIZE, stream);
     // Split: attn_out[M, 2048] → kv_buf[M, 1024] (K) + dn_z[M, 1024] (V)
     cudaMemcpy2DAsync(state.kv_buf, MC::KV_PROJ_DIM * sizeof(__half),
                       state.attn_out, MC::FA_KV_DIM * sizeof(__half),
@@ -1274,8 +1278,10 @@ static void full_attention_prefill(const __half* x, const FullAttentionWeights& 
     sigmoid_gate(state.attn_out, Gate, state.attn_out,
                  M * MC::ATTN_OUT_DIM, stream);
 
-    // 8. Batched o_proj: attn_out[M, 6144] → norm_out[M, 5120]
-    int8_linear_forward(state.attn_out, attn.o_proj, state.norm_out, M, stream);
+    // 8. Batched o_proj: attn_out[M, 6144] → norm_out[M, 5120] (Marlin INT4)
+    marlin_gemm(state.attn_out, attn.marlin_o.qweight, state.norm_out, attn.marlin_o.scales,
+                state.marlin_workspace, M, attn.marlin_o.K, attn.marlin_o.N,
+                GPTQ_GROUP_SIZE, stream);
 }
 
 // ============================================================================
@@ -1290,12 +1296,15 @@ static void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
                              InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // 1. Merged qkv+a+b projection: x[M, 5120] → dn_qkv[M, 10368]
-    //    Eliminates separate ab_proj launch. a/b at columns 10240..10335.
-    int8_linear_forward(x, dn.in_proj_qkv_ab, state.dn_qkv, M, stream);
+    // 1. Merged qkv+a+b projection: x[M, 5120] → dn_qkv[M, 10496] (Marlin INT4)
+    marlin_gemm(x, dn.marlin_qkv_ab.qweight, state.dn_qkv, dn.marlin_qkv_ab.scales,
+                state.marlin_workspace, M, dn.marlin_qkv_ab.K, dn.marlin_qkv_ab.N,
+                GPTQ_GROUP_SIZE, stream);
 
-    // Z: x[M, 5120] → dn_z[M, 6144]
-    int8_linear_forward(x, dn.in_proj_z, state.dn_z, M, stream);
+    // Z: x[M, 5120] → dn_z[M, 6144] (Marlin INT4)
+    marlin_gemm(x, dn.marlin_z.qweight, state.dn_z, dn.marlin_z.scales,
+                state.marlin_workspace, M, dn.marlin_z.K, dn.marlin_z.N,
+                GPTQ_GROUP_SIZE, stream);
 
     // 2. Batch conv1d: all M tokens in one launch (stride=10368 for merged buffer)
     {
@@ -1327,8 +1336,10 @@ static void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
                    dn.norm_weight, state.attn_out,
                    M * MC::LIN_NUM_V_HEADS, MC::LIN_V_HEAD_DIM, MC::RMS_EPS, stream);
 
-    // 5. Batched out_proj: attn_out[M, 6144] → norm_out[M, 5120]
-    int8_linear_forward(state.attn_out, dn.out_proj, state.norm_out, M, stream);
+    // 5. Batched out_proj: attn_out[M, 6144] → norm_out[M, 5120] (Marlin INT4)
+    marlin_gemm(state.attn_out, dn.marlin_out.qweight, state.norm_out, dn.marlin_out.scales,
+                state.marlin_workspace, M, dn.marlin_out.K, dn.marlin_out.N,
+                GPTQ_GROUP_SIZE, stream);
 }
 
 // ============================================================================
@@ -1447,9 +1458,13 @@ void profile_sublayer_prefill(const ModelWeights& model,
         const __half* x = state.norm_out;
         int e = 0;
         cudaEventRecord(ev[e++], s);  // 0
-        int8_linear_forward(x, dn.in_proj_qkv_ab, state.dn_qkv, M, s);
+        marlin_gemm(x, dn.marlin_qkv_ab.qweight, state.dn_qkv, dn.marlin_qkv_ab.scales,
+                    state.marlin_workspace, M, dn.marlin_qkv_ab.K, dn.marlin_qkv_ab.N,
+                    GPTQ_GROUP_SIZE, s);
         cudaEventRecord(ev[e++], s);  // 1
-        int8_linear_forward(x, dn.in_proj_z, state.dn_z, M, s);
+        marlin_gemm(x, dn.marlin_z.qweight, state.dn_z, dn.marlin_z.scales,
+                    state.marlin_workspace, M, dn.marlin_z.K, dn.marlin_z.N,
+                    GPTQ_GROUP_SIZE, s);
         cudaEventRecord(ev[e++], s);  // 2
         // (ab_proj merged into qkv_ab — no separate event)
         {
@@ -1478,18 +1493,20 @@ void profile_sublayer_prefill(const ModelWeights& model,
                        dn.norm_weight, state.attn_out,
                        M * MC::LIN_NUM_V_HEADS, MC::LIN_V_HEAD_DIM, MC::RMS_EPS, s);
         cudaEventRecord(ev[e++], s);  // 5
-        int8_linear_forward(state.attn_out, dn.out_proj, state.norm_out, M, s);
+        marlin_gemm(state.attn_out, dn.marlin_out.qweight, state.norm_out, dn.marlin_out.scales,
+                    state.marlin_workspace, M, dn.marlin_out.K, dn.marlin_out.N,
+                    GPTQ_GROUP_SIZE, s);
         cudaEventRecord(ev[e++], s);  // 6
         cudaStreamSynchronize(s);
 
         float dn_total = ms(0, 6);
         printf("\n=== DN Sub-layer (layer %d, M=%d) ===\n", first_dn, M);
-        printf("  qkv_ab_proj (INT8 5120→10368): %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/dn_total);
-        printf("  z_proj    (INT8 5120→6144):    %6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/dn_total);
+        printf("  qkv_ab_proj (Marlin 5120→10496): %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/dn_total);
+        printf("  z_proj    (Marlin 5120→6144):    %6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/dn_total);
         printf("  conv1d_silu:                   %6.3f ms  (%4.1f%%)\n", ms(2,3), 100*ms(2,3)/dn_total);
         printf("  fused_head (recurrent):        %6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/dn_total);
         printf("  rms_norm_gated:                %6.3f ms  (%4.1f%%)\n", ms(4,5), 100*ms(4,5)/dn_total);
-        printf("  out_proj  (INT8 6144→5120):    %6.3f ms  (%4.1f%%)\n", ms(5,6), 100*ms(5,6)/dn_total);
+        printf("  out_proj  (Marlin 6144→5120):  %6.3f ms  (%4.1f%%)\n", ms(5,6), 100*ms(5,6)/dn_total);
         printf("  TOTAL (1 DN layer):            %6.3f ms  (×48 = %.1f ms)\n", dn_total, dn_total*48);
     }
 
@@ -1509,21 +1526,20 @@ void profile_sublayer_prefill(const ModelWeights& model,
         silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
                  M * MC::INTERMEDIATE_SIZE, s);
         cudaEventRecord(ev[e++], s);  // 3
+        // Down projection + residual add
         marlin_gemm(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down, mlp.down_proj.scales,
                     state.marlin_workspace, M, mlp.down_proj.K, mlp.down_proj.N, 128, s);
-        cudaEventRecord(ev[e++], s);  // 4
         elementwise_add(state.residual, state.mlp_down, state.residual,
                         M * MC::HIDDEN_SIZE, s);
-        cudaEventRecord(ev[e++], s);  // 5
+        cudaEventRecord(ev[e++], s);  // 4
         cudaStreamSynchronize(s);
 
-        float mlp_total = ms(0, 5);
+        float mlp_total = ms(0, 4);
         printf("\n=== MLP Sub-layer (layer %d, M=%d) ===\n", mlp_layer, M);
         printf("  gate_proj (Marlin 5120→17408):%6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/mlp_total);
         printf("  up_proj   (Marlin 5120→17408):%6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/mlp_total);
         printf("  silu_mul:                    %6.3f ms  (%4.1f%%)\n", ms(2,3), 100*ms(2,3)/mlp_total);
-        printf("  down_proj (Marlin 17408→5120):%6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/mlp_total);
-        printf("  elementwise_add:             %6.3f ms  (%4.1f%%)\n", ms(4,5), 100*ms(4,5)/mlp_total);
+        printf("  down_proj+add (Marlin+add):   %6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/mlp_total);
         printf("  TOTAL (1 MLP layer):         %6.3f ms  (×64 = %.1f ms)\n", mlp_total, mlp_total*64);
     }
 
@@ -1535,9 +1551,13 @@ void profile_sublayer_prefill(const ModelWeights& model,
         __half* Gate = state.mlp_gate;
         int e = 0;
         cudaEventRecord(ev[e++], s);  // 0
-        int8_linear_forward(x, attn.q_proj, state.q_buf, M, s);
+        marlin_gemm(x, attn.marlin_q.qweight, state.q_buf, attn.marlin_q.scales,
+                    state.marlin_workspace, M, attn.marlin_q.K, attn.marlin_q.N,
+                    GPTQ_GROUP_SIZE, s);
         cudaEventRecord(ev[e++], s);  // 1
-        int8_linear_forward(x, attn.kv_proj, state.attn_out, M, s);
+        marlin_gemm(x, attn.marlin_kv.qweight, state.attn_out, attn.marlin_kv.scales,
+                    state.marlin_workspace, M, attn.marlin_kv.K, attn.marlin_kv.N,
+                    GPTQ_GROUP_SIZE, s);
         cudaMemcpy2DAsync(state.kv_buf, MC::KV_PROJ_DIM * sizeof(__half),
                           state.attn_out, MC::FA_KV_DIM * sizeof(__half),
                           MC::KV_PROJ_DIM * sizeof(__half), M,
@@ -1585,18 +1605,20 @@ void profile_sublayer_prefill(const ModelWeights& model,
         sigmoid_gate(state.attn_out, Gate, state.attn_out,
                      M * MC::ATTN_OUT_DIM, s);
         cudaEventRecord(ev[e++], s);  // 5
-        int8_linear_forward(state.attn_out, attn.o_proj, state.norm_out, M, s);
+        marlin_gemm(state.attn_out, attn.marlin_o.qweight, state.norm_out, attn.marlin_o.scales,
+                    state.marlin_workspace, M, attn.marlin_o.K, attn.marlin_o.N,
+                    GPTQ_GROUP_SIZE, s);
         cudaEventRecord(ev[e++], s);  // 6
         cudaStreamSynchronize(s);
 
         float fa_total = ms(0, 6);
         printf("\n=== FA Sub-layer (layer %d, M=%d) ===\n", first_fa, M);
-        printf("  q_proj    (INT8 5120→12288): %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/fa_total);
-        printf("  kv_proj   (INT8 5120→1024×2):%6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/fa_total);
+        printf("  q_proj    (Marlin 5120→12288): %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/fa_total);
+        printf("  kv_proj   (Marlin 5120→1024×2):%6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/fa_total);
         printf("  split+norm+RoPE+kvwrite:     %6.3f ms  (%4.1f%%)\n", ms(2,3), 100*ms(2,3)/fa_total);
         printf("  attention (causal):          %6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/fa_total);
         printf("  sigmoid_gate:                %6.3f ms  (%4.1f%%)\n", ms(4,5), 100*ms(4,5)/fa_total);
-        printf("  o_proj    (INT8 6144→5120):  %6.3f ms  (%4.1f%%)\n", ms(5,6), 100*ms(5,6)/fa_total);
+        printf("  o_proj    (Marlin 6144→5120): %6.3f ms  (%4.1f%%)\n", ms(5,6), 100*ms(5,6)/fa_total);
         printf("  TOTAL (1 FA layer):          %6.3f ms  (×16 = %.1f ms)\n", fa_total, fa_total*16);
     }
 
@@ -1796,11 +1818,9 @@ void profile_forward(const ModelWeights& model,
                                       1, MC::HIDDEN_SIZE, MC::RMS_EPS, stream); });
 
             snprintf(buf, sizeof(buf), "L%d %s mlp", layer, lt);
-            float mlp_ms = timed(buf, [&]{ mlp_forward(state.norm_out, lw.mlp, nullptr, state, stream); });
+            float mlp_ms = timed(buf, [&]{ mlp_forward(state.norm_out, lw.mlp, state.residual, state, stream); });
             total_mlp += mlp_ms;
 
-            elementwise_add(state.residual, state.mlp_down, state.residual,
-                            MC::HIDDEN_SIZE, stream);
         } else {
             // Bulk timing for remaining layers
             cudaEventRecord(e0, stream);

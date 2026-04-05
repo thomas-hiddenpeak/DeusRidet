@@ -371,7 +371,7 @@ bool load_model_weights(const std::string& model_dir, ModelWeights& weights) {
 // ============================================================================
 // merge_projection_weights — create merged INT8 weights for prefill
 //
-// DN: qkv[10240,5120] + a[48,5120] + b[48,5120] → merged[10368,5120]
+// DN: qkv[10240,5120] + a[48,5120] + b[48,5120] → merged[10496,5120] (Marlin 256-aligned)
 // FA: k[1024,5120] + v[1024,5120] → merged[2048,5120]
 // ============================================================================
 
@@ -445,6 +445,123 @@ bool merge_projection_weights(ModelWeights& weights) {
 }
 
 // ============================================================================
+// quantize_attn_to_marlin — INT8 attention → GPTQ INT4 → Marlin format
+//
+// Re-quantizes INT8 per-channel attention projections to GPTQ INT4 per-group
+// (group_size=128), then repacks to Marlin tile format for prefill GEMM.
+// Halves attention data volume + enables ~90% BW Marlin kernel vs ~75% INT8.
+// ============================================================================
+
+static void quantize_and_repack(const Int8Linear& src, GptqWeight& dst,
+                                int* d_perm, int* d_scale_perm,
+                                void* temp_buf, size_t temp_buf_bytes,
+                                cudaStream_t stream) {
+    // Step 1: INT8 → GPTQ INT4 (per-group symmetric, group_size=128)
+    quantize_int8_to_gptq_int4(src, dst, GPTQ_GROUP_SIZE, stream);
+    cudaStreamSynchronize(stream);
+
+    // Step 2: Repack GPTQ → Marlin tile format (in-place on qweight + scales)
+    repack_gptq_to_marlin(
+        const_cast<uint32_t*>(dst.qweight),
+        const_cast<__half*>(dst.scales),
+        dst.K, dst.N,
+        d_perm, d_scale_perm, temp_buf, temp_buf_bytes, stream);
+}
+
+bool quantize_attn_to_marlin(ModelWeights& weights) {
+    using MC = ModelConfig;
+    printf("[marlin] Re-quantizing attention INT8 → INT4 Marlin...\n");
+
+    auto t0 = std::chrono::steady_clock::now();
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    // Upload permutation tables
+    int* d_perm = nullptr;
+    int* d_scale_perm = nullptr;
+    upload_marlin_perm_tables(&d_perm, &d_scale_perm);
+
+    // Temp buffer for repack: max qweight size across all projections
+    // Largest: q_proj K=5120, N=12288 → (5120/8)*12288 = 7,864,320 uint32 = 30 MB
+    // DN qkv_ab: (5120/8)*10368 = 6,635,520 uint32 = 25.3 MB
+    size_t max_qw_elems = 0;
+    {
+        size_t candidates[] = {
+            (size_t)(MC::HIDDEN_SIZE / 8) * MC::LIN_QKV_AB_DIM,  // qkv_ab
+            (size_t)(MC::HIDDEN_SIZE / 8) * MC::LIN_VALUE_DIM,   // z, out
+            (size_t)(MC::ATTN_OUT_DIM / 8) * MC::HIDDEN_SIZE,    // out_proj
+            (size_t)(MC::HIDDEN_SIZE / 8) * MC::Q_PROJ_DIM,      // q_proj
+            (size_t)(MC::HIDDEN_SIZE / 8) * MC::FA_KV_DIM,       // kv_proj
+            (size_t)(MC::ATTN_OUT_DIM / 8) * MC::HIDDEN_SIZE,    // o_proj
+        };
+        for (auto c : candidates) if (c > max_qw_elems) max_qw_elems = c;
+    }
+    size_t temp_bytes = max_qw_elems * sizeof(uint32_t);
+    void* temp_buf = nullptr;
+    cudaMalloc(&temp_buf, temp_bytes);
+
+    size_t total_int4_bytes = 0;
+    int count = 0;
+
+    for (int i = 0; i < MC::NUM_LAYERS; i++) {
+        auto& lw = weights.layers[i];
+
+        if (!MC::is_full_attention(i)) {
+            auto& dn = lw.delta_net;
+
+            // qkv_ab: merged [10368, 5120] INT8 → INT4 Marlin
+            quantize_and_repack(dn.in_proj_qkv_ab, dn.marlin_qkv_ab,
+                                d_perm, d_scale_perm, temp_buf, temp_bytes, stream);
+            total_int4_bytes += (size_t)(dn.marlin_qkv_ab.K / 8) * dn.marlin_qkv_ab.N * 4;
+
+            // z: [6144, 5120] INT8 → INT4 Marlin
+            quantize_and_repack(dn.in_proj_z, dn.marlin_z,
+                                d_perm, d_scale_perm, temp_buf, temp_bytes, stream);
+            total_int4_bytes += (size_t)(dn.marlin_z.K / 8) * dn.marlin_z.N * 4;
+
+            // out: [5120, 6144] INT8 → INT4 Marlin
+            quantize_and_repack(dn.out_proj, dn.marlin_out,
+                                d_perm, d_scale_perm, temp_buf, temp_bytes, stream);
+            total_int4_bytes += (size_t)(dn.marlin_out.K / 8) * dn.marlin_out.N * 4;
+
+            count += 3;
+        } else {
+            auto& fa = lw.full_attn;
+
+            // q: [12288, 5120] INT8 → INT4 Marlin
+            quantize_and_repack(fa.q_proj, fa.marlin_q,
+                                d_perm, d_scale_perm, temp_buf, temp_bytes, stream);
+            total_int4_bytes += (size_t)(fa.marlin_q.K / 8) * fa.marlin_q.N * 4;
+
+            // kv: merged [2048, 5120] INT8 → INT4 Marlin
+            quantize_and_repack(fa.kv_proj, fa.marlin_kv,
+                                d_perm, d_scale_perm, temp_buf, temp_bytes, stream);
+            total_int4_bytes += (size_t)(fa.marlin_kv.K / 8) * fa.marlin_kv.N * 4;
+
+            // o: [5120, 6144] INT8 → INT4 Marlin
+            quantize_and_repack(fa.o_proj, fa.marlin_o,
+                                d_perm, d_scale_perm, temp_buf, temp_bytes, stream);
+            total_int4_bytes += (size_t)(fa.marlin_o.K / 8) * fa.marlin_o.N * 4;
+
+            count += 3;
+        }
+    }
+
+    cudaStreamSynchronize(stream);
+    cudaStreamDestroy(stream);
+    cudaFree(temp_buf);
+    cudaFree(d_perm);
+    cudaFree(d_scale_perm);
+
+    auto t1 = std::chrono::steady_clock::now();
+    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    printf("[marlin] Re-quantized %d attention projections: %.1f MB INT4, %.1f ms\n",
+           count, total_int4_bytes / 1048576.0, ms);
+
+    return true;
+}
+
+// ============================================================================
 // free_model_weights — release pool blocks
 // ============================================================================
 
@@ -467,10 +584,22 @@ void free_model_weights(ModelWeights& w) {
         if (l.scales) cudaFree(l.scales);
         l = Int8Linear{};
     };
+    auto free_gptq = [](GptqWeight& g) {
+        if (g.qweight) cudaFree(const_cast<uint32_t*>(g.qweight));
+        if (g.scales) cudaFree(const_cast<__half*>(g.scales));
+        g = GptqWeight{};
+    };
     for (int i = 0; i < ModelConfig::NUM_LAYERS; i++) {
         auto& lw = w.layers[i];
         free_int8(lw.delta_net.in_proj_qkv_ab);
         free_int8(lw.full_attn.kv_proj);
+        // Free Marlin INT4 attention weights
+        free_gptq(lw.delta_net.marlin_qkv_ab);
+        free_gptq(lw.delta_net.marlin_z);
+        free_gptq(lw.delta_net.marlin_out);
+        free_gptq(lw.full_attn.marlin_q);
+        free_gptq(lw.full_attn.marlin_kv);
+        free_gptq(lw.full_attn.marlin_o);
     }
 
     // Zero out all pointers (they pointed into freed pool blocks)

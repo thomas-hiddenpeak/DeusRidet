@@ -1330,3 +1330,116 @@ Phase 3.6 的子层剖析揭示了两个优化机会：
 | 每 token | 13.66 | 13.36 | **-0.30 ms/tok** |
 
 **第 3.0 阶段至今：1012 → 147 ms，6.9 倍加速**。
+
+---
+
+## 2026-04-07 — Phase 3.8（实验）：PTX MMA 替代 WMMA（已回退）
+
+### 背景
+
+Phase 3.7 之后，5 个 GPTQ 内核变体（warp-spec syncthreads/named-barrier、BK=128/BN=32、
+3-blocks/SM、INT8 WMMA）全部无改善——均与 V1 基线相同 ~15260 µs。假设 WMMA API 的
+结构性 SMEM bank 冲突（数学证明不可避免：FP16 padding 的 GCD 至少 4-way）是 ~61%
+BW 效率上限的根因。
+
+### 实验
+
+**PTX mma.m16n8k16 + ldmatrix.x4** 替代 WMMA，消除结构性 bank 冲突：
+
+1. 确认 SM87 支持 `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32` 和
+   `ldmatrix.sync.aligned.m8n8.x4.shared.b16` ✅
+2. **经验性发现 A fragment 寄存器顺序**（与朴素假设不同）：
+   - a0={A[g,2l], A[g,2l+1]}（顶行，左 k-半）
+   - **a1={A[g+8,2l], A[g+8,2l+1]}**（**底行**，左 k-半）　← 注意与 a2 交换
+   - **a2={A[g,2l+8], A[g,2l+9]}**（顶行，**右 k-半**）
+   - a3={A[g+8,2l+8], A[g+8,2l+9]}（底行，右 k-半）
+   - 通过 WMMA fragment dump 对比手动 PTX 寄存器发现
+3. 完整 ldmatrix.x4 + ldmatrix.x2.trans + MMA 随机 GEMM 测试：max\_err=0.0015，通过
+4. 写入 `gptq_ptx_mma_gemm_kernel` 和 `gptq_ptx_mma_gemm_add_kernel`，替换分发
+
+### 结果
+
+| 指标 | WMMA V1 | PTX MMA | 变化 |
+|------|---------|---------|------|
+| bench-gptq M=128 | 15260 µs | 15262 µs | **无变化** |
+| test-forward Prefill | 147-168 ms | **193.4 ms** | **+31% 回退** |
+
+### 分析
+
+- **隔离基准完全相同**：SMEM bank 冲突在计算阶段 **不是瓶颈**
+- **全前向回退 31%**：手动标量 W 加载 + FP32 scatter store 的指令调度比 WMMA API
+  差。WMMA 允许 nvcc 内部排列指令以重叠内存访问和计算；内联 PTX 破坏了这种优化
+- **结论**：55% BW 效率的根因是反量化 ALU 占时（DRAM 空闲 ~50% tile 时间），
+  而非计算阶段的 SMEM bank 冲突
+
+### 已回退
+
+完整回退至 V1 WMMA 内核。PTX MMA 内核代码已删除。
+
+### 经验总结
+
+1. **微基准结果相同时，不要假设全系统也相同**——指令调度、寄存器压力、编译器优化
+   在全前向中产生显著差异
+2. **WMMA API 比手工 PTX 更好**（在 SM87 上）——编译器对 WMMA 有特殊优化路径，
+   手工 PTX 丧失这些优化
+3. **PTX MMA fragment 顺序**（SM87 实测）：行交错在 k 推进之前
+   （a0=顶左, a1=**底**左, a2=顶**右**, a3=底右），与部分文档描述不同
+
+---
+
+## 2026-07-16 — Marlin 优化：SMEM 精确分配 + 融合残差加 + Tile 配置调优
+
+### 背景
+
+Marlin GPTQ INT4 移植（Phase 4.0, commit f7b5983）及内存开销审计（commit dd9bc57）后，
+MLP 层耗时 55.46 ms（64 层），总计 119.21 ms（10.84 ms/tok，M=11）。发现三个优化点：
+
+1. SMEM 过分配：所有内核配置统一 96 KB，实际需求仅 42–66 KB。SM87 共 128 KB 统一
+   L1/SMEM，96 KB SMEM 仅留 32 KB L1
+2. down_proj 后单独的 elementwise_add 内核：每 pass 64 次多余内核启动
+3. M≤16 的 tile 配置 (1,8,8,8) [thread_k=128, thread_n=128] 可能非最优
+
+### 修改
+
+**1. 按内核配置精确计算动态 SMEM**
+
+用 `MARLIN_SMEM_BYTES(M,N,K)` 编译期宏替代 `96*1024`：
+```
+(1,16,4,8): 42 KB SMEM → 86 KB L1  (原 96→32)
+(2,16,4,8): 50 KB → 78 KB L1
+(3,16,4,8): 58 KB → 70 KB L1
+(4,16,4,8): 66 KB → 62 KB L1
+```
+
+**2. Marlin write_result 融合残差加**
+
+内核新增 `const int4* residual` 参数。非空时 write_result 执行读-改-写：
+`C[i] = residual[i] + result`。仅 M ≤ 64 安全（单 slice，无 global reduce）。
+新 API：`marlin_gemm_add()` 原地累加。
+
+**3. 统一 tile 配置：所有 M 使用 thread_k=64, thread_n=256**
+
+M≤16 从 (1,8,8,8) 改为 (1,16,4,8)：相同总迭代次数（5440/SM），但更宽 N tile
+改善写局部性，更少 SMEM（42KB vs 49KB）释放更多 L1。
+
+### 结果
+
+| 组件 | 优化前 | 优化后 | 变化 |
+|------|--------|--------|------|
+| MLP gate_proj | 0.300 ms | 0.292 ms | **-2.7%** |
+| MLP up_proj | 0.292 ms | 0.285 ms | **-2.4%** |
+| MLP down_proj+add | 0.287 ms | 0.272 ms | **-5.2%** |
+| **MLP 总计** | **0.886 ms** | **0.856 ms** | **-3.4%** |
+| MLP ×64 | 55.46 ms | 53.80 ms | **-1.66 ms** |
+| **总计（64层）** | **119.21 ms** | **115.89 ms** | **-2.8%** |
+| **每 token** | **10.84 ms** | **10.54 ms** | **-0.30 ms/tok** |
+
+带宽利用率（实测峰值 175 GB/s）：gate 85%→87%，up 87%→89%，down+add 90%→**94.5%**
+
+### 性能历程（更新）
+
+| 阶段 | Prefill (ms/tok) | 关键变更 |
+|------|------------------|----------|
+| 3.7（合并权重）| 13.4 | qkv+ab 合并, k+v 合并 |
+| 4.0（Marlin 移植）| 10.6 | Marlin GPTQ INT4 GEMM |
+| **4.1（Marlin 调优）** | **10.54** | SMEM 精确分配, 融合残差加, tile 配置调优 |

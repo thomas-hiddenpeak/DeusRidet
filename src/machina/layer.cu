@@ -827,7 +827,11 @@ static void int8_gemm(const __half* X, const int8_t* W, const float* scales,
 // 4 warps × 16 iterations = 64 rows = BN.
 //
 // Tile: BM=16, BN=64, BK=128.  Block: 128 threads = 4 warps.
-// SMEM: X[16,136] (4.25 KB) + W[64,136] (17 KB) = 21.25 KB → 2 blocks/SM.
+// SMEM: X[16,136] (4.25 KB) + W[64,136] (17 KB) = 21.25 KB.
+// launch_bounds(128, 4): 4 blocks/SM = 16 warps = 33% occupancy.
+// The compiler spills ~11 regs to L1 (fast) to fit the 128-reg budget.
+// With double-buffer prefetch, loads overlap with WMMA; inter-block
+// interleaving provides additional DRAM latency hiding.
 //
 // Requirements: K % 128 == 0, N % 64 == 0.
 
@@ -837,7 +841,7 @@ constexpr int I8TC_BK = 128;
 constexpr int I8TC_BK_PAD = I8TC_BK + 8;  // 136: pad K stride for SMEM bank avoidance
 constexpr int I8TC_BLOCK = 128;  // 4 warps
 
-__global__ void __launch_bounds__(I8TC_BLOCK, 2)
+__global__ void __launch_bounds__(I8TC_BLOCK, 4)
 int8_wmma_gemm_kernel(
     const __half*  __restrict__ X,       // [M_pad, K] row-major FP16
     const int8_t*  __restrict__ W,       // [N, K] row-major INT8
@@ -1290,6 +1294,128 @@ void quantize_fp16_to_int8(const __half* src_fp16, Int8Linear& dst,
     quantize_to_int8_kernel<<<out_features, block, 0, stream>>>(
         src_fp16, dst.scales, dst.weight, in_features);
     cudaStreamSynchronize(stream);
+}
+
+// ============================================================================
+// INT8 → GPTQ INT4 re-quantization (per-group symmetric)
+//
+// Converts INT8 per-channel weights to GPTQ INT4 per-group format.
+// Input:  int8_weight[N, K] row-major, float scales[N] per-channel
+// Output: qweight[K/8, N] packed uint32, scales[K/gs, N] FP16
+//
+// Algorithm per group of gs=128 elements along K for each output channel n:
+//   max_abs = max(|int8_weight[n, g*128 .. g*128+127]|)
+//   group_scale = int8_scale[n] * max_abs / 7.0
+//   nibble[k] = clamp(round(int8_val * 7.0 / max(1, max_abs)) + 8, 0, 15)
+// ============================================================================
+
+// One block per (group, n) — 128 threads handle 128 K-elements.
+// Fused: find max_abs, quantize, pack 16 uint32s, write scale.
+__global__ void int8_to_gptq_int4_kernel(
+    const int8_t* __restrict__ in_weight,  // [N, K] row-major
+    const float*  __restrict__ in_scales,  // [N]
+    uint32_t*     __restrict__ out_qw,     // [K/8, N]
+    __half*       __restrict__ out_scales,  // [num_groups, N]
+    int N, int K, int group_size)
+{
+    // blockIdx.x = group index, blockIdx.y = n (output channel)
+    int g = blockIdx.x;
+    int n = blockIdx.y;
+    int tid = threadIdx.x;  // 0..127
+
+    if (n >= N) return;
+
+    int k_base = g * group_size;
+    int k = k_base + tid;
+
+    // Load one INT8 value per thread
+    int val = (k < K) ? (int)in_weight[(size_t)n * K + k] : 0;
+    int abs_val = (val >= 0) ? val : -val;
+
+    // Warp reduction for max_abs (4 warps × 32 threads = 128)
+    __shared__ int smem_max[4];
+    unsigned mask = 0xFFFFFFFF;
+    int warp_max = abs_val;
+    #pragma unroll
+    for (int offset = 16; offset >= 1; offset >>= 1)
+        warp_max = max(warp_max, __shfl_xor_sync(mask, warp_max, offset));
+
+    int warp_id = tid >> 5;
+    int lane = tid & 31;
+    if (lane == 0) smem_max[warp_id] = warp_max;
+    __syncthreads();
+
+    int max_abs;
+    if (tid < 4) {
+        max_abs = smem_max[tid];
+    } else {
+        max_abs = 0;
+    }
+    if (tid < 4) {
+        #pragma unroll
+        for (int offset = 2; offset >= 1; offset >>= 1)
+            max_abs = max(max_abs, __shfl_xor_sync(0xF, max_abs, offset));
+        smem_max[0] = max_abs;
+    }
+    __syncthreads();
+    max_abs = smem_max[0];
+
+    // Compute and write group scale (one thread)
+    if (tid == 0) {
+        float scale = in_scales[n] * (float)max(1, max_abs) / 7.0f;
+        int num_groups = K / group_size;
+        out_scales[g * N + n] = __float2half(scale);
+    }
+
+    // Quantize: nibble = clamp(round(val * 7 / max(1, max_abs)) + 8, 0, 15)
+    float rcp = (max_abs > 0) ? (7.0f / (float)max_abs) : 0.0f;
+    int nibble = __float2int_rn((float)val * rcp) + 8;
+    nibble = max(0, min(15, nibble));
+
+    // Pack: 8 threads with consecutive k values contribute to one uint32
+    int pack_group = tid / 8;   // 0..15 (16 uint32s per group)
+    int pack_lane  = tid % 8;   // 0..7
+
+    // Shared memory gather for packing (works across warps)
+    __shared__ int smem_nibbles[128];
+    smem_nibbles[tid] = nibble;
+    __syncthreads();
+
+    if (pack_lane == 0) {
+        uint32_t packed = 0;
+        #pragma unroll
+        for (int b = 0; b < 8; b++) {
+            packed |= ((uint32_t)smem_nibbles[pack_group * 8 + b] << (b * 4));
+        }
+        // Write packed uint32: qweight[(k_base/8 + pack_group) * N + n]
+        int qw_row = k_base / 8 + pack_group;
+        out_qw[(size_t)qw_row * N + n] = packed;
+    }
+}
+
+void quantize_int8_to_gptq_int4(const Int8Linear& src, GptqWeight& dst,
+                                int group_size, cudaStream_t stream) {
+    int N = src.out_features;
+    int K = src.in_features;
+    int num_groups = K / group_size;
+
+    dst.K = K;
+    dst.N = N;
+
+    size_t qw_bytes = (size_t)(K / 8) * N * sizeof(uint32_t);
+    size_t sc_bytes = (size_t)num_groups * N * sizeof(__half);
+    uint32_t* qw_ptr = nullptr;
+    __half*   sc_ptr = nullptr;
+    cudaMalloc(&qw_ptr, qw_bytes);
+    cudaMalloc(&sc_ptr, sc_bytes);
+    cudaMemsetAsync(qw_ptr, 0, qw_bytes, stream);
+
+    dst.qweight = qw_ptr;
+    dst.scales  = sc_ptr;
+
+    dim3 grid(num_groups, N);
+    int8_to_gptq_int4_kernel<<<grid, group_size, 0, stream>>>(
+        src.weight, src.scales, qw_ptr, sc_ptr, N, K, group_size);
 }
 
 // ============================================================================

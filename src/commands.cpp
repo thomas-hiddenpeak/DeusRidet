@@ -534,6 +534,7 @@ int cmd_test_forward(const std::string& model_dir) {
         return 1;
     }
     merge_projection_weights(weights);
+    quantize_attn_to_marlin(weights);
     printf("[test-forward] Weights loaded: %.2f GB\n",
            weights.total_bytes / 1073741824.0);
 
@@ -669,6 +670,7 @@ int cmd_test_sample(const std::string& model_dir) {
         return 1;
     }
     merge_projection_weights(weights);
+    quantize_attn_to_marlin(weights);
 
     InferenceState state;
     int max_kv_len = 128;
@@ -878,6 +880,7 @@ int cmd_profile_prefill(const std::string& model_dir) {
         return 1;
     }
     merge_projection_weights(weights);
+    quantize_attn_to_marlin(weights);
 
     InferenceState state;
     int max_kv_len = 128;

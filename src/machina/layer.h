@@ -100,6 +100,13 @@ void quantize_fp16_to_int8(const __half* src_fp16, Int8Linear& dst,
                            int out_features, int in_features,
                            cudaStream_t stream = 0);
 
+// Quantize INT8 per-channel weights to GPTQ INT4 per-group format on GPU.
+// Allocates qweight + scales via cudaMalloc. INT8 weight is [N, K] row-major.
+// Output: qweight [K/8, N] packed uint32, scales [K/group_size, N] FP16.
+// The INT8 per-channel scale is folded into the per-group INT4 scale.
+void quantize_int8_to_gptq_int4(const Int8Linear& src, GptqWeight& dst,
+                                int group_size, cudaStream_t stream = 0);
+
 // ============================================================================
 // RoPE (partial rotary position embedding)
 // ============================================================================

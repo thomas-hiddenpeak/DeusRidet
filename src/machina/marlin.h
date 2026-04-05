@@ -36,6 +36,20 @@ namespace deusridet {
 struct ModelWeights;  // forward declaration
 size_t repack_all_marlin(ModelWeights& weights, cudaStream_t stream = 0);
 
+// Repack a single GPTQ weight tensor from GPTQ format to Marlin tile format.
+// Operates in-place on qweight and scales. temp_buf must be at least
+// (K/8)*N*sizeof(uint32_t) bytes. d_perm[1024] and d_scale_perm[64] are
+// device-resident permutation tables (see compute_marlin_perm/scale_perm).
+void repack_gptq_to_marlin(
+    uint32_t* qweight, __half* scales,
+    int K, int N,
+    int* d_perm, int* d_scale_perm,
+    void* temp_buf, size_t temp_buf_bytes,
+    cudaStream_t stream = 0);
+
+// Upload Marlin permutation tables to device. Caller owns the returned pointers.
+void upload_marlin_perm_tables(int** d_perm, int** d_scale_perm);
+
 // ============================================================================
 // Marlin GEMM dispatch
 // ============================================================================
@@ -50,6 +64,20 @@ size_t repack_all_marlin(ModelWeights& weights, cudaStream_t stream = 0);
 // M, K, N:   problem dimensions (K and N must match repacked weight)
 // groupsize: quantization group size (128 for our GPTQ)
 void marlin_gemm(
+    const __half* A,
+    const uint32_t* B,
+    __half* C,
+    const __half* s,
+    int* workspace,
+    int M, int K, int N,
+    int groupsize = 128,
+    cudaStream_t stream = 0);
+
+// Marlin GEMM with fused residual accumulation: C[i] += (A @ B)[i]
+// In-place — reads old C, adds GEMM result, writes back. Only safe for
+// M ≤ 64 (single-slice execution, no global reduce). For M > 64, use
+// marlin_gemm() + separate elementwise_add().
+void marlin_gemm_add(
     const __half* A,
     const uint32_t* B,
     __half* C,
