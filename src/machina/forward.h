@@ -101,4 +101,12 @@ void profile_forward_prefill(const ModelWeights& model,
                              int pos_start, int max_kv_len,
                              cudaStream_t stream = 0);
 
+// Sub-layer profiler: per-operation timing within DN, FA, MLP.
+// Call AFTER a warmup pass with buffers populated.
+void profile_sublayer_prefill(const ModelWeights& model,
+                              InferenceState& state,
+                              __half* kv_cache,
+                              int M, int pos_start, int max_kv_len,
+                              cudaStream_t stream = 0);
+
 } // namespace deusridet

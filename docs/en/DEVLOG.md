@@ -1702,3 +1702,175 @@ At 175 GB/s peak streaming bandwidth:
 110 ms target requires ~86% average bandwidth utilization. Achievable with
 architectural changes (different quant, persistent kernels, or next-gen HW)
 but not with incremental kernel tuning on SM87.
+
+---
+
+## 2026-04-06 — Phase 3.6: Sub-layer Profiling, Kernel Fusions, Inline Dequant
+
+### Context
+
+Continuing prefill optimization from 158 ms (14.3 ms/tok). Target: 110 ms
+(10 ms/tok). Previous phase established that SM87's 128 KB L1+SMEM unified
+budget makes SMEM double-buffer and large BK impractical for GPTQ. This phase
+focuses on: (1) profiling per-operation within layer types to identify the real
+bottlenecks, (2) kernel fusions to eliminate launch overhead and redundant DRAM
+traffic, and (3) inline dequant to remove SMEM bank conflicts.
+
+### 1. Inline `__int2half_rn` for GPTQ Dequant (SUCCESS: -5.9 ms)
+
+Replaced SMEM `base_values[nib]` lookup with inline `__int2half_rn(nib - 8)`.
+
+**Motivation**: The `base_values[16]` table (32 bytes) sits in banks 0-7 of SMEM.
+With random nibble values, each warp access has ~4-way bank conflicts. The SMEM
+lookup has 20+ cycle latency per access, multiplied by conflict serialization.
+
+**Change**: Removed `__shared__ __half base_values[16]` allocation, its init
+`__syncthreads`, and all reads. Replaced with `__int2half_rn(nib0 - GPTQ_ZERO_POINT)`
+which compiles to `IADD + I2FP.F16` (~4 cycle throughput in register ALU).
+
+**Result**: MLP 92.4 → 86.5 ms (**-6.4%**, -5.9 ms). No precision impact
+(identical output tokens). SMEM reduced by 32 bytes + one `__syncthreads`.
+
+### 2. Sub-layer Profiling (NEW: `profile_sublayer_prefill`)
+
+Added per-operation profiling within DN, FA, and MLP layers. Uses CUDA events
+between each sub-operation on a single representative layer of each type.
+
+**DN Sub-layer Breakdown (layer 0, M=11, 1.045 ms/layer × 48):**
+
+| Operation | Time | % | BW (GB/s) |
+|-----------|------|---|-----------|
+| qkv_proj (INT8, 5120→10240) | 0.382 ms | 36.5% | 137 (78%) |
+| z_proj (INT8, 5120→6144) | 0.203 ms | 19.4% | 155 (89%) |
+| ab_proj (INT8, 5120→48×2) | 0.100 ms | 9.6% | 4.9 (launch-dominated) |
+| conv1d_silu | 0.015 ms | 1.5% | — |
+| fused_head (recurrent) | 0.101 ms | 9.7% | — |
+| rms_norm_gated | 0.012 ms | 1.2% | — |
+| out_proj (INT8, 6144→5120) | 0.231 ms | 22.1% | 136 (78%) |
+
+**Key finding**: ab_proj (N=48 each) costs 4.8 ms total but only 0.5 MB data —
+entirely dominated by kernel launch overhead (12 blocks for N=48, < 1 wave on 16 SMs).
+
+**MLP Sub-layer Breakdown (layer 0, M=11, 1.360 ms/layer × 64):**
+
+| Operation | Time | % | BW (GB/s) |
+|-----------|------|---|-----------|
+| gate_proj (GPTQ, 5120→17408) | 0.432 ms | 31.8% | 106 (61%) |
+| up_proj (GPTQ, 5120→17408) | 0.427 ms | 31.4% | 107 (61%) |
+| silu_mul | 0.010 ms | 0.8% | — |
+| down_proj (GPTQ, 17408→5120) | 0.483 ms | 35.5% | 95 (54%) |
+| elementwise_add | 0.007 ms | 0.5% | — |
+
+**Key finding**: GPTQ GEMMs are 99.2% of MLP time. down_proj slower per MB
+(54% vs 61% BW) due to larger K=17408 working set.
+
+**FA Sub-layer Breakdown (layer 3, M=11, 0.857 ms/layer × 16):**
+
+| Operation | Time | % | BW (GB/s) |
+|-----------|------|---|-----------|
+| q_proj (INT8, 5120→12288) | 0.396 ms | 46.2% | 159 (91%) |
+| kv_proj (INT8, 5120→1024×2) | 0.142 ms | 16.5% | 74 (42%) |
+| split+norm+RoPE+kvwrite | 0.035 ms | 4.1% | — |
+| attention (causal) | 0.025 ms | 2.9% | — |
+| sigmoid_gate | 0.006 ms | 0.7% | — |
+| o_proj (INT8, 6144→5120) | 0.253 ms | 29.6% | 124 (71%) |
+
+**Key finding**: kv_proj poor (42% BW) because N=1024 → 16 blocks = single wave
+on 16 SMs. q_proj achieves 91% BW (best in the model).
+
+### 3. Dual Batch GEMV for DN ab_proj (SUCCESS: -1.0 ms)
+
+Created `int8_dual_batch_gemv_kernel` for M>1: fuses two small INT8 projections
+sharing the same input X into a single kernel launch.
+
+Applied to DN `in_proj_a + in_proj_b` (N=48 each → combined N=96, single launch).
+Dispatch logic in `int8_dual_linear_forward` checks WMMA compatibility: if either
+weight is WMMA-eligible (N%64==0 && K%128==0), falls back to separate WMMA calls
+(WMMA > batch GEMV for compatible dimensions).
+
+**Result**: DN 49.3 → 48.3 ms (-1.0 ms), ab_proj 0.100 → 0.065 ms per layer.
+
+**Also tested for FA kv_proj**: REGRESSION (0.142 → 0.357 ms) because batch GEMV
+cannot compete with WMMA tensor cores for N=1024. Reverted to separate WMMA calls.
+
+### 4. Fused Silu into GPTQ Down_proj (FAILED: +11 ms, reverted)
+
+Attempted `gptq_wmma_gemm_silu_add_kernel` that loads gate+up instead of X and
+computes `silu(gate) * up` on-the-fly during the SMEM load phase.
+
+**Regression cause**: The silu computation (`__expf` + divide + multiply × 8
+elements per thread) depends on the gate/up DRAM load data. This creates a
+serial dependency in the prefetch pipeline:
+```
+Issue DRAM loads (gate+up) → wait ~500 cycles → compute silu ~300 cycles → done
+```
+In the original kernel, the prefetch only issues DRAM loads (non-blocking), and
+the stall occurs at the next tile's SMEM write phase. The silu adds 300 cycles
+of ALU to the critical path that cannot overlap with DRAM loads because it
+depends on the DRAM data.
+
+**Lesson**: Fusing compute-dependent ALU into the DRAM prefetch phase of a
+bandwidth-bound kernel makes things WORSE. The prefetch design relies on
+non-blocking loads; any compute that depends on the loaded data serializes.
+
+### 5. Fused Residual Add into GPTQ Store (SUCCESS: -0.3 ms)
+
+Created `gptq_wmma_gemm_add_kernel` that writes `residual += GPTQ_output`
+directly, eliminating the standalone `elementwise_add` kernel.
+
+Store phase uses SMEM staging: WMMA output → SMEM (stride 64) → read + add
+residual → write to global. Reuses smem_x buffer (16×72 ≥ 16×64 needed).
+
+Applied to `down_proj` in `mlp_forward_prefill` when WMMA-eligible.
+
+**Result**: MLP 86.4 → 86.1 ms (-0.3 ms). Saves 64 kernel launches + 14 MB
+DRAM traffic. Modest because the add operations themselves were already cheap
+(0.007 ms/layer); the SMEM staging adds ~0.004 ms/layer overhead.
+
+### Results
+
+| Component | Phase 3.5 | Phase 3.6 | Improvement |
+|-----------|-----------|-----------|-------------|
+| MLP GPTQ | 92.4 ms | 86.1 ms | **-6.8%** |
+| DeltaNet SSM | 49.6 ms | 48.3 ms | **-2.6%** |
+| Full Attention | 13.3 ms | 13.6 ms | ~same |
+| Norms | 2.3 ms | 2.3 ms | same |
+| **Total** | **158 ms** | **150 ms** | **-5.1%** |
+| **Per token** | **14.3** | **13.7** | **-4.2%** |
+
+### Performance Journey (Updated)
+
+| Phase | Prefill (ms/tok) | Key Change |
+|-------|------------------|------------|
+| 3.0 (batched prefill) | 92.0 | INT8 batch GEMV + batched attn |
+| 3.1 (tensor core WMMA) | 46.9 | WMMA GPTQ + INT8 tensor core |
+| 3.2 (SMEM bank fix) | 29.8 | +8 padding, BK=64, 4 blocks/SM |
+| 3.3 (DeltaNet fused) | 27.1 | Register-cached state, 2 fused kernels |
+| 3.4 (deep kernel opt) | 14.7 | FP16 dequant, pre-load, register prefetch |
+| 3.5 (INT8 prefetch) | 14.3 | INT8 reg prefetch, scale hoisting |
+| **3.6 (sub-layer prof)** | **13.7** | **Inline dequant, dual GEMV, fused add** |
+
+**Overall: 1012 → 150 ms (layers), 6.7× speedup since Phase 3.0.**
+
+### Structural Analysis
+
+With sub-layer profiling, the performance picture is now clear:
+
+**94% of time is in linear projections** (GPTQ GEMMs + INT8 WMMAs).
+Non-projection overhead (conv1d, fused_head, norms, silu, attention) is only 9 ms.
+
+**GPTQ kernel wall at ~60% BW utilization**: The INT4 dequant phase creates a
+pipeline bottleneck. The dequant (nibble extract → int2half → scale multiply →
+SMEM store) takes ~200 cycles per tile, during which DRAM is partially idle.
+Register prefetch hides the DRAM load latency but not the dequant ALU cost.
+Further, SMEM stores have 4-way bank conflicts (structural — BK_PAD stride
+must be multiple of 8 for WMMA alignment, but GCD(BK_PAD/2, 32) ≥ 4).
+
+**INT8 kernel achieves 78-91% BW**: z_proj and q_proj approach peak (89%, 91%).
+qkv and out_proj are at 78% — likely wave scheduling + L2 contention effects.
+
+**To reach 110 ms (10 ms/tok)**: Need ~85% average BW. This requires either:
+1. Warp-specialized GPTQ kernel (dedicated load+dequant warps)
+2. Weight format change (INT8 at 2× size but native WMMA)
+3. CUTLASS integration for professional tiling pipeline
+4. Next-generation hardware (SM110a, 273 GB/s)

@@ -918,6 +918,18 @@ int cmd_profile_prefill(const std::string& model_dir) {
                             tokens.data(), (int)tokens.size(),
                             0, max_kv_len);
 
+    // Sub-layer profiling (buffers populated from above run)
+    // Reset DN states again for clean sub-layer measurement
+    for (int i = 0; i < state.num_dn_layers; i++) {
+        size_t state_bytes = (size_t)MC::LIN_NUM_V_HEADS * MC::LIN_K_HEAD_DIM
+                           * MC::LIN_V_HEAD_DIM * sizeof(float);
+        cudaMemset(state.dn_states[i], 0, state_bytes);
+        size_t conv_bytes = (size_t)MC::LIN_CONV_DIM * (MC::CONV_KERNEL - 1) * sizeof(__half);
+        cudaMemset(state.conv_states[i], 0, conv_bytes);
+    }
+    profile_sublayer_prefill(weights, state, kv_cache,
+                             (int)tokens.size(), 0, max_kv_len);
+
     cudaFree(kv_cache);
     state.free();
     free_model_weights(weights);

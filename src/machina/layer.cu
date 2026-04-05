@@ -1011,6 +1011,89 @@ void int8_linear_forward(const __half* X, const Int8Linear& weight, __half* Y,
 }
 
 // ============================================================================
+// Dual INT8 batch GEMV — two weight matrices sharing one X, M>1 tokens.
+//
+// Y1[M,N1] = X[M,K] @ W1^T   and   Y2[M,N2] = X[M,K] @ W2^T
+// Single kernel launch. Warps are assigned to (N1+N2) outputs; each selects
+// which matrix to read from and which output buffer to write.
+// Used for: DeltaNet in_proj_a+b (2×48), FullAttn k_proj+v_proj (2×1024).
+// ============================================================================
+
+__global__ void int8_dual_batch_gemv_kernel(
+    const __half*  __restrict__ X,       // [M, K]
+    const int8_t*  __restrict__ W1, const float* __restrict__ scales1,
+    __half*        __restrict__ Y1,      // [M, N1]
+    const int8_t*  __restrict__ W2, const float* __restrict__ scales2,
+    __half*        __restrict__ Y2,      // [M, N2]
+    int M, int K, int N1, int N2)
+{
+    const int warp_id = threadIdx.x / 32;
+    const int lane_id = threadIdx.x % 32;
+    const int global_n = blockIdx.x * INT8_GEMV_WARPS + warp_id;
+    const int total_N = N1 + N2;
+    if (global_n >= total_N) return;
+
+    // Select matrix (warp-uniform branch)
+    const int8_t* w_row;
+    float scale;
+    __half* y;
+    int n, N_out;
+    if (global_n < N1) {
+        n = global_n;
+        w_row = W1 + (size_t)n * K;
+        scale = scales1[n];
+        y = Y1;
+        N_out = N1;
+    } else {
+        n = global_n - N1;
+        w_row = W2 + (size_t)n * K;
+        scale = scales2[n];
+        y = Y2;
+        N_out = N2;
+    }
+
+    float acc[128];
+    for (int m = 0; m < M; m++) acc[m] = 0.0f;
+
+    const int vec_end = (K / 512) * 512;
+    for (int k = lane_id * 16; k < vec_end; k += 512) {
+        float4 wv = *reinterpret_cast<const float4*>(w_row + k);
+        const int8_t* wp = reinterpret_cast<const int8_t*>(&wv);
+
+        for (int m = 0; m < M; m++) {
+            float4 xv0 = *reinterpret_cast<const float4*>(X + (size_t)m * K + k);
+            float4 xv1 = *reinterpret_cast<const float4*>(X + (size_t)m * K + k + 8);
+            const __half* xp = reinterpret_cast<const __half*>(&xv0);
+            const __half* xp1 = reinterpret_cast<const __half*>(&xv1);
+
+            float sum = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < 8; i++)
+                sum += (float)wp[i] * __half2float(xp[i]);
+            #pragma unroll
+            for (int i = 0; i < 8; i++)
+                sum += (float)wp[8 + i] * __half2float(xp1[i]);
+            acc[m] += sum;
+        }
+    }
+
+    for (int k = vec_end + lane_id; k < K; k += 32) {
+        int8_t wval = w_row[k];
+        for (int m = 0; m < M; m++)
+            acc[m] += (float)wval * __half2float(X[(size_t)m * K + k]);
+    }
+
+    for (int m = 0; m < M; m++) {
+        float val = acc[m] * scale;
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2)
+            val += __shfl_xor_sync(0xFFFFFFFF, val, offset);
+        if (lane_id == 0)
+            y[(size_t)m * N_out + n] = __float2half(val);
+    }
+}
+
+// ============================================================================
 // Dual INT8 GEMV — two weight matrices sharing one x in SMEM
 //
 // Computes y1[N1] = W1[N1,K] @ x   and   y2[N2] = W2[N2,K] @ x
@@ -1104,9 +1187,27 @@ void int8_dual_linear_forward(const __half* X,
             K, N1, N2);
         return;
     }
-    // M>1: fall back to separate calls
-    int8_linear_forward(X, w1, Y1, M, stream);
-    int8_linear_forward(X, w2, Y2, M, stream);
+    // M>1: use dual batch GEMV only when individual calls would NOT use WMMA.
+    // WMMA (tensor core) path is faster for WMMA-compatible dimensions.
+    {
+        int K = w1.in_features;
+        int N1 = w1.out_features;
+        int N2 = w2.out_features;
+        bool w1_wmma = (K % I8TC_BK == 0 && N1 % I8TC_BN == 0);
+        bool w2_wmma = (K % I8TC_BK == 0 && N2 % I8TC_BN == 0);
+        if (w1_wmma || w2_wmma) {
+            // At least one uses WMMA — separate calls are faster
+            int8_linear_forward(X, w1, Y1, M, stream);
+            int8_linear_forward(X, w2, Y2, M, stream);
+        } else {
+            // Both would use batch_gemv — fuse into single launch
+            int grid = (N1 + N2 + INT8_GEMV_WARPS - 1) / INT8_GEMV_WARPS;
+            int8_dual_batch_gemv_kernel<<<grid, INT8_GEMV_BLOCK, 0, stream>>>(
+                X, w1.weight, w1.scales, Y1,
+                   w2.weight, w2.scales, Y2,
+                M, K, N1, N2);
+        }
+    }
 }
 
 // ============================================================================

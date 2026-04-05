@@ -98,6 +98,13 @@ void gptq_wmma_gemm(const __half* X,
                     int M,
                     cudaStream_t stream = 0);
 
+// Fused WMMA GEMM with residual add: residual += W @ X
+// Eliminates standalone elementwise_add kernel.
+void gptq_wmma_gemm_add(const __half* X,
+                          const GptqWeight& weight,
+                          __half* residual, int res_N,
+                          int M, cudaStream_t stream = 0);
+
 // ============================================================================
 // Auto-dispatch: GEMV for M=1, batch GEMV for small M (small N), GEMM otherwise
 // ============================================================================

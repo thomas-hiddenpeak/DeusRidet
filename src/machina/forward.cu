@@ -1008,13 +1008,17 @@ static void mlp_forward_prefill(const __half* x, const MLPWeights& mlp,
     silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
              M * N_inter, stream);
 
-    // Down projection
-    gptq_linear(state.mlp_gate, mlp.down_proj, state.mlp_down, M, stream);
-
-    // Residual add: residual[M, H] += mlp_down[M, H]
-    if (residual) {
-        elementwise_add(residual, state.mlp_down, residual,
-                        M * MC::HIDDEN_SIZE, stream);
+    // Down projection with fused residual add: residual += down_proj(silu_out)
+    // Eliminates standalone elementwise_add kernel (1 launch + 14MB traffic saved)
+    if (residual && M > 1 && mlp.down_proj.K % 64 == 0 && mlp.down_proj.N % 64 == 0) {
+        gptq_wmma_gemm_add(state.mlp_gate, mlp.down_proj, residual,
+                            MC::HIDDEN_SIZE, M, stream);
+    } else {
+        gptq_linear(state.mlp_gate, mlp.down_proj, state.mlp_down, M, stream);
+        if (residual) {
+            elementwise_add(residual, state.mlp_down, residual,
+                            M * MC::HIDDEN_SIZE, stream);
+        }
     }
 }
 
@@ -1203,9 +1207,9 @@ static void full_attention_prefill(const __half* x, const FullAttentionWeights& 
     // Q: x[M, 5120] → q_buf[M, 12288]
     int8_linear_forward(x, attn.q_proj, state.q_buf, M, stream);
 
-    // K, V: separate GEMM calls (dual not beneficial for M>1)
-    int8_linear_forward(x, attn.k_proj, state.kv_buf, M, stream);
-    int8_linear_forward(x, attn.v_proj, state.dn_z, M, stream);
+    // K, V: dual kernel — one launch (saves 1 dispatch for N=1024 each)
+    int8_dual_linear_forward(x, attn.k_proj, state.kv_buf,
+                                attn.v_proj, state.dn_z, M, stream);
     // V stored in dn_z[M, 1024] (only first 1024 of each row used)
 
     // 2. Batched split_q_gate: q_buf[M, 12288] → Q_sep[M, 6144] + Gate[M, 6144]
@@ -1288,9 +1292,9 @@ static void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
     // Z: x[M, 5120] → dn_z[M, 6144]
     int8_linear_forward(x, dn.in_proj_z, state.dn_z, M, stream);
 
-    // A, B: x[M, 5120] → dn_a[M, 48], dn_b[M, 48]
-    int8_linear_forward(x, dn.in_proj_a, state.dn_a, M, stream);
-    int8_linear_forward(x, dn.in_proj_b, state.dn_b, M, stream);
+    // A, B: x[M, 5120] → dn_a[M, 48], dn_b[M, 48] (dual kernel — one launch)
+    int8_dual_linear_forward(x, dn.in_proj_a, state.dn_a,
+                                dn.in_proj_b, state.dn_b, M, stream);
 
     // 2. Batch conv1d: all M tokens in one launch (vs M separate launches)
     {
@@ -1399,6 +1403,190 @@ int forward_prefill(const ModelWeights& model,
     cudaStreamSynchronize(s);
 
     return result;
+}
+
+// ============================================================================
+// Sub-layer profiler: measures per-operation timing within DN, FA, MLP.
+// Runs one representative layer of each type with fine-grained events.
+// Call AFTER a warmup pass so buffers are populated.
+// ============================================================================
+
+void profile_sublayer_prefill(const ModelWeights& model,
+                              InferenceState& state,
+                              __half* kv_cache,
+                              int M, int pos_start, int max_kv_len,
+                              cudaStream_t stream) {
+    using MC = ModelConfig;
+    cudaStream_t s = state.compute_stream ? state.compute_stream : stream;
+
+    // Find first DN and first FA layer
+    int first_dn = -1, first_fa = -1;
+    for (int i = 0; i < MC::NUM_LAYERS; i++) {
+        if (!model.layers[i].is_full_attention && first_dn < 0) first_dn = i;
+        if (model.layers[i].is_full_attention && first_fa < 0) first_fa = i;
+    }
+
+    constexpr int NEV = 16;
+    cudaEvent_t ev[NEV];
+    for (int i = 0; i < NEV; i++)
+        cudaEventCreateWithFlags(&ev[i], cudaEventDefault);
+    auto ms = [&](int a, int b) {
+        float t; cudaEventElapsedTime(&t, ev[a], ev[b]); return t;
+    };
+
+    // State buffers already contain data from warmup — shapes are correct.
+    // Timing depends on weight memory locations and tensor shapes, not data values.
+
+    // === DN Sub-layer (one layer) ===
+    if (first_dn >= 0) {
+        const auto& dn = model.layers[first_dn].delta_net;
+        const __half* x = state.norm_out;
+        int e = 0;
+        cudaEventRecord(ev[e++], s);  // 0
+        int8_linear_forward(x, dn.in_proj_qkv, state.dn_qkv, M, s);
+        cudaEventRecord(ev[e++], s);  // 1
+        int8_linear_forward(x, dn.in_proj_z, state.dn_z, M, s);
+        cudaEventRecord(ev[e++], s);  // 2
+        int8_dual_linear_forward(x, dn.in_proj_a, state.dn_a,
+                                    dn.in_proj_b, state.dn_b, M, s);
+        cudaEventRecord(ev[e++], s);  // 3
+        {
+            int conv_blocks = (MC::LIN_CONV_DIM + 255) / 256;
+            conv1d_batch_silu_kernel<<<conv_blocks, 256, 0, s>>>(
+                state.dn_qkv, state.conv_states[0],
+                dn.conv1d_weight, M, MC::LIN_CONV_DIM, MC::CONV_KERNEL);
+        }
+        cudaEventRecord(ev[e++], s);  // 4
+        {
+            int fused_smem = (MC::LIN_K_HEAD_DIM + MC::LIN_K_HEAD_DIM + 4) * sizeof(float);
+            deltanet_fused_head_kernel<<<MC::LIN_NUM_V_HEADS, 128, fused_smem, s>>>(
+                state.dn_qkv, state.dn_a, state.dn_b,
+                dn.A_log, dn.dt_bias,
+                state.dn_states[0],
+                state.attn_out,
+                M, MC::LIN_NUM_K_HEADS, MC::LIN_NUM_V_HEADS,
+                MC::LIN_K_HEAD_DIM, MC::LIN_V_HEAD_DIM,
+                MC::LIN_KEY_DIM, MC::LIN_CONV_DIM, MC::RMS_EPS);
+        }
+        cudaEventRecord(ev[e++], s);  // 5
+        rms_norm_gated(state.attn_out, state.dn_z,
+                       dn.norm_weight, state.attn_out,
+                       M * MC::LIN_NUM_V_HEADS, MC::LIN_V_HEAD_DIM, MC::RMS_EPS, s);
+        cudaEventRecord(ev[e++], s);  // 6
+        int8_linear_forward(state.attn_out, dn.out_proj, state.norm_out, M, s);
+        cudaEventRecord(ev[e++], s);  // 7
+        cudaStreamSynchronize(s);
+
+        float dn_total = ms(0, 7);
+        printf("\n=== DN Sub-layer (layer %d, M=%d) ===\n", first_dn, M);
+        printf("  qkv_proj  (INT8 5120→10240): %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/dn_total);
+        printf("  z_proj    (INT8 5120→6144):  %6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/dn_total);
+        printf("  ab_proj   (INT8 5120→48×2):  %6.3f ms  (%4.1f%%)\n", ms(2,3), 100*ms(2,3)/dn_total);
+        printf("  conv1d_silu:                 %6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/dn_total);
+        printf("  fused_head (recurrent):      %6.3f ms  (%4.1f%%)\n", ms(4,5), 100*ms(4,5)/dn_total);
+        printf("  rms_norm_gated:              %6.3f ms  (%4.1f%%)\n", ms(5,6), 100*ms(5,6)/dn_total);
+        printf("  out_proj  (INT8 6144→5120):  %6.3f ms  (%4.1f%%)\n", ms(6,7), 100*ms(6,7)/dn_total);
+        printf("  TOTAL (1 DN layer):          %6.3f ms  (×48 = %.1f ms)\n", dn_total, dn_total*48);
+    }
+
+    // === MLP Sub-layer (one layer) ===
+    {
+        int mlp_layer = (first_dn >= 0) ? first_dn : 0;
+        const auto& mlp = model.layers[mlp_layer].mlp;
+        const __half* x = state.norm_out;
+        int e = 0;
+        cudaEventRecord(ev[e++], s);  // 0
+        gptq_linear(x, mlp.gate_proj, state.mlp_gate, M, s);
+        cudaEventRecord(ev[e++], s);  // 1
+        gptq_linear(x, mlp.up_proj, state.mlp_up, M, s);
+        cudaEventRecord(ev[e++], s);  // 2
+        silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
+                 M * MC::INTERMEDIATE_SIZE, s);
+        cudaEventRecord(ev[e++], s);  // 3
+        gptq_linear(state.mlp_gate, mlp.down_proj, state.mlp_down, M, s);
+        cudaEventRecord(ev[e++], s);  // 4
+        elementwise_add(state.residual, state.mlp_down, state.residual,
+                        M * MC::HIDDEN_SIZE, s);
+        cudaEventRecord(ev[e++], s);  // 5
+        cudaStreamSynchronize(s);
+
+        float mlp_total = ms(0, 5);
+        printf("\n=== MLP Sub-layer (layer %d, M=%d) ===\n", mlp_layer, M);
+        printf("  gate_proj (GPTQ 5120→17408): %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/mlp_total);
+        printf("  up_proj   (GPTQ 5120→17408): %6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/mlp_total);
+        printf("  silu_mul:                    %6.3f ms  (%4.1f%%)\n", ms(2,3), 100*ms(2,3)/mlp_total);
+        printf("  down_proj (GPTQ 17408→5120): %6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/mlp_total);
+        printf("  elementwise_add:             %6.3f ms  (%4.1f%%)\n", ms(4,5), 100*ms(4,5)/mlp_total);
+        printf("  TOTAL (1 MLP layer):         %6.3f ms  (×64 = %.1f ms)\n", mlp_total, mlp_total*64);
+    }
+
+    // === FA Sub-layer (one layer) ===
+    if (first_fa >= 0) {
+        const auto& attn = model.layers[first_fa].full_attn;
+        const __half* x = state.norm_out;
+        __half* Qsep = state.dn_qkv;
+        __half* Gate = state.mlp_gate;
+        int e = 0;
+        cudaEventRecord(ev[e++], s);  // 0
+        int8_linear_forward(x, attn.q_proj, state.q_buf, M, s);
+        cudaEventRecord(ev[e++], s);  // 1
+        int8_dual_linear_forward(x, attn.k_proj, state.kv_buf,
+                                    attn.v_proj, state.dn_z, M, s);
+        cudaEventRecord(ev[e++], s);  // 2
+        // split + norm + RoPE + KV write
+        {
+            dim3 grid_sq(MC::NUM_ATTN_HEADS, M);
+            split_q_gate_batch_kernel<<<grid_sq, 256, 0, s>>>(
+                state.q_buf, Qsep, Gate, M, MC::NUM_ATTN_HEADS, MC::HEAD_DIM);
+            head_norm(Qsep, attn.q_norm, Qsep,
+                      M * MC::NUM_ATTN_HEADS, MC::HEAD_DIM, MC::RMS_EPS, s);
+            head_norm(state.kv_buf, attn.k_norm, state.kv_buf,
+                      M * MC::NUM_KV_HEADS, MC::HEAD_DIM, MC::RMS_EPS, s);
+            int mh = (MC::NUM_ATTN_HEADS > MC::NUM_KV_HEADS) ? MC::NUM_ATTN_HEADS : MC::NUM_KV_HEADS;
+            dim3 grid_r(mh, M);
+            rope_batch_kernel<<<grid_r, MC::ROTARY_DIM / 2, 0, s>>>(
+                Qsep, state.kv_buf, MC::NUM_ATTN_HEADS, MC::NUM_KV_HEADS,
+                MC::HEAD_DIM, MC::ROTARY_DIM, pos_start, M, MC::ROPE_THETA);
+            size_t kv_plane = (size_t)MC::NUM_KV_HEADS * max_kv_len * MC::HEAD_DIM;
+            __half* k_c = kv_cache + (size_t)first_fa * 2 * kv_plane;
+            __half* v_c = k_c + kv_plane;
+            dim3 grid_kv(MC::NUM_KV_HEADS, M);
+            kv_cache_write_batch_kernel<<<grid_kv, 256, 0, s>>>(
+                state.kv_buf, state.dn_z, k_c, v_c,
+                pos_start, M, max_kv_len, MC::HEAD_DIM, MC::NUM_KV_HEADS);
+        }
+        cudaEventRecord(ev[e++], s);  // 3
+        {
+            float scale_val = 1.0f / sqrtf((float)MC::HEAD_DIM);
+            dim3 grid_a(MC::NUM_ATTN_HEADS, M);
+            size_t kv_plane = (size_t)MC::NUM_KV_HEADS * max_kv_len * MC::HEAD_DIM;
+            __half* k_c = kv_cache + (size_t)first_fa * 2 * kv_plane;
+            __half* v_c = k_c + kv_plane;
+            prefill_attention_kernel<<<grid_a, MC::HEAD_DIM, 0, s>>>(
+                Qsep, k_c, v_c, state.attn_out,
+                pos_start, M, max_kv_len, MC::HEAD_DIM,
+                MC::NUM_KV_GROUPS, scale_val);
+        }
+        cudaEventRecord(ev[e++], s);  // 4
+        sigmoid_gate(state.attn_out, Gate, state.attn_out,
+                     M * MC::ATTN_OUT_DIM, s);
+        cudaEventRecord(ev[e++], s);  // 5
+        int8_linear_forward(state.attn_out, attn.o_proj, state.norm_out, M, s);
+        cudaEventRecord(ev[e++], s);  // 6
+        cudaStreamSynchronize(s);
+
+        float fa_total = ms(0, 6);
+        printf("\n=== FA Sub-layer (layer %d, M=%d) ===\n", first_fa, M);
+        printf("  q_proj    (INT8 5120→12288): %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/fa_total);
+        printf("  kv_proj   (INT8 5120→1024×2):%6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/fa_total);
+        printf("  split+norm+RoPE+kvwrite:     %6.3f ms  (%4.1f%%)\n", ms(2,3), 100*ms(2,3)/fa_total);
+        printf("  attention (causal):          %6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/fa_total);
+        printf("  sigmoid_gate:                %6.3f ms  (%4.1f%%)\n", ms(4,5), 100*ms(4,5)/fa_total);
+        printf("  o_proj    (INT8 6144→5120):  %6.3f ms  (%4.1f%%)\n", ms(5,6), 100*ms(5,6)/fa_total);
+        printf("  TOTAL (1 FA layer):          %6.3f ms  (×16 = %.1f ms)\n", fa_total, fa_total*16);
+    }
+
+    for (int i = 0; i < NEV; i++) cudaEventDestroy(ev[i]);
 }
 
 // ============================================================================
