@@ -237,6 +237,9 @@ struct InferenceState {
     float*  probs       = nullptr;  // [vocab_size]
     unsigned long long rng_counter = 0;  // running counter for PRNG seeding
 
+    // Marlin GEMM workspace (global barrier lock buffer)
+    int*    marlin_workspace = nullptr;
+
     // --- CUDA Graph support ---
     // Device-side pos for graph-capturable kernels (RoPE, KV cache write, attention)
     int*    d_pos       = nullptr;  // [1] device — current sequence position

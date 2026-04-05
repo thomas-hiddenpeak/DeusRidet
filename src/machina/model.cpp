@@ -8,6 +8,7 @@
 
 #include "model.h"
 #include "layer.h"
+#include "marlin.h"
 #include "safetensors.h"
 #include "allocator.h"
 #include "convert.h"
@@ -357,6 +358,9 @@ bool load_model_weights(const std::string& model_dir, ModelWeights& weights) {
         LOG_INFO("Model", "All weights loaded: %.2f GB in %d cudaMalloc calls, %.1fs (%.0f MB/s)",
                  weights.total_bytes / 1073741824.0, total_cudamallocs,
                  elapsed, (weights.total_bytes / 1048576.0) / elapsed);
+
+        // Repack GPTQ weights to Marlin tile format (in-place)
+        repack_all_marlin(weights);
     } else {
         LOG_ERROR("Model", "Weight loading FAILED");
     }
@@ -532,6 +536,16 @@ bool InferenceState::allocate(int max_seq) {
     logits   = alloc_fp16(MC::VOCAB_SIZE);
     probs    = alloc_f32(MC::VOCAB_SIZE);  // Sampling workspace (FP32)
 
+    // Marlin GEMM workspace: global barrier lock buffer
+    {
+        size_t ws = marlin_workspace_size(MC::INTERMEDIATE_SIZE);
+        void* p = nullptr;
+        if (cudaMalloc(&p, ws) != cudaSuccess) return false;
+        cudaMemset(p, 0, ws);
+        marlin_workspace = static_cast<int*>(p);
+        total += ws;
+    }
+
     // Full Attention scratch: scores and FP16 conversion buffer
     attn_scores = alloc_f32((size_t)MC::NUM_ATTN_HEADS * S);
     scores_h16  = alloc_fp16((size_t)MC::NUM_KV_GROUPS * S);
@@ -616,6 +630,7 @@ void InferenceState::free() {
     safe_free(dn_qkv);  safe_free(dn_z);      safe_free(dn_a);
     safe_free(dn_b);    safe_free(dn_g);       safe_free(dn_beta);
     safe_free(token_ids);  safe_free(sample_out);  safe_free(logits);  safe_free(probs);
+    safe_free(marlin_workspace);
     safe_free(attn_scores); safe_free(scores_h16);
     safe_free(d_pos);
     if (h_pos_pinned) { cudaFreeHost(h_pos_pinned); h_pos_pinned = nullptr; }

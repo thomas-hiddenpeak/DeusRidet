@@ -6,6 +6,7 @@
 #include "forward.h"
 #include "layer.h"
 #include "gptq.h"
+#include "marlin.h"
 #include "../communis/log.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -29,21 +30,22 @@ void mlp_forward(const __half* x, const MLPWeights& mlp,
                  InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // Dual GEMV: gate_proj + up_proj (one launch, shared x in SMEM)
-    gptq_dual_gemv(x, mlp.gate_proj, mlp.up_proj,
-                   state.mlp_gate, state.mlp_up, stream);
+    // Gate + Up projections via Marlin GEMM (weights are in Marlin format)
+    marlin_gemm(x, mlp.gate_proj.qweight, state.mlp_gate, mlp.gate_proj.scales,
+                state.marlin_workspace, 1, mlp.gate_proj.K, mlp.gate_proj.N, 128, stream);
+    marlin_gemm(x, mlp.up_proj.qweight, state.mlp_up, mlp.up_proj.scales,
+                state.marlin_workspace, 1, mlp.up_proj.K, mlp.up_proj.N, 128, stream);
 
     // SiLU activation: mlp_gate = silu(mlp_gate) * mlp_up
     silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
              MC::INTERMEDIATE_SIZE, stream);
 
-    // Down projection with fused residual add
+    // Down projection + residual add
+    marlin_gemm(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down, mlp.down_proj.scales,
+                state.marlin_workspace, 1, mlp.down_proj.K, mlp.down_proj.N, 128, stream);
     if (residual) {
-        gptq_gemv_add(state.mlp_gate, mlp.down_proj,
-                      residual, residual, stream);
-    } else {
-        gptq_gemv(state.mlp_gate, mlp.down_proj,
-                  state.mlp_down, stream);
+        elementwise_add(residual, state.mlp_down, residual,
+                        MC::HIDDEN_SIZE, stream);
     }
 }
 
@@ -989,8 +991,8 @@ int forward_one_token_sampled(const ModelWeights& model,
 // ============================================================================
 // Batched prefill: SwiGLU MLP (M>1)
 //
-// Uses gptq_linear auto-dispatch (GEMV for M=1, GEMM for M>1).
-// Residual add done separately (gptq_gemm_add not available for M>1).
+// Uses Marlin GEMM for all GPTQ INT4 projections.
+// Residual add done separately via elementwise_add.
 // ============================================================================
 
 static void mlp_forward_prefill(const __half* x, const MLPWeights& mlp,
@@ -999,26 +1001,22 @@ static void mlp_forward_prefill(const __half* x, const MLPWeights& mlp,
     using MC = ModelConfig;
     int N_inter = MC::INTERMEDIATE_SIZE;
 
-    // gate_proj + up_proj: sequential on same stream for L1 cache locality
-    // (concurrent dual-stream tested: causes 4 blocks/SM, L1 degradation on SM87)
-    gptq_linear(x, mlp.gate_proj, state.mlp_gate, M, stream);
-    gptq_linear(x, mlp.up_proj, state.mlp_up, M, stream);
+    // gate_proj + up_proj via Marlin GEMM (weights in Marlin tile format)
+    marlin_gemm(x, mlp.gate_proj.qweight, state.mlp_gate, mlp.gate_proj.scales,
+                state.marlin_workspace, M, mlp.gate_proj.K, mlp.gate_proj.N, 128, stream);
+    marlin_gemm(x, mlp.up_proj.qweight, state.mlp_up, mlp.up_proj.scales,
+                state.marlin_workspace, M, mlp.up_proj.K, mlp.up_proj.N, 128, stream);
 
     // SiLU: mlp_gate = silu(mlp_gate) * mlp_up
     silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
              M * N_inter, stream);
 
-    // Down projection with fused residual add: residual += down_proj(silu_out)
-    // Eliminates standalone elementwise_add kernel (1 launch + 14MB traffic saved)
-    if (residual && M > 1 && mlp.down_proj.K % 64 == 0 && mlp.down_proj.N % 64 == 0) {
-        gptq_wmma_gemm_add(state.mlp_gate, mlp.down_proj, residual,
-                            MC::HIDDEN_SIZE, M, stream);
-    } else {
-        gptq_linear(state.mlp_gate, mlp.down_proj, state.mlp_down, M, stream);
-        if (residual) {
-            elementwise_add(residual, state.mlp_down, residual,
-                            M * MC::HIDDEN_SIZE, stream);
-        }
+    // Down projection + residual add
+    marlin_gemm(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down, mlp.down_proj.scales,
+                state.marlin_workspace, M, mlp.down_proj.K, mlp.down_proj.N, 128, stream);
+    if (residual) {
+        elementwise_add(residual, state.mlp_down, residual,
+                        M * MC::HIDDEN_SIZE, stream);
     }
 }
 
@@ -1502,14 +1500,17 @@ void profile_sublayer_prefill(const ModelWeights& model,
         const __half* x = state.norm_out;
         int e = 0;
         cudaEventRecord(ev[e++], s);  // 0
-        gptq_linear(x, mlp.gate_proj, state.mlp_gate, M, s);
+        marlin_gemm(x, mlp.gate_proj.qweight, state.mlp_gate, mlp.gate_proj.scales,
+                    state.marlin_workspace, M, mlp.gate_proj.K, mlp.gate_proj.N, 128, s);
         cudaEventRecord(ev[e++], s);  // 1
-        gptq_linear(x, mlp.up_proj, state.mlp_up, M, s);
+        marlin_gemm(x, mlp.up_proj.qweight, state.mlp_up, mlp.up_proj.scales,
+                    state.marlin_workspace, M, mlp.up_proj.K, mlp.up_proj.N, 128, s);
         cudaEventRecord(ev[e++], s);  // 2
         silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
                  M * MC::INTERMEDIATE_SIZE, s);
         cudaEventRecord(ev[e++], s);  // 3
-        gptq_linear(state.mlp_gate, mlp.down_proj, state.mlp_down, M, s);
+        marlin_gemm(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down, mlp.down_proj.scales,
+                    state.marlin_workspace, M, mlp.down_proj.K, mlp.down_proj.N, 128, s);
         cudaEventRecord(ev[e++], s);  // 4
         elementwise_add(state.residual, state.mlp_down, state.residual,
                         M * MC::HIDDEN_SIZE, s);
@@ -1518,10 +1519,10 @@ void profile_sublayer_prefill(const ModelWeights& model,
 
         float mlp_total = ms(0, 5);
         printf("\n=== MLP Sub-layer (layer %d, M=%d) ===\n", mlp_layer, M);
-        printf("  gate_proj (GPTQ 5120→17408): %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/mlp_total);
-        printf("  up_proj   (GPTQ 5120→17408): %6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/mlp_total);
+        printf("  gate_proj (Marlin 5120→17408):%6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/mlp_total);
+        printf("  up_proj   (Marlin 5120→17408):%6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/mlp_total);
         printf("  silu_mul:                    %6.3f ms  (%4.1f%%)\n", ms(2,3), 100*ms(2,3)/mlp_total);
-        printf("  down_proj (GPTQ 17408→5120): %6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/mlp_total);
+        printf("  down_proj (Marlin 17408→5120):%6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/mlp_total);
         printf("  elementwise_add:             %6.3f ms  (%4.1f%%)\n", ms(4,5), 100*ms(4,5)/mlp_total);
         printf("  TOTAL (1 MLP layer):         %6.3f ms  (×64 = %.1f ms)\n", mlp_total, mlp_total*64);
     }
@@ -1704,7 +1705,7 @@ void profile_forward_prefill(const ModelWeights& model,
     printf("\n=== Prefill profile (M=%d, %d layers) ===\n", M, MC::NUM_LAYERS);
     printf("  DeltaNet SSM (48 layers):     %7.2f ms  (%4.1f%%)\n", t_dn, 100*t_dn/total);
     printf("  Full Attention (16 layers):   %7.2f ms  (%4.1f%%)\n", t_fa, 100*t_fa/total);
-    printf("  MLP GPTQ (64 layers):         %7.2f ms  (%4.1f%%)\n", t_mlp, 100*t_mlp/total);
+    printf("  MLP Marlin (64 layers):       %7.2f ms  (%4.1f%%)\n", t_mlp, 100*t_mlp/total);
     printf("  Norms (pre+post, 64 layers):  %7.2f ms  (%4.1f%%)\n", t_norm, 100*t_norm/total);
     printf("  Total (layers only):          %7.2f ms\n", total);
     printf("  Per token (M=%d):             %7.2f ms/tok\n", M, total / M);
