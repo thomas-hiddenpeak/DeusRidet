@@ -30,21 +30,8 @@ namespace deusridet {
 // Weight repacking: GPTQ → Marlin format (one-time, at model load)
 // ============================================================================
 
-// Repack a single GPTQ weight tensor to Marlin tile format in-place on GPU.
-// After this call, the qweight buffer contains Marlin-layout packed INT4 data,
-// and the scales buffer contains Marlin-permuted scale values.
-//
-// Requirements: K % 128 == 0, N % 64 == 0, group_size = 128
-//
-// qweight: [K/8, N] uint32, packed INT4  →  Marlin B [K/16, 2*N] int32
-// scales:  [K/128, N] FP16              →  column-permuted in-place
-void repack_gptq_to_marlin(
-    uint32_t* qweight,     // device, repacked in-place
-    __half*   scales,      // device, permuted in-place
-    int K, int N,
-    cudaStream_t stream = 0);
-
 // Repack all MLP GPTQ weights in the model (64 layers × 3 projections).
+// Allocates a single 42.5 MB temp buffer, repacks all tensors, frees temp.
 // Call after load_model_weights(). Returns extra bytes allocated for workspace.
 struct ModelWeights;  // forward declaration
 size_t repack_all_marlin(ModelWeights& weights, cudaStream_t stream = 0);

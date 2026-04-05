@@ -737,16 +737,23 @@ static const int SHARED_MEM = 96 * 1024;  // 96 KB dynamic SMEM
                 A_ptr, B_ptr, C_ptr, s_ptr, prob_m, prob_n, prob_k, locks);       \
     }
 
+// Cached SM count — queried once, reused for all marlin_gemm calls
+static int get_sm_count() {
+    static int sms = 0;
+    if (sms == 0) {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+    }
+    return sms;
+}
+
 void marlin_gemm(
     const __half* A, const uint32_t* B, __half* C, const __half* s,
     int* workspace, int M, int K, int N,
     int groupsize, cudaStream_t stream)
 {
-    // Get SM count for persistent kernel grid sizing
-    int dev = 0;
-    int sms = 0;
-    cudaGetDevice(&dev);
-    cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+    int sms = get_sm_count();
 
     int tot_m = M;
     int tot_m_blocks = ceildiv(tot_m, 16);
@@ -785,10 +792,16 @@ void marlin_gemm(
 
     int* locks = workspace;
 
-    // Zero workspace locks
-    int n_tiles_max = N / thread_n;
+    // Zero workspace locks only when multiple threadblocks may write to the
+    // same output column slice (parallel > 1, i.e. M > 64 for thread_m=4).
+    // For small M (≤64), each column slice is handled by a single TB — no
+    // global reduction, no locks needed. This eliminates 192 cudaMemsetAsync
+    // calls per forward pass for typical decode/small-prefill.
     int max_par = 16;
-    cudaMemsetAsync(locks, 0, n_tiles_max * max_par * sizeof(int), stream);
+    if (tot_m_blocks > 4) {
+        int n_tiles_max = N / thread_n;
+        cudaMemsetAsync(locks, 0, n_tiles_max * max_par * sizeof(int), stream);
+    }
 
     int prob_n = N;
     int prob_k = K;
@@ -935,56 +948,39 @@ __global__ void repack_scales_kernel(
 
 void repack_gptq_to_marlin(
     uint32_t* qweight, __half* scales,
-    int K, int N, cudaStream_t stream)
+    int K, int N,
+    int* d_perm, int* d_scale_perm,
+    void* temp_buf, size_t temp_buf_bytes,
+    cudaStream_t stream)
 {
-    // Compute permutation tables on host
-    static std::vector<int> h_perm = compute_marlin_perm();
-    static std::vector<int> h_scale_perm = compute_scale_perm();
-
-    // Upload permutation tables to device (cached across calls)
-    static int* d_perm = nullptr;
-    static int* d_scale_perm = nullptr;
-    if (!d_perm) {
-        cudaMalloc(&d_perm, 1024 * sizeof(int));
-        cudaMemcpy(d_perm, h_perm.data(), 1024 * sizeof(int), cudaMemcpyHostToDevice);
-    }
-    if (!d_scale_perm) {
-        cudaMalloc(&d_scale_perm, 64 * sizeof(int));
-        cudaMemcpy(d_scale_perm, h_scale_perm.data(), 64 * sizeof(int), cudaMemcpyHostToDevice);
-    }
-
     // --- Repack qweight ---
     int qw_size = (K / 8) * N;    // original size in uint32
     int B_size  = (K / 16) * 2 * N; // Marlin size in uint32 (same total bytes)
+    size_t qw_bytes = (size_t)qw_size * sizeof(uint32_t);
 
-    // Temp buffer for copy of original data
-    uint32_t* temp_qw = nullptr;
-    cudaMalloc(&temp_qw, qw_size * sizeof(uint32_t));
-    cudaMemcpyAsync(temp_qw, qweight, qw_size * sizeof(uint32_t),
+    // Use pre-allocated temp buffer (caller ensures it's big enough)
+    uint32_t* temp_qw = static_cast<uint32_t*>(temp_buf);
+    cudaMemcpyAsync(temp_qw, qweight, qw_bytes,
                     cudaMemcpyDeviceToDevice, stream);
 
-    // Repack into original buffer location
     int threads_per_block = 256;
     int blocks = ceildiv(B_size, threads_per_block);
     repack_qweight_kernel<<<blocks, threads_per_block, 0, stream>>>(
         temp_qw, qweight, d_perm, K, N);
 
-    cudaFree(temp_qw);
-
     // --- Repack scales ---
     int num_groups = K / 128;
     int s_size = num_groups * N;
+    size_t s_bytes = (size_t)s_size * sizeof(__half);
 
-    __half* temp_s = nullptr;
-    cudaMalloc(&temp_s, s_size * sizeof(__half));
-    cudaMemcpyAsync(temp_s, scales, s_size * sizeof(__half),
+    // Reuse same temp buffer for scales (smaller than qweight)
+    __half* temp_s = reinterpret_cast<__half*>(temp_buf);
+    cudaMemcpyAsync(temp_s, scales, s_bytes,
                     cudaMemcpyDeviceToDevice, stream);
 
     int s_blocks = ceildiv(s_size, threads_per_block);
     repack_scales_kernel<<<s_blocks, threads_per_block, 0, stream>>>(
         temp_s, scales, d_scale_perm, num_groups, N);
-
-    cudaFree(temp_s);
 }
 
 // Repack all MLP weights in the model. Returns workspace bytes allocated.
@@ -994,40 +990,59 @@ size_t repack_all_marlin(ModelWeights& weights, cudaStream_t stream) {
 
     auto t0 = std::chrono::steady_clock::now();
 
+    // Upload permutation tables to device (once)
+    static std::vector<int> h_perm = compute_marlin_perm();
+    static std::vector<int> h_scale_perm = compute_scale_perm();
+    int* d_perm = nullptr;
+    int* d_scale_perm = nullptr;
+    cudaMalloc(&d_perm, 1024 * sizeof(int));
+    cudaMemcpy(d_perm, h_perm.data(), 1024 * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMalloc(&d_scale_perm, 64 * sizeof(int));
+    cudaMemcpy(d_scale_perm, h_scale_perm.data(), 64 * sizeof(int), cudaMemcpyHostToDevice);
+
+    // Allocate single temp buffer for largest tensor: max(gate/up, down) qweight
+    // gate/up: (5120/8)*17408 = 11141120 uint32 = 42.5 MB
+    // down:    (17408/8)*5120 = 11141120 uint32 = 42.5 MB (same!)
+    size_t max_qw_bytes = (size_t)(MC::HIDDEN_SIZE / 8) * MC::INTERMEDIATE_SIZE * sizeof(uint32_t);
+    void* temp_buf = nullptr;
+    cudaMalloc(&temp_buf, max_qw_bytes);
+
     for (int li = 0; li < MC::NUM_LAYERS; li++) {
         auto& mlp = weights.layers[li].mlp;
 
-        // gate_proj: K=5120, N=17408
         repack_gptq_to_marlin(
             const_cast<uint32_t*>(mlp.gate_proj.qweight),
             const_cast<__half*>(mlp.gate_proj.scales),
-            mlp.gate_proj.K, mlp.gate_proj.N, stream);
+            mlp.gate_proj.K, mlp.gate_proj.N,
+            d_perm, d_scale_perm, temp_buf, max_qw_bytes, stream);
 
-        // up_proj: K=5120, N=17408
         repack_gptq_to_marlin(
             const_cast<uint32_t*>(mlp.up_proj.qweight),
             const_cast<__half*>(mlp.up_proj.scales),
-            mlp.up_proj.K, mlp.up_proj.N, stream);
+            mlp.up_proj.K, mlp.up_proj.N,
+            d_perm, d_scale_perm, temp_buf, max_qw_bytes, stream);
 
-        // down_proj: K=17408, N=5120
         repack_gptq_to_marlin(
             const_cast<uint32_t*>(mlp.down_proj.qweight),
             const_cast<__half*>(mlp.down_proj.scales),
-            mlp.down_proj.K, mlp.down_proj.N, stream);
+            mlp.down_proj.K, mlp.down_proj.N,
+            d_perm, d_scale_perm, temp_buf, max_qw_bytes, stream);
     }
 
     cudaStreamSynchronize(stream);
 
+    // Free temp resources (only used during repacking)
+    cudaFree(temp_buf);
+    cudaFree(d_perm);
+    cudaFree(d_scale_perm);
+
     auto t1 = std::chrono::steady_clock::now();
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    printf("[marlin] Repacked %d GPTQ weights in %.1f ms\n",
-           MC::NUM_LAYERS * 3, ms);
+    printf("[marlin] Repacked %d GPTQ weights in %.1f ms (temp buf %.1f MB, freed)\n",
+           MC::NUM_LAYERS * 3, ms, max_qw_bytes / 1048576.0);
 
-    // Allocate Marlin workspace (persists for model lifetime)
-    // Use max N across all projections
-    int max_N = MC::INTERMEDIATE_SIZE;  // 17408
+    int max_N = MC::INTERMEDIATE_SIZE;
     size_t ws_bytes = marlin_workspace_size(max_N);
-
     return ws_bytes;
 }
 
