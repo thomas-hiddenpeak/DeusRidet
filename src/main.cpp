@@ -121,6 +121,9 @@ int main(int argc, char** argv) {
     else if (cmd == "bench-gptq") {
         rc = deusridet::cmd_bench_gptq();
     }
+    else if (cmd == "bench-gptq-v2") {
+        rc = deusridet::cmd_bench_gptq_v2();
+    }
     else if (cmd == "load-model") {
         rc = deusridet::cmd_load_model(model_dir);
     }
@@ -138,6 +141,26 @@ int main(int argc, char** argv) {
     }
     else if (cmd == "profile-prefill") {
         rc = deusridet::cmd_profile_prefill(model_dir);
+    }
+    else if (cmd == "profile-prefill-gptq-v2") {
+        // Legacy alias: v2 is now the default kernel, redirect to profile-prefill
+        rc = deusridet::cmd_profile_prefill(model_dir);
+    }
+    else if (cmd == "bench-prefill") {
+        rc = deusridet::cmd_bench_prefill(model_dir);
+    }
+    else if (cmd == "test-ws") {
+        // Default webui dir relative to build/
+        std::string webui_dir = cfg.get_string("webui_dir",
+            "../src/nexus/webui");
+        for (int i = 2; i < argc; i++) {
+            std::string arg = argv[i];
+            if (arg == "--webui" && i + 1 < argc) {
+                webui_dir = argv[++i];
+                break;
+            }
+        }
+        rc = deusridet::cmd_test_ws(webui_dir);
     }
     else if (cmd == "--help" || cmd == "-h" || cmd == "help") {
         deusridet::print_usage();

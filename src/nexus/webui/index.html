@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeusRidet</title>
+    <link rel="stylesheet" href="css/tokens.css">
+    <link rel="stylesheet" href="css/layout.css">
+</head>
+<body>
+    <header class="app-header">
+        <h1 class="app-title">DeusRidet</h1>
+        <span class="connection-status" id="conn-status" aria-live="polite">
+            Disconnected
+        </span>
+    </header>
+
+    <main class="app-main">
+        <section class="panel audio-panel" aria-label="Audio Capture">
+            <h2 class="panel__title">Audio Input</h2>
+            <div class="audio-controls">
+                <button id="mic-toggle" class="btn btn--mic" aria-pressed="false"
+                        disabled>
+                    Enable Mic
+                </button>
+                <button id="loopback-toggle" class="btn btn--loop" disabled>
+                    Loopback Off
+                </button>
+            </div>
+            <div class="audio-stats" id="audio-stats" aria-live="polite">
+                <span class="stat">Sent: <strong id="stat-sent">0</strong></span>
+                <span class="stat"><strong id="stat-bytes">0</strong></span>
+            </div>
+            <canvas id="audio-viz" class="audio-viz" width="400" height="48"
+                    aria-label="Mic audio level"></canvas>
+
+            <h3 class="panel__subtitle">Server</h3>
+            <div class="audio-stats" id="server-stats" aria-live="polite">
+                <span class="stat">Recv: <strong id="srv-frames">0</strong></span>
+                <span class="stat">RMS: <strong id="srv-rms">0</strong></span>
+                <span class="stat">Peak: <strong id="srv-peak">0</strong></span>
+            </div>
+            <div class="level-bar-wrap">
+                <div class="level-bar" id="srv-rms-bar"></div>
+            </div>
+            <div class="level-bar-wrap level-bar-wrap--peak">
+                <div class="level-bar level-bar--peak" id="srv-peak-bar"></div>
+            </div>
+
+            <h3 class="panel__subtitle">Pipeline</h3>
+            <div class="audio-stats" aria-live="polite">
+                <span class="stat">Mel: <strong id="pipe-mel">0</strong></span>
+                <span class="stat">Speech: <strong id="pipe-speech">0</strong></span>
+                <span class="stat">Energy: <strong id="pipe-energy">0</strong></span>
+                <span class="stat">Noise: <strong id="pipe-noise">—</strong></span>
+            </div>
+            <div class="vad-indicator" id="vad-indicator" aria-live="polite">
+                <span class="vad-dot" id="vad-dot"></span>
+                <span id="vad-label">Silence</span>
+                <span class="stat silero-prob">Silero: <strong id="silero-prob">—</strong></span>
+                <span class="stat fsmn-prob">FSMN: <strong id="fsmn-prob">—</strong></span>
+                <span class="stat ten-prob">TEN: <strong id="ten-prob">—</strong></span>
+            </div>
+            <div class="vad-threshold-control">
+                <label for="vad-threshold" class="vad-threshold-label">
+                    Threshold: <strong id="vad-threshold-val">-6.0</strong>
+                </label>
+                <input type="range" id="vad-threshold" class="vad-threshold-slider"
+                       min="-15" max="0" step="0.5" value="-6"
+                       aria-label="VAD energy threshold">
+            </div>
+            <div class="vad-threshold-control">
+                <label for="input-gain" class="vad-threshold-label">
+                    Gain: <strong id="input-gain-val">1.0</strong>x
+                </label>
+                <input type="range" id="input-gain" class="vad-threshold-slider"
+                       min="0.5" max="10" step="0.5" value="1"
+                       aria-label="Input gain multiplier">
+            </div>
+            <div class="vad-threshold-control">
+                <label for="silero-threshold" class="vad-threshold-label">
+                    <button id="silero-toggle" class="btn btn--vad btn--active"
+                            aria-pressed="true">Silero</button>
+                    <strong id="silero-threshold-val">0.50</strong>
+                </label>
+                <input type="range" id="silero-threshold" class="vad-threshold-slider"
+                       min="0" max="1" step="0.05" value="0.5"
+                       aria-label="Silero VAD threshold">
+            </div>
+            <div class="level-bar-wrap">
+                <div class="level-bar level-bar--silero" id="silero-prob-bar"></div>
+            </div>
+            <div class="vad-threshold-control">
+                <label for="fsmn-threshold" class="vad-threshold-label">
+                    <button id="fsmn-toggle" class="btn btn--vad btn--active"
+                            aria-pressed="true">FSMN</button>
+                    <strong id="fsmn-threshold-val">0.50</strong>
+                </label>
+                <input type="range" id="fsmn-threshold" class="vad-threshold-slider"
+                       min="0" max="1" step="0.05" value="0.5"
+                       aria-label="FSMN VAD threshold">
+            </div>
+            <div class="level-bar-wrap">
+                <div class="level-bar level-bar--fsmn" id="fsmn-prob-bar"></div>
+            </div>
+            <div class="vad-threshold-control">
+                <label for="ten-threshold" class="vad-threshold-label">
+                    <button id="ten-toggle" class="btn btn--vad btn--active"
+                            aria-pressed="true">TEN</button>
+                    <strong id="ten-threshold-val">0.50</strong>
+                </label>
+                <input type="range" id="ten-threshold" class="vad-threshold-slider"
+                       min="0" max="1" step="0.05" value="0.5"
+                       aria-label="TEN VAD threshold">
+            </div>
+            <div class="level-bar-wrap">
+                <div class="level-bar level-bar--ten" id="ten-prob-bar"></div>
+            </div>
+        </section>
+
+        <section class="panel log-panel" aria-label="Server Log">
+            <h2 class="panel__title">Log</h2>
+            <pre id="log-output" class="log-output" role="log"
+                 aria-live="polite"></pre>
+        </section>
+    </main>
+
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>

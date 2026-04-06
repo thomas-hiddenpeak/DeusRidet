@@ -1,0 +1,24 @@
+/* tokens.css — Design tokens for DeusRidet WebUI */
+:root {
+    --clr-bg:        #0d1117;
+    --clr-surface:   #161b22;
+    --clr-border:    #30363d;
+    --clr-text:      #c9d1d9;
+    --clr-text-dim:  #8b949e;
+    --clr-accent:    #58a6ff;
+    --clr-success:   #3fb950;
+    --clr-danger:    #f85149;
+    --clr-warn:      #d29922;
+
+    --font-mono:     'JetBrains Mono', 'Fira Code', monospace;
+    --font-sans:     -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+
+    --sp-xs: 4px;
+    --sp-sm: 8px;
+    --sp-md: 16px;
+    --sp-lg: 24px;
+    --sp-xl: 32px;
+
+    --radius: 6px;
+    --transition: 150ms ease;
+}

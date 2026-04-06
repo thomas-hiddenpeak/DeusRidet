@@ -8,6 +8,7 @@
 #include "communis/log.h"
 #include "communis/tegra.h"
 #include "machina/gptq.h"
+#include "machina/gptq_gemm_v2.h"
 #include "machina/model.h"
 #include "machina/forward.h"
 #include "machina/allocator.h"
@@ -22,6 +23,9 @@
 #include <algorithm>
 #include <string>
 #include <cuda_runtime.h>
+#include <signal.h>
+#include "nexus/ws_server.h"
+#include "sensus/auditus/audio_pipeline.h"
 
 namespace deusridet {
 
@@ -62,9 +66,17 @@ void print_usage() {
     printf("    test-tokenizer <text>   Encode/decode round-trip test\n");
     printf("    test-weights            Load weights and print tensor summary\n");
     printf("    test-gptq               GPTQ kernel correctness test with model weights\n");
-    printf("    bench-gptq              GPTQ GEMV/GEMM benchmark\n");
+    printf("    bench-gptq              GPTQ GEMV/GEMM benchmark (Marlin)\n");
+    printf("    bench-gptq-v2           GPTQ v2 kernel benchmark (vs Marlin)\n");
     printf("    load-model              Load all weights to device, hold for inspection\n");
     printf("    load-weights            Structured weight load (model.h) with validation\n");
+    printf("    test-forward            Single-token forward pass test\n");
+    printf("    test-sample             Sampling test (greedy + top-k/p)\n");
+    printf("    profile-forward         Profile single-token forward pass timing\n");
+    printf("    profile-prefill         Profile prefill pass (Marlin MLP) at various M\n");
+    printf("    profile-prefill-gptq-v2 (legacy alias for profile-prefill)\n");
+    printf("    bench-prefill           Benchmark Marlin vs cuBLAS FP16 projections\n");
+    printf("    test-ws                 Start WebSocket server + serve WebUI\n");
     printf("    version                 Print version and hardware info\n\n");
     printf("  Options:\n");
     printf("    --config <file>         Configuration file (default: configs/machina.conf)\n");
@@ -481,17 +493,17 @@ int cmd_load_weights(const std::string& model_dir) {
         // Spot-check: layer 0 DeltaNet dims
         auto& dn0 = weights.layers[0].delta_net;
         printf("  Layer 0 DeltaNet: qkv[%d→%d] z[%d→%d] out[%d→%d]\n",
-               dn0.in_proj_qkv.in_features, dn0.in_proj_qkv.out_features,
-               dn0.in_proj_z.in_features, dn0.in_proj_z.out_features,
-               dn0.out_proj.in_features, dn0.out_proj.out_features);
+               dn0.fp16_qkv.in_features, dn0.fp16_qkv.out_features,
+               dn0.fp16_z.in_features, dn0.fp16_z.out_features,
+               dn0.fp16_out.in_features, dn0.fp16_out.out_features);
 
         // Spot-check: layer 3 Full Attention dims
         auto& fa3 = weights.layers[3].full_attn;
         printf("  Layer 3 FullAttn: q[%d→%d] k[%d→%d] v[%d→%d] o[%d→%d]\n",
-               fa3.q_proj.in_features, fa3.q_proj.out_features,
-               fa3.k_proj.in_features, fa3.k_proj.out_features,
-               fa3.v_proj.in_features, fa3.v_proj.out_features,
-               fa3.o_proj.in_features, fa3.o_proj.out_features);
+               fa3.fp16_q.in_features, fa3.fp16_q.out_features,
+               fa3.fp16_k.in_features, fa3.fp16_k.out_features,
+               fa3.fp16_v.in_features, fa3.fp16_v.out_features,
+               fa3.fp16_o.in_features, fa3.fp16_o.out_features);
     }
 
     printf("\n[load-weights] Press Enter to release...\n");
@@ -534,7 +546,6 @@ int cmd_test_forward(const std::string& model_dir) {
         return 1;
     }
     merge_projection_weights(weights);
-    quantize_attn_to_marlin(weights);
     printf("[test-forward] Weights loaded: %.2f GB\n",
            weights.total_bytes / 1073741824.0);
 
@@ -670,7 +681,6 @@ int cmd_test_sample(const std::string& model_dir) {
         return 1;
     }
     merge_projection_weights(weights);
-    quantize_attn_to_marlin(weights);
 
     InferenceState state;
     int max_kv_len = 128;
@@ -858,6 +868,15 @@ int cmd_bench_gptq() {
 }
 
 // ============================================================================
+// bench-gptq-v2: Marlin-format custom GPTQ v2 kernel benchmark
+// ============================================================================
+
+int cmd_bench_gptq_v2() {
+    bench_gptq_v2_kernels();
+    return 0;
+}
+
+// ============================================================================
 // profile-prefill: Load model, run profiled prefill pass with event timestamps
 // ============================================================================
 
@@ -880,10 +899,14 @@ int cmd_profile_prefill(const std::string& model_dir) {
         return 1;
     }
     merge_projection_weights(weights);
-    quantize_attn_to_marlin(weights);
+
+    // M values to test — small to large
+    const int M_vals[] = {11, 32, 64, 128, 256, 512};  // consciousness frame sizes
+    const int N_M = sizeof(M_vals) / sizeof(M_vals[0]);
+    int max_M = M_vals[N_M - 1];
 
     InferenceState state;
-    int max_kv_len = 128;
+    int max_kv_len = max_M;
     if (!state.allocate(max_kv_len)) {
         fprintf(stderr, "[profile-prefill] State allocation failed\n");
         free_model_weights(weights);
@@ -894,47 +917,66 @@ int cmd_profile_prefill(const std::string& model_dir) {
     size_t kv_bytes = (size_t)MC::NUM_LAYERS * 2 * kv_plane * sizeof(__half);
     __half* kv_cache = nullptr;
     cudaMalloc(&kv_cache, kv_bytes);
-    cudaMemset(kv_cache, 0, kv_bytes);
 
+    // Build token arrays: use chat-templated "Hello" then pad with token 198
+    // (newline) to reach target M. Token values don't affect kernel timing.
     std::string prompt = "Hello";
     std::vector<std::pair<std::string, std::string>> messages = {
         {"user", prompt}
     };
-    auto tokens = tokenizer.apply_chat_template(messages);
-    printf("[profile-prefill] Prompt: \"%s\" → %zu tokens\n",
-           prompt.c_str(), tokens.size());
+    auto base_tokens = tokenizer.apply_chat_template(messages);
+    printf("[profile-prefill] Base prompt: \"%s\" → %zu tokens\n",
+           prompt.c_str(), base_tokens.size());
 
-    // Warmup run (populates caches, initializes DeltaNet states)
-    forward_prefill(weights, state, kv_cache,
-                    tokens.data(), (int)tokens.size(),
-                    0, max_kv_len);
+    for (int mi = 0; mi < N_M; mi++) {
+        int M = M_vals[mi];
 
-    // Reset DeltaNet states for fresh profiling run
-    for (int i = 0; i < state.num_dn_layers; i++) {
-        size_t state_bytes = (size_t)MC::LIN_NUM_V_HEADS * MC::LIN_K_HEAD_DIM
-                           * MC::LIN_V_HEAD_DIM * sizeof(float);
-        cudaMemset(state.dn_states[i], 0, state_bytes);
-        size_t conv_bytes = (size_t)MC::LIN_CONV_DIM * (MC::CONV_KERNEL - 1) * sizeof(__half);
-        cudaMemset(state.conv_states[i], 0, conv_bytes);
+        // Build token vector of exactly M tokens
+        std::vector<int> tokens(M);
+        for (int i = 0; i < M; i++)
+            tokens[i] = (i < (int)base_tokens.size()) ? base_tokens[i] : 198;
+
+        // Reset all state for clean measurement
+        cudaMemset(kv_cache, 0, kv_bytes);
+        for (int i = 0; i < state.num_dn_layers; i++) {
+            size_t state_bytes = (size_t)MC::LIN_NUM_V_HEADS * MC::LIN_K_HEAD_DIM
+                               * MC::LIN_V_HEAD_DIM * sizeof(float);
+            cudaMemset(state.dn_states[i], 0, state_bytes);
+            size_t conv_bytes = (size_t)MC::LIN_CONV_DIM * (MC::CONV_KERNEL - 1) * sizeof(__half);
+            cudaMemset(state.conv_states[i], 0, conv_bytes);
+        }
+
+        // Warmup
+        forward_prefill(weights, state, kv_cache,
+                        tokens.data(), M,
+                        0, max_kv_len);
+
+        // Reset again for profiled run
+        cudaMemset(kv_cache, 0, kv_bytes);
+        for (int i = 0; i < state.num_dn_layers; i++) {
+            size_t state_bytes = (size_t)MC::LIN_NUM_V_HEADS * MC::LIN_K_HEAD_DIM
+                               * MC::LIN_V_HEAD_DIM * sizeof(float);
+            cudaMemset(state.dn_states[i], 0, state_bytes);
+            size_t conv_bytes = (size_t)MC::LIN_CONV_DIM * (MC::CONV_KERNEL - 1) * sizeof(__half);
+            cudaMemset(state.conv_states[i], 0, conv_bytes);
+        }
+
+        // Profiled run
+        profile_forward_prefill(weights, state, kv_cache,
+                                tokens.data(), M,
+                                0, max_kv_len);
+
+        // Sub-layer profiling
+        for (int i = 0; i < state.num_dn_layers; i++) {
+            size_t state_bytes = (size_t)MC::LIN_NUM_V_HEADS * MC::LIN_K_HEAD_DIM
+                               * MC::LIN_V_HEAD_DIM * sizeof(float);
+            cudaMemset(state.dn_states[i], 0, state_bytes);
+            size_t conv_bytes = (size_t)MC::LIN_CONV_DIM * (MC::CONV_KERNEL - 1) * sizeof(__half);
+            cudaMemset(state.conv_states[i], 0, conv_bytes);
+        }
+        profile_sublayer_prefill(weights, state, kv_cache,
+                                 M, 0, max_kv_len);
     }
-    cudaMemset(kv_cache, 0, kv_bytes);
-
-    // Profiled run
-    profile_forward_prefill(weights, state, kv_cache,
-                            tokens.data(), (int)tokens.size(),
-                            0, max_kv_len);
-
-    // Sub-layer profiling (buffers populated from above run)
-    // Reset DN states again for clean sub-layer measurement
-    for (int i = 0; i < state.num_dn_layers; i++) {
-        size_t state_bytes = (size_t)MC::LIN_NUM_V_HEADS * MC::LIN_K_HEAD_DIM
-                           * MC::LIN_V_HEAD_DIM * sizeof(float);
-        cudaMemset(state.dn_states[i], 0, state_bytes);
-        size_t conv_bytes = (size_t)MC::LIN_CONV_DIM * (MC::CONV_KERNEL - 1) * sizeof(__half);
-        cudaMemset(state.conv_states[i], 0, conv_bytes);
-    }
-    profile_sublayer_prefill(weights, state, kv_cache,
-                             (int)tokens.size(), 0, max_kv_len);
 
     cudaFree(kv_cache);
     state.free();
@@ -942,6 +984,302 @@ int cmd_profile_prefill(const std::string& model_dir) {
     drop_page_caches();
 
     printf("[profile-prefill] Done.\n");
+    return 0;
+}
+
+// ============================================================================
+// bench-prefill: Benchmark Marlin INT4 vs cuBLAS FP16 projections at various M
+// ============================================================================
+
+int cmd_bench_prefill(const std::string& model_dir) {
+    using MC = ModelConfig;
+
+    printf("[bench-prefill] Loading model weights...\n");
+    drop_page_caches();
+    cudaFree(0);
+
+    ModelWeights weights;
+    if (!load_model_weights(model_dir, weights)) {
+        fprintf(stderr, "[bench-prefill] Weight load failed\n");
+        return 1;
+    }
+    merge_projection_weights(weights);
+
+    // Allocate state with large max_seq to support up to M=2048
+    InferenceState state;
+    int max_seq = 2048;
+    if (!state.allocate(max_seq)) {
+        fprintf(stderr, "[bench-prefill] State allocation failed (max_seq=%d)\n", max_seq);
+        free_model_weights(weights);
+        return 1;
+    }
+
+    printf("[bench-prefill] State allocated (max_seq=%d)\n", max_seq);
+
+    bench_prefill_projections(weights, state);
+
+    state.free();
+    free_model_weights(weights);
+    drop_page_caches();
+
+    printf("[bench-prefill] Done.\n");
+    return 0;
+}
+
+// ============================================================================
+// test-ws: WebSocket server + audio pipeline (Ring → Mel → VAD) with WebUI.
+// ============================================================================
+
+int cmd_test_ws(const std::string& webui_dir) {
+    printf("[test-ws] Starting WebSocket + Audio Pipeline...\n");
+    printf("[test-ws] WebUI dir: %s\n", webui_dir.c_str());
+
+    WsServer server;
+    WsServerConfig ws_cfg;
+    ws_cfg.port = 8080;
+    ws_cfg.static_dir = webui_dir;
+
+    // Audio pipeline.
+    AudioPipeline audio;
+    AudioPipelineConfig audio_cfg;
+    // defaults: n_fft=400, hop=160, n_mels=128, sr=16000
+
+    // Configure Silero VAD model path.
+    audio_cfg.silero.model_path = std::string(getenv("HOME") ? getenv("HOME") : "/home/rm01")
+                                  + "/models/dev/vad/silero_vad.onnx";
+
+    // Configure FSMN VAD model paths.
+    std::string home = getenv("HOME") ? getenv("HOME") : "/home/rm01";
+    audio_cfg.fsmn.model_path = home + "/models/dev/vad/fsmn/model_quant.onnx";
+    audio_cfg.fsmn.cmvn_path  = home + "/models/dev/vad/fsmn/am.mvn";
+
+    // Configure TEN VAD model path.
+    audio_cfg.ten.model_path = home + "/models/dev/vad/ten/ten-vad.onnx";
+
+    // Track WS-level stats.
+    std::atomic<uint64_t> total_frames{0};
+    std::atomic<uint64_t> total_bytes{0};
+    std::atomic<bool> loopback{false};
+    std::atomic<int> active_ws_fd{-1};
+
+    // Audio pipeline callbacks.
+    audio.set_on_vad([&](const VadResult& vr, int frame_idx) {
+        int fd = active_ws_fd.load(std::memory_order_relaxed);
+        if (fd < 0) return;
+        char json[256];
+        snprintf(json, sizeof(json),
+            R"({"type":"vad","speech":%s,"event":"%s","frame":%d,"energy":%.2f})",
+            vr.is_speech ? "true" : "false",
+            vr.segment_start ? "start" : (vr.segment_end ? "end" : "none"),
+            frame_idx, vr.energy);
+        server.send_text(fd, json);
+        if (vr.segment_start)
+            printf("[test-ws] VAD: speech START at frame %d (energy=%.2f)\n",
+                   frame_idx, vr.energy);
+        if (vr.segment_end)
+            printf("[test-ws] VAD: speech END at frame %d\n", frame_idx);
+    });
+
+    audio.set_on_stats([&](const AudioPipelineStats& st) {
+        int fd = active_ws_fd.load(std::memory_order_relaxed);
+        if (fd < 0) return;
+        char json[1024];
+        snprintf(json, sizeof(json),
+            R"({"type":"pipeline_stats","pcm_samples":%lu,"mel_frames":%lu,)"
+            R"("speech_frames":%lu,"rms":%.4f,"energy":%.2f,"is_speech":%s,)"
+            R"("threshold":%.2f,"noise_floor":%.2f,"gain":%.1f,)"
+            R"("silero_prob":%.3f,"silero_speech":%s,"silero_threshold":%.2f,"silero_enabled":%s,)"
+            R"("fsmn_prob":%.3f,"fsmn_speech":%s,"fsmn_threshold":%.2f,"fsmn_enabled":%s,)"
+            R"("ten_prob":%.3f,"ten_speech":%s,"ten_threshold":%.2f,"ten_enabled":%s})",
+            (unsigned long)st.pcm_samples_in,
+            (unsigned long)st.mel_frames,
+            (unsigned long)st.speech_frames,
+            st.last_rms, st.last_energy,
+            st.is_speech ? "true" : "false",
+            audio.vad_threshold(), audio.vad_noise_floor(),
+            audio.gain(),
+            st.silero_prob, st.silero_speech ? "true" : "false",
+            audio.silero_threshold(),
+            audio.silero_enabled() ? "true" : "false",
+            st.fsmn_prob, st.fsmn_speech ? "true" : "false",
+            audio.fsmn_threshold(),
+            audio.fsmn_enabled() ? "true" : "false",
+            st.ten_prob, st.ten_speech ? "true" : "false",
+            audio.ten_threshold(),
+            audio.ten_enabled() ? "true" : "false");
+        server.send_text(fd, json);
+    });
+
+    server.set_on_connect([&](int fd) {
+        active_ws_fd.store(fd, std::memory_order_relaxed);
+        printf("[test-ws] WS client connected  (fd=%d)\n", fd);
+    });
+
+    server.set_on_disconnect([&](int fd) {
+        if (active_ws_fd.load() == fd)
+            active_ws_fd.store(-1, std::memory_order_relaxed);
+        printf("[test-ws] WS client disconnected (fd=%d)\n", fd);
+    });
+
+    server.set_on_text([&](int fd, const std::string& msg) {
+        if (msg == "loopback:on") {
+            loopback.store(true, std::memory_order_relaxed);
+            server.send_text(fd, R"({"type":"loopback","enabled":true})");
+            printf("[test-ws] Loopback ON (fd=%d)\n", fd);
+        } else if (msg == "loopback:off") {
+            loopback.store(false, std::memory_order_relaxed);
+            server.send_text(fd, R"({"type":"loopback","enabled":false})");
+            printf("[test-ws] Loopback OFF (fd=%d)\n", fd);
+        } else if (msg.rfind("vad_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 14, nullptr);
+            audio.set_vad_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"vad_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] VAD threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("gain:", 0) == 0) {
+            float g = std::strtof(msg.c_str() + 5, nullptr);
+            if (g < 0.1f) g = 0.1f;
+            if (g > 20.0f) g = 20.0f;
+            audio.set_gain(g);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"gain","value":%.1f})", g);
+            server.send_text(fd, json);
+            printf("[test-ws] Gain = %.1fx (fd=%d)\n", g, fd);
+        } else if (msg.rfind("silero_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 17, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.set_silero_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"silero_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] Silero threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("fsmn_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 15, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.set_fsmn_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"fsmn_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] FSMN threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("ten_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 14, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.set_ten_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"ten_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] TEN threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg == "silero_enable:on" || msg == "silero_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.set_silero_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"silero_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] Silero %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg == "fsmn_enable:on" || msg == "fsmn_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.set_fsmn_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"fsmn_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] FSMN %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg == "ten_enable:on" || msg == "ten_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.set_ten_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"ten_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] TEN %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else {
+            printf("[test-ws] Text from fd=%d: %s\n", fd, msg.c_str());
+        }
+    });
+
+    server.set_on_binary([&](int fd, const uint8_t* data, size_t len) {
+        uint64_t f = total_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+        total_bytes.fetch_add(len, std::memory_order_relaxed);
+
+        // Push PCM to audio pipeline.
+        const int16_t* samples = reinterpret_cast<const int16_t*>(data);
+        int n_samples = len / sizeof(int16_t);
+        audio.push_pcm(samples, n_samples);
+
+        // Quick RMS/peak for WS-level feedback (every 10 frames).
+        if (f % 10 == 0) {
+            double sum_sq = 0;
+            int16_t peak_abs = 0;
+            for (int i = 0; i < n_samples; i++) {
+                int16_t s = samples[i];
+                sum_sq += (double)s * s;
+                int16_t a = s < 0 ? (int16_t)(-s) : s;
+                if (a > peak_abs) peak_abs = a;
+            }
+            float rms  = n_samples > 0 ? sqrtf((float)(sum_sq / n_samples)) / 32768.0f : 0;
+            float peak = peak_abs / 32768.0f;
+            char json[256];
+            snprintf(json, sizeof(json),
+                R"({"type":"audio_stats","frames":%lu,"rms":%.4f,"peak":%.4f})",
+                (unsigned long)f, rms, peak);
+            server.send_text(fd, json);
+        }
+
+        // Loopback.
+        if (loopback.load(std::memory_order_relaxed)) {
+            server.send_binary(fd, data, len);
+        }
+
+        if (f % 500 == 0) {
+            auto& st = audio.stats();
+            printf("[test-ws] PCM: %lu frames | Mel: %lu | Speech: %lu | Energy: %.2f\n",
+                   (unsigned long)f, (unsigned long)st.mel_frames,
+                   (unsigned long)st.speech_frames, st.last_energy);
+        }
+    });
+
+    // Start audio pipeline.
+    if (!audio.start(audio_cfg)) {
+        fprintf(stderr, "[test-ws] Failed to start audio pipeline\n");
+        return 1;
+    }
+
+    // Start WS server.
+    if (!server.start(ws_cfg)) {
+        fprintf(stderr, "[test-ws] Failed to start WS server\n");
+        audio.stop();
+        return 1;
+    }
+
+    printf("[test-ws] Server running on http://localhost:%d\n", ws_cfg.port);
+    printf("[test-ws] Audio pipeline: Mel(n_fft=%d hop=%d mels=%d) + VAD\n",
+           audio_cfg.mel.n_fft, audio_cfg.mel.hop_length, audio_cfg.mel.n_mels);
+    printf("[test-ws] Press Ctrl+C to stop...\n");
+
+    // Block until SIGINT/SIGTERM.
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGTERM);
+    sigprocmask(SIG_BLOCK, &mask, nullptr);
+    int sig = 0;
+    sigwait(&mask, &sig);
+    printf("\n[test-ws] Caught signal %d, shutting down...\n", sig);
+
+    audio.stop();
+    server.stop();
+    printf("[test-ws] Total: %lu WS frames, %.1f KB\n",
+           total_frames.load(), total_bytes.load() / 1024.0);
     return 0;
 }
 
