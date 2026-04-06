@@ -1,5 +1,276 @@
 # DeusRidet Development Log
 
+## 2026-07-19 — GPTQ GEMM Optimization Round: 4 Experiments, 1 Win
+
+### Context
+
+Continuing GPTQ INT4 GEMM kernel optimization on SM87 Orin. Starting from the
+Register-B + cp.async A pipeline + dual launch_bounds kernel (744 SASS instructions,
+96/127 regs for <5>/<4> paths). Previous best: gate M=64: 11.53 TFLOPS.
+
+### Experiments
+
+**1. BM=128 M-tile doubling — FAILED (reverted)**
+- Goal: Double M-tile from 64→128 for better B data reuse at large M
+- Design: 4mt × 4nt MMA tiles per warp (64 FP32 accumulators vs 32)
+- Result: 164 registers → only 3 blocks/SM (vs 4). Severe occupancy loss.
+  gate M=192: 8.96 TFLOPS (was ~12.3), down M≥128: 4.83 TFLOPS (was ~10.2).
+  Uniform degradation of 20-50% across all M≥128.
+- Root cause: SM87 has only 65536 regs/SM. 164 regs × 128 threads × 3 = 62976,
+  barely fits. The occupancy drop (4→3 blocks/SM) destroys latency hiding.
+
+**2. Output half2 vectorization — SUCCESS (kept)**
+- Goal: Replace 32× STG.U16 with 16× STG.32 (half2 stores) for output writes
+- Implementation: Pack acc[mt][nt][0..1] into `__halves2half2()`, store as `__half2*`
+- Result: +3.1% at gate M=64 (11.53→11.88), +2-8% at large M. Peak: 12.73
+  TFLOPS at gate M=256 (18.4% TC utilization). Registers unchanged (96/127).
+- Why it works: Halves store instruction count (32→16), improves coalescing
+  with 32-bit aligned writes. Zero register cost.
+
+**3. Scale dedup (conditional reload) — FAILED (reverted)**
+- Goal: With group_size=128, BK=64, scale changes every 2 kt iters. Skip
+  redundant scale loads on odd iterations.
+- Implementation: `if (kt * BK % group_size == 0)` guard around scale loads,
+  scale2 persisted in registers across loop iterations.
+- Result: -5% to -12% regression across all M values! gate M=64: 11.29 (was 11.88).
+- Root cause: Runtime conditional disrupts compiler's instruction scheduling.
+  The branch overhead and code motion constraints far outweigh the 4 saved LDG
+  per odd kt iteration. Scale loads were already well-hidden in the L1 pipeline.
+
+**4. HFMA2 fused dequant — FAILED (reverted)**
+- Goal: Replace `hsub2(emb, c1032) × scale` (2 instructions) with
+  `hfma2(emb, scale, -1032*scale)` (1 instruction). Save ~28 insns per BK tile.
+- Result: SASS instruction count INCREASED from 744 to 800 (+56!). Compiler
+  generated extra F2FP.PACK_AB (32), CS2R (32), LEA.HI (43) instructions.
+  RMSE degraded from 0.000291 to 0.049302 (170× worse accuracy).
+- Root cause (accuracy): FMA computes `emb × scale + bias` with one rounding,
+  but `emb` is ~1024-1039 and `bias` is ~-1032×scale. The large intermediate
+  product `emb × scale` causes catastrophic cancellation when adding the bias
+  in FP16. Original approach subtracts first (exact, since emb ≈ 1032) then
+  scales — much more numerically stable.
+- Root cause (instruction count): Compiler couldn't efficiently schedule the
+  HFMA2+precompute pattern, added type conversion and address calc overhead.
+
+### Final State
+
+Only half2 output vectorization was kept. Current kernel performance:
+
+| Config | M=64 | M=128 | M=192 | M=256 | M=384 |
+|--------|------|-------|-------|-------|-------|
+| gate TFLOPS | 11.88 | 12.43 | 12.65 | 12.68 | 12.66 |
+| gate TC% | 17.2% | 18.0% | 18.3% | 18.4% | 18.3% |
+| down TFLOPS | 9.16 | 10.27 | 10.27 | 10.36 | 9.96 |
+
+SASS: 744 instructions, 32 HMMA (4.3%). Registers: 96 (<5>, 5 blocks/SM),
+127 (<4>, 4 blocks/SM). RMSE: 0.000291.
+
+### Lessons Learned
+
+1. SM87 register budget (65536/SM) is the binding constraint for tile-size
+   increases. Any design requiring >128 regs drops to ≤3 blocks/SM.
+2. Compiler scheduling on SM87 is fragile — seemingly harmless code changes
+   (conditional branches, new register arrays) can cause 5-12% regressions.
+3. FP16 numerical accuracy constrains algebraic transformations. Subtraction-
+   then-multiply is preferred over FMA when operands are close in magnitude.
+4. The kernel is now instruction-throughput bound: 744 instructions with only
+   32 HMMA (4.3%). Further improvements require reducing dequant instruction
+   count, which likely means a different weight memory layout (pre-permuted).
+
+## 2026-07-18 — Prefill Optimization Analysis: Near Hardware Limits (88 ms, M=11)
+
+### Context
+
+After the decode optimization (113→89 ms/tok), investigated prefill optimization
+opportunities for M=11 (11-token "Hello" prompt with chat template).
+
+### Baseline Measurements
+
+Profiled with `profile-prefill`, M=11, 64 layers:
+
+| Component | Time | % of Total | Per-Layer |
+|-----------|------|-----------|-----------|
+| MLP Marlin (64 layers) | 55.0 ms | 62.5% | 0.856 ms |
+| DeltaNet SSM (48 layers) | 23.9 ms | 27.2% | 0.499 ms |
+| Full Attention (16 layers) | 6.8 ms | 7.7% | 0.423 ms |
+| Norms (pre+post, 128) | 2.4 ms | 2.7% | — |
+| **Total** | **88.1 ms** | | **8.0 ms/tok** |
+
+Sub-layer breakdown (per layer):
+
+| Operation | Time | BW (GB/s) | % of 177 ceiling |
+|-----------|------|-----------|-------------------|
+| MLP gate (5120→17408) | 0.289 ms | 159 | 90% |
+| MLP up (5120→17408) | 0.283 ms | 162 | 92% |
+| MLP down+add (17408→5120) | 0.277 ms | 168 | 95% |
+| DN qkv_ab (5120→10496) | 0.179 ms | 155 | 88% |
+| DN z (5120→6144) | 0.104 ms | 156 | 88% |
+| DN out (6144→5120) | 0.102 ms | 159 | 90% |
+| DN fused_head (recurrent) | 0.102 ms | — | ~94% FP32 peak |
+| FA q (5120→12288) | 0.210 ms | 156 | 88% |
+
+### Theoretical Minimum
+
+Total weight data across all Marlin calls: 12,563 MB.
+At 177 GB/s achievable DRAM ceiling: 71.0 ms for DRAM reads alone.
+Non-Marlin compute (fused_head, conv1d, norms, silu_mul, etc.): 9.7 ms.
+**Theoretical minimum: 80.7 ms.** Measured: 88.1 ms. Gap: 7.4 ms (9.2%).
+
+Gap attribution:
+- Kernel launch overhead: ~384 Marlin calls × ~5 µs = ~1.9 ms
+- Marlin sub-peak bandwidth (avg 160 vs 177 GB/s) = ~5.5 ms
+- Combined: 7.4 ms matches the measured gap
+
+### Experiment 1: Multi-Stream DN z_proj || fused_head Overlap
+
+**Hypothesis**: z_proj (DRAM-bound Marlin, 0.105 ms) can run concurrently with
+conv1d + fused_head (compute-bound, 0.111 ms) on a separate stream, saving
+~0.105 ms × 48 layers = 5 ms.
+
+**Implementation**: Launched z_proj Marlin on `aux_stream`, continued
+conv1d + fused_head on main stream, synced via events before gated_norm.
+
+**Result**: DN 23.93 ms → 23.93 ms. **Zero improvement.**
+
+**Analysis**: On Tegra iGPU (SM87), the persistent Marlin kernel (16 blocks =
+16 SMs, continuous while-loop) appears to prevent effective concurrent kernel
+execution. Even though SM resources allow co-residency (8 Marlin warps + 12
+fused_head warps = 20 < 48 warp limit), both kernels compete for DRAM bandwidth
+(Marlin ~150 GB/s + fused_head ~33 GB/s > 177 GB/s ceiling). The hardware
+scheduler may serialize persistent blocks with non-persistent kernels on Tegra.
+
+**Verdict**: Multi-stream kernel overlap is not effective on Tegra with persistent
+Marlin kernels. Reverted.
+
+### Experiment 2: Fused MLP down_proj + Residual Add via marlin_gemm_add
+
+**Hypothesis**: Replace `marlin_gemm(→mlp_down) + elementwise_add(residual)` with
+`marlin_gemm_add(→residual)` to save the elementwise_add kernel.
+
+**Result**: Output corruption. First token: "aaa" instead of "Thinking".
+
+**Root Cause**: `marlin_gemm_add` is broken for **in-place** mode (C == residual_ptr)
+when `slice_count > 1`. The Marlin persistent kernel's `global_reduce` path uses C
+as scratch space for inter-block partial sum accumulation. When the last slice calls
+`write_result()` and reads `res_ptr[i]` to add the residual, it reads the corrupted
+C (containing partial GEMM sums) instead of the original residual value.
+
+For M=11, K=5120, N=5120 (down_proj): k_tiles=320, n_tiles=20, blocks=16, iters=400.
+Block 0 processes column 0 fully (320 iters) then partial column 1 (80 iters). Block 1
+processes the rest of column 1 (240 iters). Column 1 has slice_count=2 → global_reduce
+overwrites C with block 0's partial result → block 1's write_result reads corrupted
+residual.
+
+**Fix**: Added warning comment to `marlin_gemm_add`. For safe use, must pass a
+separate output buffer (C != residual), then copy. But at that point, the original
+`marlin_gemm + elementwise_add` approach is equivalent. Reverted.
+
+### Conclusion
+
+**Prefill is near hardware limits for M=11.** Key metrics:
+- Marlin INT4 average bandwidth: 160 GB/s = **92.7%** of 177 GB/s ceiling
+- DeltaNet fused_head: **~94%** of SM87 FP32 compute peak
+- Total overhead vs theoretical minimum: 7.4 ms (9.2%)
+
+Remaining optimization opportunities (diminishing returns):
+- Merge qkv_ab + z projections: ~0.5 ms (0.6%)
+- Merge gate + up projections: ~0.5 ms (0.6%)
+- Total achievable improvement from merges: ~1 ms (1.1%)
+
+**Recommendation**: Accept current prefill performance. Focus future optimization
+effort on larger M values (where Marlin scales better) and decode path improvements.
+Prefill at M=11 is fundamentally limited by kernel launch overhead and near-peak
+DRAM utilization.
+
+## 2026-07-17 — Decode Fusion + INT4 Marlin Attention: 113→89 ms/tok (21% Speedup)
+
+### Context
+
+Previous sessions optimized prefill (FP16 GEMM at 162 GB/s = 92% of achievable 177 GB/s
+DRAM ceiling) and established the decode baseline: 113.4 ms/tok with INT8 GEMV for
+attention projections + Marlin INT4 for MLP, CUDA Graph with ~1063 nodes.
+
+### Optimization 1: DeltaNet Fused Decode Kernel (113→109 ms, -4.5 ms)
+
+**Problem**: DeltaNet decode used 6 standalone small kernels after QKV projection:
+- `repeat_interleave(q)` × 1, `repeat_interleave(k)` × 1 (16→48 heads each)
+- `compute_g_beta` (1 block, 48 threads)
+- `l2norm_scaled(q)` (48 blocks)
+- `l2norm(k)` (48 blocks)
+- `deltanet_recurrent` (48 blocks, reads/writes 128×128 state from global memory)
+
+**Solution**: Reuse the prefill `deltanet_fused_head_kernel` for decode (M=1).
+This kernel already fuses all 6 operations AND register-caches the S[128] state
+per thread — eliminating 48 × 128 × 128 × 4 = 3 MB of global memory reads/writes
+per layer for the recurrent state.
+
+Key insight: write `int8_dual_linear(a,b)` output directly into `dn_qkv` buffer
+at offsets `LIN_CONV_DIM` and `LIN_CONV_DIM+48`, matching what the fused kernel
+expects. Buffer is `LIN_QKV_AB_DIM=10496` elements, plenty of room.
+
+**Result**: 108.9 ms/tok, 951 CUDA Graph nodes (was 1063). Correct output verified.
+
+### Failed Experiment: GPTQ GEMV for MLP Decode (REVERTED)
+
+**Hypothesis**: GPTQ GEMV at ~169 GB/s should beat Marlin at ~155 GB/s for MLP at M=1.
+Disabled MLP Marlin repacking, used `gptq_dual_gemv(gate+up)` + `gptq_gemv_add(down)`.
+
+**Result**: **120.8 ms/tok — massive regression (+12 ms).** GPTQ GEMV is slower
+than Marlin for large MLP projections (K=5120/17408, N=17408/5120) at M=1.
+Root cause: Marlin's persistent kernel with double-buffered `cp.async` loads and
+explicit SMEM staging outperforms GPTQ GEMV's simpler direct-load approach at
+these matrix sizes. Marlin achieves 157 GB/s (89% ceiling) vs GPTQ GEMV's
+effective ~120 GB/s for MLP shapes.
+
+Reverted immediately. Lesson: Marlin > GPTQ GEMV for INT4 decode on SM87 at all sizes.
+
+### Optimization 2: Marlin INT4 for All Attention Decode (109→89 ms, -20 ms)
+
+**Problem**: Attention projections used INT8 GEMV (~169 GB/s, 95% of ceiling).
+But INT8 reads 2× the weight data vs INT4 GPTQ. For decode M=1 (memory-bound),
+halving data transfer dominates even if kernel efficiency is slightly lower.
+
+**Solution**: Switch all decode attention projections from INT8 GEMV to Marlin INT4,
+using the Marlin weights already created for prefill (`quantize_attn_to_marlin`).
+
+Changes per layer type:
+- **DeltaNet (48 layers)**: Replaced 3 INT8 GEMVs + 1 INT8 dual GEMV with
+  1 Marlin GEMM (merged `marlin_qkv_ab`, K=5120→N=10496) + 1 Marlin GEMM (z) +
+  1 Marlin GEMM (out). Weight data: 116.7 MB INT8 → 58.2 MB INT4 per layer.
+- **Full Attention (16 layers)**: Replaced 1 INT8 GEMV (q) + 1 INT8 dual GEMV (kv)
+  + 1 INT8 GEMV (o) with 1 Marlin GEMM (q, K=5120→N=12288) + 1 Marlin GEMM
+  (merged kv, 5120→2048) + 1 Marlin GEMM (o, 6144→5120). Weight data:
+  104.9 MB INT8 → 52.5 MB INT4 per layer.
+- For merged KV: output to `dn_z` buffer (6144 elements, only 2048 needed),
+  split k=dn_z[0:1024] and v=dn_z[1024:2048].
+
+**Result**: **89.0 ms/tok** (stable across runs), 903 CUDA Graph nodes.
+Correct output verified (identical token IDs).
+
+### Profile Breakdown Comparison
+
+| Component | Before (ms) | After (ms) | Change |
+|-----------|-------------|------------|--------|
+| DeltaNet attn (48 layers) | 42.9 | 24.0 | -44% |
+| FullAttn (16 layers) | 13.5 | 7.7 | -43% |
+| MLP (64 layers) | 36.6 | 21.7 | est. |
+| LM Head | 14.3 | 14.4 | — |
+| CUDA Graph nodes | 1063→951 | 903 | -15% |
+| **Decode ms/tok** | **113.4** | **89.0** | **-21.5%** |
+
+### Summary
+
+| Optimization | Impact | Mechanism |
+|---|---|---|
+| DN fused decode kernel | -4.5 ms | Register-cached S[128], 6→1 kernel |
+| Marlin INT4 all attention decode | -19.9 ms | Half weight data (INT8→INT4) |
+| GPTQ GEMV for MLP | +12 ms (reverted) | Marlin > GPTQ GEMV at all sizes |
+| **Total improvement** | **-24.4 ms (-21.5%)** | |
+
+Next targets: MLP (21.7 ms, 50% of remaining decode) is now the bottleneck.
+Marlin already operates at 89% of DRAM ceiling for MLP — limited room unless
+the Marlin kernel itself is improved or a better INT4 GEMV kernel is written
+for the specific MLP shapes.
+
 ## 2026-04-02 — Phase 1: GPTQ-Int4 Kernels
 
 ### Context
@@ -2081,3 +2352,269 @@ Remaining gap to theoretical MLP minimum (49.6 ms) is 4.2 ms over 64 layers = 0.
 per layer. At 87–94% bandwidth utilization, the kernel is close to the roofline and
 further gains require either hardware improvements or algorithmic changes (e.g., fused
 gate+up into a single wider GEMM with concatenated weights).
+
+## 2025-07-02 — FP16 GEMM Kernel Optimization: cuBLAS Parity Achieved
+
+### Context
+
+Continuing FP16 GEMM kernel optimization for attention weight projections.
+Starting point: custom kernel at 0.93x cuBLAS across all shapes (650 μs vs
+606 μs on DN qkv [5120,10240]). Root cause identified via ncu: L2 traffic
+amplification (267 MB vs cuBLAS 159 MB) from A matrix re-reads when L1 cache
+is too small due to B SMEM padding consuming excessive SMEM.
+
+### Optimization Path
+
+**1. XOR swizzle for B SMEM (bank-conflict-free without padding)**
+
+Original B layout used B_PAD=8 → B_STRIDE=72 → 68 KB SMEM per TB → only
+27 KB L1 left → 4 pipeline stages × 8KB A tiles = 32KB > 27KB → A evicted
+from L1 → re-read from L2.
+
+Replaced padding with XOR swizzle: `col_int4 ^ (row % 8)`. This eliminates
+bank conflicts (verified: only 1,473 conflicts out of 2.95M wavefronts) while
+keeping B_STRIDE=TILE_K=64 → 64 KB SMEM → 35 KB L1 → A tiles fit.
+
+Bank conflict analysis for manual B fragment load with XOR swizzle:
+```
+Thread T: bank = (4 * group_id + tid_in_grp) % 32
+→ 8 groups × 4 positions = 32 unique banks. Zero conflicts.
+```
+
+L2 traffic reduced from 267 MB to 194 MB (27% reduction). DRAM amplification
+dropped to just 3.5% above theoretical minimum.
+
+**2. ldmatrix.x2.trans investigation (abandoned)**
+
+Attempted to use hardware transpose for B fragment loading. Built diagnostic
+tool (test_ldsm_trans.cu) which proved the register mapping is incompatible
+with our [N,K] source layout:
+```
+ldmatrix.x2.trans output: {B_SMEM[T%4*2, T/4], B_SMEM[T%4*2+1, T/4]}
+MMA B fragment expects:   {B_SMEM[T/4, T%4*2], B_SMEM[T/4, T%4*2+1]}
+```
+N and K indices are swapped. Would require [K,N] source in SMEM, which can't
+be achieved with cp.async from [N,K] global memory. Abandoned in favor of
+manual half2 loads with swizzle-aware addressing.
+
+**3. Smart grid dispatch (wave balancing)**
+
+For shapes where n_tiles is not divisible by MAX_CONCURRENT (32 = 16 SMs × 2
+TBs/SM), non-persistent dispatch causes wave imbalance. Example: [6144,5120]
+has 80 tiles → 2.5 waves → last wave 50% idle → 20% overhead.
+
+Solution: cap grid to MAX_CONCURRENT (32) for imbalanced tile counts.
+The kernel's `tile_n += gridDim.x` loop naturally distributes tiles.
+L1 caching of A tiles via cp.async.ca enables cross-tile A reuse within
+persistent TBs.
+
+Result: [6144,5120] improved from 411 μs (0.92x) to 375 μs (1.01x).
+
+### Final Results — All Attention Projections (M=64, Prefill)
+
+| Shape | cuBLAS (μs) | Custom (μs) | Ratio | BW (GB/s) |
+|-------|-------------|-------------|-------|-----------|
+| DN qkv [5120,10240] | 605.8 | 613.9 | 0.99x | 162.1 |
+| FA q [5120,12288] | 725.3 | 734.0 | 0.99x | 162.5 |
+| DN z [5120,6144] | 376.2 | 372.0 | 1.01x | 161.1 |
+| DN/FA out [6144,5120] | 377.5 | 375.4 | 1.01x | 159.7 |
+| FA kv [5120,2048] | 129.0 | 127.8 | 1.01x | 159.6 |
+
+Weighted across all 64 layers (48 DN + 16 FA): custom is 0.2% slower overall.
+3 of 5 shapes beat cuBLAS. Effective bandwidth: 159–162 GB/s (91–93% of
+theoretical 175 GB/s).
+
+### ncu Profile Comparison (DN qkv [5120,10240])
+
+| Metric | cuBLAS | Custom |
+|--------|--------|--------|
+| Grid | 80×128 | 160×256 |
+| Waves/SM | 2.50 | 5.00 |
+| Memory Throughput | 68.9% | 81.8% |
+| L2 read sectors | 4.92M | 6.06M |
+| DRAM fill sectors | 3.34M | 3.30M |
+| L2 hit rate | 32.7% | 46.7% |
+| Stall Long Scoreboard | 15.35 | 1.76 |
+| Stall Short Scoreboard | 0.08 | 2.44 |
+| Stall Barrier | 2.37 | 2.88 |
+
+Key difference: cuBLAS uses ldmatrix.x2.trans for both A and B → minimal
+SMEM stalls (Short Scoreboard 0.08) but high DRAM stalls (Long Scoreboard
+15.35). Our kernel uses manual half2 loads for B → more SMEM transactions
+(Short Scoreboard 2.44) but better L1 caching of A (Long Scoreboard 1.76).
+Net effect is nearly identical overall throughput.
+
+### Key Learnings
+
+1. **B_PAD was more costly than expected**: 8 extra halves per row × 64 rows
+   × 4 stages = 4 KB SMEM → 8 KB less L1 → cascading effect on A caching
+2. **ldmatrix.x2.trans has a specific source layout requirement**: source must
+   be [K,N] (K-rows, N-cols) for the transposed output to match MMA B fragment.
+   Our [N,K] weight layout is incompatible
+3. **Wave imbalance matters**: For n_tiles not divisible by max_concurrent,
+   a half-filled last wave can cost 8-20% performance. Smart persistent
+   dispatch eliminates this
+4. **L1 .ca caching is effective**: cp.async.ca for A allows L1 to serve A
+   tiles to both TBs on the same SM, reducing L2 traffic significantly
+
+---
+
+## 2026-04-05 — FP16 GEMM: ldmatrix.x2.trans + Weight Repacking + Bandwidth Ceiling Discovery
+
+### Context
+
+Continuing from the previous session. The custom FP16 GEMM kernel achieves
+~162 GB/s on SM87 Orin, matching cuBLAS but still below the user's 198 GB/s
+target. Two major experiments were conducted:
+
+1. Weight repacking + ldmatrix.x2.trans for B fragment loading
+2. 3-stage occupancy optimization (4→3 stages, 33%→50% occupancy)
+3. DRAM bandwidth ceiling measurement
+
+### Experiment 1: Weight Repacking + ldmatrix.x2.trans
+
+**Hypothesis**: Short Scoreboard stall (2.44 cycles) from manual B fragment
+loads was a significant bottleneck. By pre-repacking B weights from [N,K] to
+tile-level [K,N] layout at model load time, ldmatrix.x2.trans could replace
+32 manual half2 loads with 16 ldmatrix instructions.
+
+**Implementation**: `fp16_repack_b()` function transposes B from [N,K] to
+`[N/64, K/64, 64_K, 64_N]` — one-time cost at model load. B SMEM layout
+changed to [TILE_K, TILE_N] (K-major). ldsm2_trans PTX helper re-added.
+B fragment loading reduced from 14 lines of manual loads to 3 lines with
+ldmatrix.x2.trans.
+
+**Correctness**: All 3 shapes PASS with identical RMSE (0.001020, 0.001449,
+0.001438) — proving the repacked layout + ldmatrix.x2.trans produces exact
+same results.
+
+**ncu Profile Comparison** (ldmatrix vs manual, 64×5120×10240):
+
+| Metric             | Manual  | ldmatrix | Change  |
+|--------------------|---------|----------|---------|
+| Duration           | 634.85μs| 616.51μs | -2.9%   |
+| Cycles/Instruction | 12.45   | 14.68    | +18%    |
+| Long Scoreboard    | 1.76    | 3.55     | +102%   |
+| Barrier            | 2.88    | 3.20     | +11%    |
+| Short Scoreboard   | 2.44    | 2.58     | +6%     |
+| Eligible warps     | 0.45    | 0.35     | -22%    |
+| SMEM wavefronts    | 6.9M    | 6.9M     | same    |
+
+**Analysis**: Wall-clock improved 3% (616 vs 635 μs), but per-instruction
+metrics got worse because fewer total instructions are issued. The stall
+distribution shifted from Short Scoreboard (SMEM) to Long Scoreboard (DRAM).
+Fewer instructions per k_sub means each instruction's share of DRAM wait
+time increases. The kernel is fundamentally **DRAM-bandwidth-bound, not
+instruction-bound**.
+
+**Benchmark Result**: Essentially 0% improvement in the timing benchmark
+(613.5 μs vs 613.9 μs for qkv). ldmatrix.x2.trans is retained for code
+cleanliness but not for performance.
+
+### Experiment 2: 3-Stage Occupancy Optimization (Failed)
+
+**Hypothesis**: Occupancy is bottlenecked at 33.3% (2 blocks/SM = 16 warps)
+by 65,536 bytes SMEM per block. Eligible warps per scheduler = 0.35 which
+means 73% of cycles have no work to issue. Reducing to 3 stages (49,152
+bytes) → 3 blocks/SM → 50% occupancy → 24 warps.
+
+**Result**: **Strictly worse**. qkv regressed from 613→637 μs (-3.9%).
+Even with smart grid dispatch (finding largest divisor of n_tiles ≤ MAX_CONCURRENT
+to avoid load imbalance), qkv still at 643 μs.
+
+**Why it failed**: The pipeline depth reduction from cp_async_wait<2> (4 stages)
+to cp_async_wait<1> (3 stages) hurt more than the occupancy increase helped.
+With 3 stages, only 1 group can be in-flight while computing — insufficient to
+hide DRAM latency on Orin (~200-400ns). Previously tested 2-stage was even
+worse (wait<0> = zero overlap).
+
+**Takeaway**: On SM87 Orin, pipeline depth is more important than occupancy
+for this DRAM-bound kernel. 4 stages with cp_async_wait<2> is the sweet spot.
+
+### Experiment 3: DRAM Bandwidth Ceiling Measurement (Critical Discovery)
+
+**Method**: Custom bandwidth probe (probe_bw.cu) testing pure streaming read
+with `__ldg` + anti-DCE accumulation across 12 grid configurations. Tested at
+50, 100, 200 MB data sizes.
+
+**Hardware**: EMC_FREQ@3199 MHz → theoretical peak = 2 × 3199 × 10⁶ × 32 bytes
+= **204.8 GB/s** (not 207 as previously assumed).
+
+**Results**:
+
+| Test Pattern           | Best GB/s | % of 204.8 |
+|------------------------|-----------|------------|
+| Pure streaming read    | 176.9     | 86.3%      |
+| Write-only             | 179.0     | 87.4%      |
+| Copy (R+W)             | 176.2     | 86.0%      |
+| cudaMemcpy D2D         | 176.2     | 86.0%      |
+
+**Key Finding**: Even the simplest pure streaming read (no SMEM, no sync,
+no compute — just __ldg loop) achieves only **177 GB/s** = 86% of the
+theoretical 204.8 GB/s peak. The 14% gap is hardware overhead: DRAM refresh,
+row buffer misses, bank scheduling, memory controller overhead. This is a
+hard ceiling for all GPU workloads on this hardware.
+
+**GEMM in context**:
+
+| Kernel                 | GB/s  | % of Achievable (177) | % of Theoretical (205) |
+|------------------------|-------|-----------------------|------------------------|
+| Custom GEMM (4-stage)  | 162.4 | **91.8%**             | 79.3%                  |
+| cuBLAS                 | 163.7 | **92.5%**             | 79.9%                  |
+| Achievable ceiling     | 177   | 100%                  | 86.3%                  |
+
+**Conclusion**: The 198 GB/s target is **not achievable** on Orin AGX for any
+GPU workload. The real achievable ceiling is ~177 GB/s. Our GEMM at 162 GB/s
+= 91.8% of this ceiling. cuBLAS at 164 GB/s = 92.5%. The remaining ~15 GB/s
+(8.2%) gap is kernel overhead (barriers, pipeline waits, address computation)
+that is extremely difficult to eliminate without hardware changes.
+
+### Remaining 8% Gap Analysis
+
+From ncu, per-instruction stall breakdown (12.45 total cycles/instruction):
+
+| Stall Source    | Cycles | % of Total | Explanation                     |
+|-----------------|--------|------------|---------------------------------|
+| Barrier         | 2.88   | 23.1%      | 2× __syncthreads per K-tile     |
+| Short Scoreboard| 2.44   | 19.6%      | SMEM load pipeline latency      |
+| Wait            | 2.13   | 17.1%      | cp.async pipeline wait          |
+| Long Scoreboard | 1.76   | 14.1%      | DRAM latency (unavoidable)      |
+| MIO Throttle    | 0.72   | 5.8%       | SMEM port saturation            |
+| Other           | 2.52   | 20.3%      | Not Selected, Math, Branch      |
+
+The 8% gap maps primarily to:
+- **Barrier overhead (23%)**: Two __syncthreads per K-tile are necessary to
+  prevent race conditions between cp.async writes and SMEM reads across
+  warps at different loop iterations. Reducing to 1 barrier was proven unsafe.
+- **Pipeline wait (17%)**: cp.async_wait stalls when the oldest prefetch
+  hasn't completed. More pipeline depth (5+ stages) would help but SMEM
+  is already maxed at 4 stages.
+
+### Failed Approaches Summary (This Session)
+
+| Approach | Expected | Actual | Why |
+|----------|----------|--------|-----|
+| ldmatrix.x2.trans for B | -20% Short Scoreboard | ~0% change | DRAM-bound, not instruction-bound |
+| 3-stage (50% occupancy) | +50% eligible warps | -3.9% | Pipeline depth reduction > occupancy gain |
+| Smart grid dispatch | Better load balance | Marginal | Most shapes already divide evenly by 32 |
+
+### Key Learnings
+
+1. **Measure the hardware ceiling FIRST**: Before chasing optimization targets,
+   establish what the hardware can actually deliver. 207/198 GB/s was never
+   achievable; 177 GB/s is the real ceiling. Our 162 GB/s is 92% of reality.
+2. **Occupancy is not always the answer**: On SM87 with heavy SMEM usage,
+   pipeline depth matters more than warp count for DRAM-bound kernels.
+3. **Per-instruction metrics inflate with fewer instructions**: ldmatrix.x2.trans
+   reduced instruction count but stall-per-instruction increased (same time,
+   fewer instructions). Always compare wall-clock, not per-instruction metrics.
+4. **DRAM ceiling on Orin**: ~177 GB/s = 86.3% of 204.8 = hard limit.
+   cuBLAS can't beat it either (164 GB/s = 92.5% of achievable).
+
+### Current Kernel Status
+
+- **Configuration**: 4 stages, TILE_M=64, TILE_N=64, TILE_K=64, 256 threads,
+  ldmatrix.x2.trans for B, B weight pre-repacked, XOR swizzle, persistent grid
+- **SMEM**: 65,536 bytes per block → 2 blocks/SM → 33.3% occupancy
+- **Performance**: 162 GB/s = 91.8% of achievable, 0.99-1.02x vs cuBLAS
+- **Correctness**: All 5 attention shapes verified
