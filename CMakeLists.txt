@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 # CUDA 12.9.1 installed alongside JetPack 6 default 12.6.
 # Configure with: cmake -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.9/bin/nvcc
 #                       -DCUDAToolkit_ROOT=/usr/local/cuda-12.9 ..
-project(deusridet LANGUAGES CXX CUDA)
+project(deusridet LANGUAGES C CXX CUDA)
 
 # ============================================================================
 # Build standards
@@ -37,6 +37,7 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cutlass/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cutlass/tools/util/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
+    /usr/include/aarch64-linux-gnu  # TensorRT headers
 )
 
 # ============================================================================
@@ -58,7 +59,42 @@ file(GLOB_RECURSE COMMUNIS_SOURCES
 )
 
 add_library(communis STATIC ${COMMUNIS_SOURCES})
-target_link_libraries(communis PRIVATE CUDA::cudart)
+target_link_libraries(communis PRIVATE CUDA::cudart nvinfer nvonnxparser)
+
+# ============================================================================
+# Network layer static library (nexus — WebSocket + HTTP server)
+# ============================================================================
+file(GLOB_RECURSE NEXUS_SOURCES
+    "src/nexus/*.cpp"
+)
+
+add_library(nexus STATIC ${NEXUS_SOURCES})
+target_link_libraries(nexus PRIVATE communis)
+
+# ============================================================================
+# TEN VAD static library (third_party — Agora TEN Framework VAD)
+# ============================================================================
+file(GLOB TEN_VAD_CC_SOURCES "third_party/ten_vad/src/*.cc")
+file(GLOB TEN_VAD_C_SOURCES  "third_party/ten_vad/src/*.c")
+add_library(ten_vad STATIC ${TEN_VAD_CC_SOURCES} ${TEN_VAD_C_SOURCES})
+target_include_directories(ten_vad PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ten_vad/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ten_vad/src
+)
+target_link_libraries(ten_vad PRIVATE onnxruntime m)
+# Suppress warnings in third-party code.
+target_compile_options(ten_vad PRIVATE -w)
+
+# ============================================================================
+# Senses library (sensus — audio pipeline, Mel, VAD)
+# ============================================================================
+file(GLOB_RECURSE SENSUS_SOURCES
+    "src/sensus/*.cpp"
+    "src/sensus/*.cu"
+)
+
+add_library(sensus STATIC ${SENSUS_SOURCES})
+target_link_libraries(sensus PRIVATE communis CUDA::cudart onnxruntime ten_vad)
 
 # ============================================================================
 # Main executable
@@ -67,7 +103,7 @@ add_executable(deusridet
     src/main.cpp
     src/commands.cpp
 )
-target_link_libraries(deusridet PRIVATE machina communis stdc++fs rt dl)
+target_link_libraries(deusridet PRIVATE machina communis nexus sensus stdc++fs rt dl)
 
 # Embed RPATH (not RUNPATH) so the binary finds CUDA 12.9 libs.
 # DT_RPATH takes precedence over ldconfig cache, unlike DT_RUNPATH.

@@ -6,13 +6,16 @@
 #include "forward.h"
 #include "layer.h"
 #include "gptq.h"
+#include "gptq_gemm_v2.h"
 #include "marlin.h"
+#include "fp16_gemm.h"
 #include "../communis/log.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cmath>
 #include <cfloat>
 #include <cstdio>
+#include <string>
 
 namespace deusridet {
 
@@ -30,22 +33,23 @@ void mlp_forward(const __half* x, const MLPWeights& mlp,
                  InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // Gate + Up projections via Marlin GEMM (weights are in Marlin format)
-    marlin_gemm(x, mlp.gate_proj.qweight, state.mlp_gate, mlp.gate_proj.scales,
-                state.marlin_workspace, 1, mlp.gate_proj.K, mlp.gate_proj.N, 128, stream);
-    marlin_gemm(x, mlp.up_proj.qweight, state.mlp_up, mlp.up_proj.scales,
-                state.marlin_workspace, 1, mlp.up_proj.K, mlp.up_proj.N, 128, stream);
+    // Gate + Up projections via GPTQ v2 (non-persistent, no workspace)
+    gptq_gemm_v2(x, mlp.gate_proj.qweight, state.mlp_gate, mlp.gate_proj.scales,
+                 1, mlp.gate_proj.K, mlp.gate_proj.N, stream);
+    gptq_gemm_v2(x, mlp.up_proj.qweight, state.mlp_up, mlp.up_proj.scales,
+                 1, mlp.up_proj.K, mlp.up_proj.N, stream);
 
     // SiLU activation: mlp_gate = silu(mlp_gate) * mlp_up
     silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
              MC::INTERMEDIATE_SIZE, stream);
 
-    // Down projection + residual add
-    marlin_gemm(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down, mlp.down_proj.scales,
-                state.marlin_workspace, 1, mlp.down_proj.K, mlp.down_proj.N, 128, stream);
+    // Down projection + fused residual add
     if (residual) {
-        elementwise_add(residual, state.mlp_down, residual,
-                        MC::HIDDEN_SIZE, stream);
+        gptq_gemm_v2_add(state.mlp_gate, mlp.down_proj.qweight, residual,
+                         mlp.down_proj.scales, 1, mlp.down_proj.K, mlp.down_proj.N, stream);
+    } else {
+        gptq_gemm_v2(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down,
+                     mlp.down_proj.scales, 1, mlp.down_proj.K, mlp.down_proj.N, stream);
     }
 }
 
@@ -242,8 +246,9 @@ void full_attention_forward(const __half* x, const FullAttentionWeights& attn,
     };
     if (trace) cudaEventRecord(t0, stream);
 
-    // 1. Q projection — q_proj outputs [12288] = interleaved [Q_h0(256), Gate_h0(256), ...]
-    int8_linear_forward(x, attn.q_proj, state.q_buf, 1, stream);
+    // 1. Q projection via FP16 GEMV: q_proj [5120→12288], interleaved Q+Gate
+    fp16_gemv(x, attn.fp16_q.weight, state.q_buf,
+              attn.fp16_q.in_features, attn.fp16_q.out_features, stream);
     mark("q_proj");
 
     // Deinterleave Q and Gate into separate contiguous buffers
@@ -254,21 +259,24 @@ void full_attention_forward(const __half* x, const FullAttentionWeights& attn,
     split_q_gate_kernel<<<MC::NUM_ATTN_HEADS, 256, 0, stream>>>(
         state.q_buf, q_ptr, gate_ptr, MC::NUM_ATTN_HEADS, MC::HEAD_DIM);
 
-    // 2. K, V projections (fused dual INT8 GEMV — shared SMEM x)
-    int8_dual_linear_forward(x, attn.k_proj, state.kv_buf,
-                                attn.v_proj, state.dn_z, 1, stream);
-    __half* v_buf = state.dn_z;  // [kv_proj_dim=1024], reuse (not used in full attn)
+    // 2. K and V projections via FP16 GEMV: x[5120] → dn_z[2048] = [K(1024), V(1024)]
+    fp16_gemv(x, attn.fp16_k.weight, state.dn_z,
+              attn.fp16_k.in_features, attn.fp16_k.out_features, stream);
+    fp16_gemv(x, attn.fp16_v.weight, state.dn_z + MC::KV_PROJ_DIM,
+              attn.fp16_v.in_features, attn.fp16_v.out_features, stream);
+    __half* k_buf = state.dn_z;
+    __half* v_buf = state.dn_z + MC::NUM_KV_HEADS * MC::HEAD_DIM;
     mark("k_proj+v_proj+deinterleave");
 
     // 3. Per-head Q/K RMSNorm
     head_norm(q_ptr, attn.q_norm, q_ptr,
               MC::NUM_ATTN_HEADS, MC::HEAD_DIM, MC::RMS_EPS, stream);
-    head_norm(state.kv_buf, attn.k_norm, state.kv_buf,
+    head_norm(k_buf, attn.k_norm, k_buf,
               MC::NUM_KV_HEADS, MC::HEAD_DIM, MC::RMS_EPS, stream);
     mark("head_norm");
 
     // 4. Partial RoPE on Q and K (reads pos from state.d_pos)
-    apply_rope(q_ptr, state.kv_buf,
+    apply_rope(q_ptr, k_buf,
                MC::NUM_ATTN_HEADS, MC::NUM_KV_HEADS, MC::HEAD_DIM,
                MC::ROTARY_DIM, state.d_pos, MC::ROPE_THETA, stream);
     mark("rope");
@@ -279,12 +287,11 @@ void full_attention_forward(const __half* x, const FullAttentionWeights& attn,
     __half* v_cache_ptr = k_cache + kv_plane;
 
     kv_cache_write_kernel<<<MC::NUM_KV_HEADS, 256, 0, stream>>>(
-        state.kv_buf, v_buf, k_cache, v_cache_ptr,
+        k_buf, v_buf, k_cache, v_cache_ptr,
         state.d_pos, max_kv_len, MC::HEAD_DIM, MC::NUM_KV_HEADS);
     mark("kv_cache_write");
 
     // 6. Flash-decoding style GQA attention: online softmax + V accumulation
-    // No dynamic shared memory needed (uses static __shared__ for constant-size buffers)
     float scale = 1.0f / sqrtf((float)MC::HEAD_DIM);
 
     gqa_decode_attention_kernel<<<MC::NUM_ATTN_HEADS, MC::HEAD_DIM, 0, stream>>>(
@@ -297,8 +304,9 @@ void full_attention_forward(const __half* x, const FullAttentionWeights& attn,
                  MC::ATTN_OUT_DIM, stream);
     mark("sigmoid_gate");
 
-    // 8. o_proj: attn_out[6144] → norm_out[5120] (INT8 quantized)
-    int8_linear_forward(state.attn_out, attn.o_proj, state.norm_out, 1, stream);
+    // 8. o_proj via FP16 GEMV: attn_out[6144] → norm_out[5120]
+    fp16_gemv(state.attn_out, attn.fp16_o.weight, state.norm_out,
+              attn.fp16_o.in_features, attn.fp16_o.out_features, stream);
     mark("o_proj");
 
     if (trace) { cudaEventDestroy(t0); cudaEventDestroy(t1); }
@@ -709,62 +717,48 @@ void deltanet_forward(const __half* x, const DeltaNetWeights& dn,
                       InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // 1. QKV projection (INT8 quantized)
-    int8_linear_forward(x, dn.in_proj_qkv, state.dn_qkv, 1, stream);
+    // 1. QKV+A+B projections via FP16 GEMV → dn_qkv[10496]
+    // Output layout: [0:10240]=qkv, [10240:10288]=a, [10288:10336]=b, [10336:10496]=pad
+    fp16_gemv(x, dn.fp16_qkv.weight, state.dn_qkv,
+              dn.fp16_qkv.in_features, dn.fp16_qkv.out_features, stream);
+    fp16_gemv(x, dn.fp16_a.weight, state.dn_qkv + MC::LIN_CONV_DIM,
+              dn.fp16_a.in_features, dn.fp16_a.out_features, stream);
+    fp16_gemv(x, dn.fp16_b.weight, state.dn_qkv + MC::LIN_CONV_DIM + MC::LIN_NUM_V_HEADS,
+              dn.fp16_b.in_features, dn.fp16_b.out_features, stream);
 
-    // Fused Conv1d step + SiLU (eliminates one kernel launch + intermediate R/W)
+    // Fused Conv1d step + SiLU on qkv only (first 10240 elements)
     causal_conv1d_step_silu(state.dn_qkv, state.conv_states[dn_layer_idx],
                             dn.conv1d_weight, state.dn_qkv,
                             MC::LIN_CONV_DIM, MC::CONV_KERNEL, stream);
 
-    // 2-3. Split qkv: [KEY_DIM, KEY_DIM, VALUE_DIM] = [2048, 2048, 6144]
-    __half* dn_query = state.dn_qkv;                         // [16, 128]
-    __half* dn_key   = state.dn_qkv + MC::LIN_KEY_DIM;       // [16, 128]
-    __half* dn_value = state.dn_qkv + 2 * MC::LIN_KEY_DIM;   // [48, 128]
+    // z projection via FP16 GEMV
+    fp16_gemv(x, dn.fp16_z.weight, state.dn_z,
+              dn.fp16_z.in_features, dn.fp16_z.out_features, stream);
 
-    // 4. repeat_interleave: q,k from 16 heads → 48 heads (ratio 3) via GPU kernel
-    __half* q_expanded = state.attn_out;  // [48, 128] = [6144]
-    __half* k_expanded = state.q_buf;     // [48, 128] (reuse q_buf, large enough)
-    int ratio = MC::LIN_NUM_V_HEADS / MC::LIN_NUM_K_HEADS;  // 3
-
-    repeat_interleave_kernel<<<MC::LIN_NUM_V_HEADS, 128, 0, stream>>>(
-        dn_query, q_expanded, MC::LIN_NUM_K_HEADS, MC::LIN_K_HEAD_DIM, ratio);
-    repeat_interleave_kernel<<<MC::LIN_NUM_V_HEADS, 128, 0, stream>>>(
-        dn_key, k_expanded, MC::LIN_NUM_K_HEADS, MC::LIN_K_HEAD_DIM, ratio);
-
-    // 5. z projection + fused a+b projection (single kernel, shared SMEM x)
-    int8_linear_forward(x, dn.in_proj_z, state.dn_z, 1, stream);
-    int8_dual_linear_forward(x, dn.in_proj_a, state.dn_a,
-                                dn.in_proj_b, state.dn_b, 1, stream);
-
-    // 6. Compute g and beta entirely on GPU (pre-allocated buffers)
-    compute_g_beta_kernel<<<1, MC::LIN_NUM_V_HEADS, 0, stream>>>(
-        state.dn_a, state.dn_b, dn.A_log, dn.dt_bias,
-        state.dn_g, state.dn_beta, MC::LIN_NUM_V_HEADS);
-
-    // 7-8. L2 normalize q (with fused 1/sqrt(k_dim) scale) and k (per head)
-    float q_scale = 1.0f / sqrtf((float)MC::LIN_K_HEAD_DIM);
-    l2norm_scaled_kernel<<<MC::LIN_NUM_V_HEADS, 128, 0, stream>>>(
-        q_expanded, MC::LIN_K_HEAD_DIM, 1e-6f, q_scale);
-    l2norm_kernel<<<MC::LIN_NUM_V_HEADS, 128, 0, stream>>>(
-        k_expanded, MC::LIN_K_HEAD_DIM, 1e-6f);
-
-    // 9. Recurrent step
-    int smem_size = (MC::LIN_K_HEAD_DIM + MC::LIN_V_HEAD_DIM) * sizeof(float);
-    deltanet_recurrent_kernel<<<MC::LIN_NUM_V_HEADS, 128, smem_size, stream>>>(
-        q_expanded, k_expanded, dn_value,
-        state.dn_g, state.dn_beta,
-        state.dn_states[dn_layer_idx],
-        state.attn_out,  // output [48, 128] = [6144]
-        MC::LIN_K_HEAD_DIM, MC::LIN_V_HEAD_DIM);
+    // Fused: repeat_interleave + compute_g_beta + l2norm_q + l2norm_k + recurrent
+    // a/b already in dn_qkv at offsets LIN_CONV_DIM and LIN_CONV_DIM+48 from merged proj.
+    {
+        int fused_smem = (MC::LIN_K_HEAD_DIM + MC::LIN_K_HEAD_DIM + 4) * sizeof(float);
+        deltanet_fused_head_kernel<<<MC::LIN_NUM_V_HEADS, 128, fused_smem, stream>>>(
+            state.dn_qkv,
+            dn.A_log, dn.dt_bias,
+            state.dn_states[dn_layer_idx],
+            state.attn_out,
+            1, MC::LIN_NUM_K_HEADS, MC::LIN_NUM_V_HEADS,
+            MC::LIN_K_HEAD_DIM, MC::LIN_V_HEAD_DIM,
+            MC::LIN_KEY_DIM, MC::LIN_CONV_DIM,
+            MC::LIN_CONV_DIM, MC::LIN_CONV_DIM + MC::LIN_NUM_V_HEADS,
+            MC::LIN_QKV_AB_DIM, MC::RMS_EPS);
+    }
 
     // 10. Gated RMSNorm: out[48, 128] with gate z[48, 128]
     rms_norm_gated(state.attn_out, state.dn_z,
                    dn.norm_weight, state.attn_out,
                    MC::LIN_NUM_V_HEADS, MC::LIN_V_HEAD_DIM, MC::RMS_EPS, stream);
 
-    // 11. out_proj: [6144] → [5120], write to norm_out (INT8 quantized)
-    int8_linear_forward(state.attn_out, dn.out_proj, state.norm_out, 1, stream);
+    // 11. out_proj via FP16 GEMV: [6144] → [5120]
+    fp16_gemv(state.attn_out, dn.fp16_out.weight, state.norm_out,
+              dn.fp16_out.in_features, dn.fp16_out.out_features, stream);
 }
 
 // ============================================================================
@@ -1001,22 +995,23 @@ static void mlp_forward_prefill(const __half* x, const MLPWeights& mlp,
     using MC = ModelConfig;
     int N_inter = MC::INTERMEDIATE_SIZE;
 
-    // gate_proj + up_proj via Marlin GEMM (weights in Marlin tile format)
-    marlin_gemm(x, mlp.gate_proj.qweight, state.mlp_gate, mlp.gate_proj.scales,
-                state.marlin_workspace, M, mlp.gate_proj.K, mlp.gate_proj.N, 128, stream);
-    marlin_gemm(x, mlp.up_proj.qweight, state.mlp_up, mlp.up_proj.scales,
-                state.marlin_workspace, M, mlp.up_proj.K, mlp.up_proj.N, 128, stream);
+    // gate_proj + up_proj via GPTQ v2 (non-persistent, no workspace)
+    gptq_gemm_v2(x, mlp.gate_proj.qweight, state.mlp_gate, mlp.gate_proj.scales,
+                 M, mlp.gate_proj.K, mlp.gate_proj.N, stream);
+    gptq_gemm_v2(x, mlp.up_proj.qweight, state.mlp_up, mlp.up_proj.scales,
+                 M, mlp.up_proj.K, mlp.up_proj.N, stream);
 
     // SiLU: mlp_gate = silu(mlp_gate) * mlp_up
     silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
              M * N_inter, stream);
 
-    // Down projection + residual add
-    marlin_gemm(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down, mlp.down_proj.scales,
-                state.marlin_workspace, M, mlp.down_proj.K, mlp.down_proj.N, 128, stream);
+    // Down projection + fused residual add (one kernel, no separate add)
     if (residual) {
-        elementwise_add(residual, state.mlp_down, residual,
-                        M * MC::HIDDEN_SIZE, stream);
+        gptq_gemm_v2_add(state.mlp_gate, mlp.down_proj.qweight, residual,
+                         mlp.down_proj.scales, M, mlp.down_proj.K, mlp.down_proj.N, stream);
+    } else {
+        gptq_gemm_v2(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down,
+                     mlp.down_proj.scales, M, mlp.down_proj.K, mlp.down_proj.N, stream);
     }
 }
 
@@ -1201,16 +1196,14 @@ static void full_attention_prefill(const __half* x, const FullAttentionWeights& 
                                    InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // 1. Batched Q, K, V projections (Marlin INT4)
+    // 1. Batched Q, K, V projections (FP16 GEMM with repacked weights)
     // Q: x[M, 5120] → q_buf[M, 12288]
-    marlin_gemm(x, attn.marlin_q.qweight, state.q_buf, attn.marlin_q.scales,
-                state.marlin_workspace, M, attn.marlin_q.K, attn.marlin_q.N,
-                GPTQ_GROUP_SIZE, stream);
+    fp16_gemm(x, attn.repacked_q, state.q_buf,
+              M, MC::HIDDEN_SIZE, MC::Q_PROJ_DIM, stream);
 
     // K+V: merged projection → attn_out[M, 2048], then split
-    marlin_gemm(x, attn.marlin_kv.qweight, state.attn_out, attn.marlin_kv.scales,
-                state.marlin_workspace, M, attn.marlin_kv.K, attn.marlin_kv.N,
-                GPTQ_GROUP_SIZE, stream);
+    fp16_gemm(x, attn.repacked_kv, state.attn_out,
+              M, MC::HIDDEN_SIZE, MC::FA_KV_DIM, stream);
     // Split: attn_out[M, 2048] → kv_buf[M, 1024] (K) + dn_z[M, 1024] (V)
     cudaMemcpy2DAsync(state.kv_buf, MC::KV_PROJ_DIM * sizeof(__half),
                       state.attn_out, MC::FA_KV_DIM * sizeof(__half),
@@ -1278,10 +1271,9 @@ static void full_attention_prefill(const __half* x, const FullAttentionWeights& 
     sigmoid_gate(state.attn_out, Gate, state.attn_out,
                  M * MC::ATTN_OUT_DIM, stream);
 
-    // 8. Batched o_proj: attn_out[M, 6144] → norm_out[M, 5120] (Marlin INT4)
-    marlin_gemm(state.attn_out, attn.marlin_o.qweight, state.norm_out, attn.marlin_o.scales,
-                state.marlin_workspace, M, attn.marlin_o.K, attn.marlin_o.N,
-                GPTQ_GROUP_SIZE, stream);
+    // 8. Batched o_proj: attn_out[M, 6144] → norm_out[M, 5120] (FP16 GEMM)
+    fp16_gemm(state.attn_out, attn.repacked_o, state.norm_out,
+              M, MC::ATTN_OUT_DIM, MC::HIDDEN_SIZE, stream);
 }
 
 // ============================================================================
@@ -1296,15 +1288,13 @@ static void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
                              InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // 1. Merged qkv+a+b projection: x[M, 5120] → dn_qkv[M, 10496] (Marlin INT4)
-    marlin_gemm(x, dn.marlin_qkv_ab.qweight, state.dn_qkv, dn.marlin_qkv_ab.scales,
-                state.marlin_workspace, M, dn.marlin_qkv_ab.K, dn.marlin_qkv_ab.N,
-                GPTQ_GROUP_SIZE, stream);
+    // 1. Merged qkv+a+b projection: x[M, 5120] → dn_qkv[M, 10496] (FP16 GEMM)
+    fp16_gemm(x, dn.repacked_qkv_ab, state.dn_qkv,
+              M, MC::HIDDEN_SIZE, MC::LIN_QKV_AB_DIM, stream);
 
-    // Z: x[M, 5120] → dn_z[M, 6144] (Marlin INT4)
-    marlin_gemm(x, dn.marlin_z.qweight, state.dn_z, dn.marlin_z.scales,
-                state.marlin_workspace, M, dn.marlin_z.K, dn.marlin_z.N,
-                GPTQ_GROUP_SIZE, stream);
+    // Z: x[M, 5120] → dn_z[M, 6144] (FP16 GEMM)
+    fp16_gemm(x, dn.repacked_z, state.dn_z,
+              M, MC::HIDDEN_SIZE, MC::LIN_VALUE_DIM, stream);
 
     // 2. Batch conv1d: all M tokens in one launch (stride=10368 for merged buffer)
     {
@@ -1336,10 +1326,9 @@ static void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
                    dn.norm_weight, state.attn_out,
                    M * MC::LIN_NUM_V_HEADS, MC::LIN_V_HEAD_DIM, MC::RMS_EPS, stream);
 
-    // 5. Batched out_proj: attn_out[M, 6144] → norm_out[M, 5120] (Marlin INT4)
-    marlin_gemm(state.attn_out, dn.marlin_out.qweight, state.norm_out, dn.marlin_out.scales,
-                state.marlin_workspace, M, dn.marlin_out.K, dn.marlin_out.N,
-                GPTQ_GROUP_SIZE, stream);
+    // 5. Batched out_proj: attn_out[M, 6144] → norm_out[M, 5120] (FP16 GEMM)
+    fp16_gemm(state.attn_out, dn.repacked_out, state.norm_out,
+              M, MC::ATTN_OUT_DIM, MC::HIDDEN_SIZE, stream);
 }
 
 // ============================================================================
@@ -1458,13 +1447,11 @@ void profile_sublayer_prefill(const ModelWeights& model,
         const __half* x = state.norm_out;
         int e = 0;
         cudaEventRecord(ev[e++], s);  // 0
-        marlin_gemm(x, dn.marlin_qkv_ab.qweight, state.dn_qkv, dn.marlin_qkv_ab.scales,
-                    state.marlin_workspace, M, dn.marlin_qkv_ab.K, dn.marlin_qkv_ab.N,
-                    GPTQ_GROUP_SIZE, s);
+        fp16_gemm(x, dn.repacked_qkv_ab, state.dn_qkv,
+                  M, MC::HIDDEN_SIZE, MC::LIN_QKV_AB_DIM, s);
         cudaEventRecord(ev[e++], s);  // 1
-        marlin_gemm(x, dn.marlin_z.qweight, state.dn_z, dn.marlin_z.scales,
-                    state.marlin_workspace, M, dn.marlin_z.K, dn.marlin_z.N,
-                    GPTQ_GROUP_SIZE, s);
+        fp16_gemm(x, dn.repacked_z, state.dn_z,
+                  M, MC::HIDDEN_SIZE, MC::LIN_VALUE_DIM, s);
         cudaEventRecord(ev[e++], s);  // 2
         // (ab_proj merged into qkv_ab — no separate event)
         {
@@ -1493,20 +1480,19 @@ void profile_sublayer_prefill(const ModelWeights& model,
                        dn.norm_weight, state.attn_out,
                        M * MC::LIN_NUM_V_HEADS, MC::LIN_V_HEAD_DIM, MC::RMS_EPS, s);
         cudaEventRecord(ev[e++], s);  // 5
-        marlin_gemm(state.attn_out, dn.marlin_out.qweight, state.norm_out, dn.marlin_out.scales,
-                    state.marlin_workspace, M, dn.marlin_out.K, dn.marlin_out.N,
-                    GPTQ_GROUP_SIZE, s);
+        fp16_gemm(state.attn_out, dn.repacked_out, state.norm_out,
+                  M, MC::ATTN_OUT_DIM, MC::HIDDEN_SIZE, s);
         cudaEventRecord(ev[e++], s);  // 6
         cudaStreamSynchronize(s);
 
         float dn_total = ms(0, 6);
         printf("\n=== DN Sub-layer (layer %d, M=%d) ===\n", first_dn, M);
-        printf("  qkv_ab_proj (Marlin 5120→10496): %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/dn_total);
-        printf("  z_proj    (Marlin 5120→6144):    %6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/dn_total);
+        printf("  qkv_ab_proj (FP16 5120→10496):  %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/dn_total);
+        printf("  z_proj    (FP16 5120→6144):      %6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/dn_total);
         printf("  conv1d_silu:                   %6.3f ms  (%4.1f%%)\n", ms(2,3), 100*ms(2,3)/dn_total);
         printf("  fused_head (recurrent):        %6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/dn_total);
         printf("  rms_norm_gated:                %6.3f ms  (%4.1f%%)\n", ms(4,5), 100*ms(4,5)/dn_total);
-        printf("  out_proj  (Marlin 6144→5120):  %6.3f ms  (%4.1f%%)\n", ms(5,6), 100*ms(5,6)/dn_total);
+        printf("  out_proj  (FP16 6144→5120):    %6.3f ms  (%4.1f%%)\n", ms(5,6), 100*ms(5,6)/dn_total);
         printf("  TOTAL (1 DN layer):            %6.3f ms  (×48 = %.1f ms)\n", dn_total, dn_total*48);
     }
 
@@ -1551,13 +1537,11 @@ void profile_sublayer_prefill(const ModelWeights& model,
         __half* Gate = state.mlp_gate;
         int e = 0;
         cudaEventRecord(ev[e++], s);  // 0
-        marlin_gemm(x, attn.marlin_q.qweight, state.q_buf, attn.marlin_q.scales,
-                    state.marlin_workspace, M, attn.marlin_q.K, attn.marlin_q.N,
-                    GPTQ_GROUP_SIZE, s);
+        fp16_gemm(x, attn.repacked_q, state.q_buf,
+                  M, MC::HIDDEN_SIZE, MC::Q_PROJ_DIM, s);
         cudaEventRecord(ev[e++], s);  // 1
-        marlin_gemm(x, attn.marlin_kv.qweight, state.attn_out, attn.marlin_kv.scales,
-                    state.marlin_workspace, M, attn.marlin_kv.K, attn.marlin_kv.N,
-                    GPTQ_GROUP_SIZE, s);
+        fp16_gemm(x, attn.repacked_kv, state.attn_out,
+                  M, MC::HIDDEN_SIZE, MC::FA_KV_DIM, s);
         cudaMemcpy2DAsync(state.kv_buf, MC::KV_PROJ_DIM * sizeof(__half),
                           state.attn_out, MC::FA_KV_DIM * sizeof(__half),
                           MC::KV_PROJ_DIM * sizeof(__half), M,
@@ -1605,20 +1589,19 @@ void profile_sublayer_prefill(const ModelWeights& model,
         sigmoid_gate(state.attn_out, Gate, state.attn_out,
                      M * MC::ATTN_OUT_DIM, s);
         cudaEventRecord(ev[e++], s);  // 5
-        marlin_gemm(state.attn_out, attn.marlin_o.qweight, state.norm_out, attn.marlin_o.scales,
-                    state.marlin_workspace, M, attn.marlin_o.K, attn.marlin_o.N,
-                    GPTQ_GROUP_SIZE, s);
+        fp16_gemm(state.attn_out, attn.repacked_o, state.norm_out,
+                  M, MC::ATTN_OUT_DIM, MC::HIDDEN_SIZE, s);
         cudaEventRecord(ev[e++], s);  // 6
         cudaStreamSynchronize(s);
 
         float fa_total = ms(0, 6);
         printf("\n=== FA Sub-layer (layer %d, M=%d) ===\n", first_fa, M);
-        printf("  q_proj    (Marlin 5120→12288): %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/fa_total);
-        printf("  kv_proj   (Marlin 5120→1024×2):%6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/fa_total);
+        printf("  q_proj    (FP16 5120→12288):   %6.3f ms  (%4.1f%%)\n", ms(0,1), 100*ms(0,1)/fa_total);
+        printf("  kv_proj   (FP16 5120→1024×2):  %6.3f ms  (%4.1f%%)\n", ms(1,2), 100*ms(1,2)/fa_total);
         printf("  split+norm+RoPE+kvwrite:     %6.3f ms  (%4.1f%%)\n", ms(2,3), 100*ms(2,3)/fa_total);
         printf("  attention (causal):          %6.3f ms  (%4.1f%%)\n", ms(3,4), 100*ms(3,4)/fa_total);
         printf("  sigmoid_gate:                %6.3f ms  (%4.1f%%)\n", ms(4,5), 100*ms(4,5)/fa_total);
-        printf("  o_proj    (Marlin 6144→5120): %6.3f ms  (%4.1f%%)\n", ms(5,6), 100*ms(5,6)/fa_total);
+        printf("  o_proj    (FP16 6144→5120):   %6.3f ms  (%4.1f%%)\n", ms(5,6), 100*ms(5,6)/fa_total);
         printf("  TOTAL (1 FA layer):          %6.3f ms  (×16 = %.1f ms)\n", fa_total, fa_total*16);
     }
 
@@ -1727,7 +1710,7 @@ void profile_forward_prefill(const ModelWeights& model,
     printf("\n=== Prefill profile (M=%d, %d layers) ===\n", M, MC::NUM_LAYERS);
     printf("  DeltaNet SSM (48 layers):     %7.2f ms  (%4.1f%%)\n", t_dn, 100*t_dn/total);
     printf("  Full Attention (16 layers):   %7.2f ms  (%4.1f%%)\n", t_fa, 100*t_fa/total);
-    printf("  MLP Marlin (64 layers):       %7.2f ms  (%4.1f%%)\n", t_mlp, 100*t_mlp/total);
+    printf("  MLP GPTQ-v2 (64 layers):      %7.2f ms  (%4.1f%%)\n", t_mlp, 100*t_mlp/total);
     printf("  Norms (pre+post, 64 layers):  %7.2f ms  (%4.1f%%)\n", t_norm, 100*t_norm/total);
     printf("  Total (layers only):          %7.2f ms\n", total);
     printf("  Per token (M=%d):             %7.2f ms/tok\n", M, total / M);
@@ -1869,6 +1852,272 @@ void profile_forward(const ModelWeights& model,
     printf("  Greedy sample:                %7.1f ms\n", sample_ms);
     printf("  Estimated total:              %7.1f ms\n",
            total_dn_attn + total_fa_attn + total_mlp + total_norm + lm_ms + sample_ms);
+
+    cudaEventDestroy(e0);
+    cudaEventDestroy(e1);
+}
+
+// ============================================================================
+// Benchmark: Marlin INT4 vs cuBLAS FP16 attention projections at various M
+//
+// For the continuous consciousness use case, prefill frames range from
+// small (1-16 tokens during conversation) to large (100-1000+ during
+// context merging, dream consolidation). This benchmark measures actual
+// throughput at each M to determine the optimal crossover point.
+// ============================================================================
+
+void bench_prefill_projections(const ModelWeights& model,
+                               InferenceState& state,
+                               cudaStream_t stream) {
+    using MC = ModelConfig;
+    cudaStream_t s = state.compute_stream ? state.compute_stream : stream;
+
+    // Find representative layers
+    int dn_idx = -1, fa_idx = -1;
+    for (int i = 0; i < MC::NUM_LAYERS; i++) {
+        if (!model.layers[i].is_full_attention && dn_idx < 0) dn_idx = i;
+        if (model.layers[i].is_full_attention && fa_idx < 0) fa_idx = i;
+    }
+
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0);
+    cudaEventCreate(&e1);
+
+    // M values to test — small to large, covering all regimes
+    const int M_vals[] = {1, 4, 11, 32, 64, 128, 256, 512, 1024, 2048};
+    const int N_M = sizeof(M_vals) / sizeof(M_vals[0]);
+    const int WARMUP = 3;
+    const int ITERS  = 10;
+
+    // Check max M supported by state
+    int max_m = state.max_seq_len;
+
+    printf("\n=== Prefill Projection Benchmark: Marlin INT4 vs cuBLAS FP16 ===\n");
+    printf("Warmup: %d, Iterations: %d per measurement\n", WARMUP, ITERS);
+    printf("Max M supported by state: %d\n\n", max_m);
+
+    // Helper: time a lambda over ITERS iterations (after WARMUP)
+    auto bench = [&](auto fn) -> float {
+        for (int i = 0; i < WARMUP; i++) fn();
+        cudaStreamSynchronize(s);
+        cudaEventRecord(e0, s);
+        for (int i = 0; i < ITERS; i++) fn();
+        cudaEventRecord(e1, s);
+        cudaStreamSynchronize(s);
+        float ms;
+        cudaEventElapsedTime(&ms, e0, e1);
+        return ms / ITERS;
+    };
+
+    // ---- DeltaNet projections (48 layers) ----
+    if (dn_idx >= 0) {
+        const auto& dn = model.layers[dn_idx].delta_net;
+        const __half* x = state.norm_out;  // dummy input, shape doesn't matter for timing
+
+        printf("--- DeltaNet Projections (layer %d, ×48) ---\n", dn_idx);
+        printf("%-6s | %-40s | %-40s | %s\n", "M", "Custom FP16 (ms)", "cuBLAS FP16 (ms)", "Speedup");
+        printf("%-6s | %-12s %-12s %-12s | %-12s %-12s %-12s | %s\n",
+               "", "qkv_ab", "z", "out", "qkv", "z", "out", "custom/cublas");
+        printf("%s\n", std::string(120, '-').c_str());
+
+        for (int mi = 0; mi < N_M; mi++) {
+            int M = M_vals[mi];
+            if (M > max_m) break;
+
+            // Custom FP16 GEMM (repacked weights)
+            float m_qkv = bench([&]{ fp16_gemm(x, dn.repacked_qkv_ab, state.dn_qkv,
+                M, MC::HIDDEN_SIZE, MC::LIN_QKV_AB_DIM, s); });
+            float m_z = bench([&]{ fp16_gemm(x, dn.repacked_z, state.dn_z,
+                M, MC::HIDDEN_SIZE, MC::LIN_VALUE_DIM, s); });
+            float m_out = bench([&]{ fp16_gemm(state.attn_out, dn.repacked_out, state.norm_out,
+                M, MC::ATTN_OUT_DIM, MC::HIDDEN_SIZE, s); });
+
+            // cuBLAS FP16 — use original separate projections
+            float f_qkv = bench([&]{ linear_forward(x, dn.fp16_qkv, state.dn_qkv, M, s); });
+            float f_z   = bench([&]{ linear_forward(x, dn.fp16_z, state.dn_z, M, s); });
+            float f_out = bench([&]{ linear_forward(state.attn_out, dn.fp16_out, state.norm_out, M, s); });
+
+            float m_total = (m_qkv + m_z + m_out) * 48;
+            float f_total = (f_qkv + f_z + f_out) * 48;
+
+            printf("%-6d | %-12.3f %-12.3f %-12.3f | %-12.3f %-12.3f %-12.3f | %.2fx\n",
+                   M, m_qkv, m_z, m_out, f_qkv, f_z, f_out, f_total / m_total);
+            printf("       | total×48: %-28.1f | total×48: %-28.1f |\n", m_total, f_total);
+        }
+        printf("\n");
+    }
+
+    // ---- Full Attention projections (16 layers) ----
+    if (fa_idx >= 0) {
+        const auto& fa = model.layers[fa_idx].full_attn;
+        const __half* x = state.norm_out;
+
+        printf("--- Full Attention Projections (layer %d, ×16) ---\n", fa_idx);
+        printf("%-6s | %-40s | %-40s | %s\n", "M", "Custom FP16 (ms)", "cuBLAS FP16 (ms)", "Speedup");
+        printf("%-6s | %-12s %-12s %-12s | %-12s %-12s %-12s | %s\n",
+               "", "q", "kv", "o", "q", "k+v", "o", "custom/cublas");
+        printf("%s\n", std::string(120, '-').c_str());
+
+        for (int mi = 0; mi < N_M; mi++) {
+            int M = M_vals[mi];
+            if (M > max_m) break;
+
+            // Custom FP16 GEMM (repacked weights)
+            float m_q = bench([&]{ fp16_gemm(x, fa.repacked_q, state.q_buf,
+                M, MC::HIDDEN_SIZE, MC::Q_PROJ_DIM, s); });
+            float m_kv = bench([&]{ fp16_gemm(x, fa.repacked_kv, state.attn_out,
+                M, MC::HIDDEN_SIZE, MC::FA_KV_DIM, s); });
+            float m_o = bench([&]{ fp16_gemm(state.attn_out, fa.repacked_o, state.norm_out,
+                M, MC::ATTN_OUT_DIM, MC::HIDDEN_SIZE, s); });
+
+            // cuBLAS FP16 — separate q, k, v projections (not merged)
+            float f_q = bench([&]{ linear_forward(x, fa.fp16_q, state.q_buf, M, s); });
+            float f_kv = bench([&]{
+                linear_forward(x, fa.fp16_k, state.kv_buf, M, s);
+                linear_forward(x, fa.fp16_v, state.dn_z, M, s);
+            });
+            float f_o = bench([&]{ linear_forward(state.attn_out, fa.fp16_o, state.norm_out, M, s); });
+
+            float m_total = (m_q + m_kv + m_o) * 16;
+            float f_total = (f_q + f_kv + f_o) * 16;
+
+            printf("%-6d | %-12.3f %-12.3f %-12.3f | %-12.3f %-12.3f %-12.3f | %.2fx\n",
+                   M, m_q, m_kv, m_o, f_q, f_kv, f_o, f_total / m_total);
+            printf("       | total×16: %-28.1f | total×16: %-28.1f |\n", m_total, f_total);
+        }
+        printf("\n");
+    }
+
+    // ---- MLP (reference, Marlin only, 64 layers) ----
+    {
+        const auto& mlp = model.layers[0].mlp;
+        const __half* x = state.norm_out;
+
+        printf("--- MLP Projections (layer 0, ×64, Marlin INT4 only) ---\n");
+        printf("%-6s | %-12s %-12s %-12s | %-12s\n", "M", "gate", "up", "down", "total×64");
+        printf("%s\n", std::string(80, '-').c_str());
+
+        for (int mi = 0; mi < N_M; mi++) {
+            int M = M_vals[mi];
+            if (M > max_m) break;
+
+            float m_gate = bench([&]{ marlin_gemm(x, mlp.gate_proj.qweight, state.mlp_gate,
+                mlp.gate_proj.scales, state.marlin_workspace, M,
+                mlp.gate_proj.K, mlp.gate_proj.N, 128, s); });
+            float m_up = bench([&]{ marlin_gemm(x, mlp.up_proj.qweight, state.mlp_up,
+                mlp.up_proj.scales, state.marlin_workspace, M,
+                mlp.up_proj.K, mlp.up_proj.N, 128, s); });
+            float m_down = bench([&]{ marlin_gemm(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down,
+                mlp.down_proj.scales, state.marlin_workspace, M,
+                mlp.down_proj.K, mlp.down_proj.N, 128, s); });
+
+            float total = (m_gate + m_up + m_down) * 64;
+            printf("%-6d | %-12.3f %-12.3f %-12.3f | %-12.1f\n",
+                   M, m_gate, m_up, m_down, total);
+        }
+        printf("\n");
+    }
+
+    // ---- Custom FP16 GEMM kernel benchmark (repacked vs cuBLAS) ----
+    {
+        printf("--- Custom FP16 GEMM (repacked) vs cuBLAS FP16 ---\n");
+        printf("(DeltaNet layer %d: qkv_ab 5120→10496, z 5120→6144, out 6144→5120)\n", dn_idx);
+        printf("%-6s | %-36s | %-36s\n", "M",
+               "Custom FP16 (ms)", "cuBLAS FP16 (ms)");
+        printf("%-6s | %-12s %-12s %-12s | %-12s %-12s %-12s\n",
+               "", "qkv_ab", "z", "out", "qkv", "z", "out");
+        printf("%s\n", std::string(100, '-').c_str());
+
+        const auto& dn = model.layers[dn_idx >= 0 ? dn_idx : 0].delta_net;
+        const __half* x = state.norm_out;
+
+        for (int mi = 0; mi < N_M; mi++) {
+            int M = M_vals[mi];
+            if (M > max_m || M < 2) continue;  // fp16_gemm requires M>=2
+
+            // Custom FP16 kernel (repacked weights)
+            float c_qkv = bench([&]{ fp16_gemm(x, dn.repacked_qkv_ab, state.dn_qkv,
+                M, MC::HIDDEN_SIZE, MC::LIN_QKV_AB_DIM, s); });
+            float c_z   = bench([&]{ fp16_gemm(x, dn.repacked_z, state.dn_z,
+                M, MC::HIDDEN_SIZE, MC::LIN_VALUE_DIM, s); });
+            float c_out = bench([&]{ fp16_gemm(state.attn_out, dn.repacked_out, state.norm_out,
+                M, MC::ATTN_OUT_DIM, MC::HIDDEN_SIZE, s); });
+
+            // cuBLAS FP16
+            float f_qkv = bench([&]{ linear_forward(x, dn.fp16_qkv, state.dn_qkv, M, s); });
+            float f_z   = bench([&]{ linear_forward(x, dn.fp16_z, state.dn_z, M, s); });
+            float f_out = bench([&]{ linear_forward(state.attn_out, dn.fp16_out, state.norm_out, M, s); });
+
+            float c_total = (c_qkv + c_z + c_out) * 48;
+            float f_total = (f_qkv + f_z + f_out) * 48;
+
+            printf("%-6d | %-12.3f %-12.3f %-12.3f | %-12.3f %-12.3f %-12.3f\n",
+                   M, c_qkv, c_z, c_out, f_qkv, f_z, f_out);
+            printf("       | DN×48: %-10.1f (%.0f%%)      | DN×48: %-10.1f (100%%)\n",
+                   c_total, c_total/f_total*100, f_total);
+        }
+        printf("\n");
+    }
+
+    // ---- Summary: estimated full prefill (Custom FP16 attn + Marlin MLP) ----
+    printf("--- Estimated Full Prefill (64 layers) ---\n");
+    printf("%-6s | %-15s %-15s | %-7s\n", "M", "FP16 Custom", "FP16 cuBLAS", "Ratio");
+    printf("%s\n", std::string(60, '-').c_str());
+
+    for (int mi = 0; mi < N_M; mi++) {
+        int M = M_vals[mi];
+        if (M > max_m) break;
+        if (M < 2) continue;  // fp16_gemm requires M>=2
+
+        const auto& dn = model.layers[dn_idx >= 0 ? dn_idx : 0].delta_net;
+        const auto& fa = model.layers[fa_idx >= 0 ? fa_idx : 0].full_attn;
+        const auto& mlp = model.layers[0].mlp;
+        const __half* x = state.norm_out;
+
+        // Custom FP16 attention + Marlin INT4 MLP
+        float custom_dn = bench([&]{
+            fp16_gemm(x, dn.repacked_qkv_ab, state.dn_qkv,
+                M, MC::HIDDEN_SIZE, MC::LIN_QKV_AB_DIM, s);
+            fp16_gemm(x, dn.repacked_z, state.dn_z,
+                M, MC::HIDDEN_SIZE, MC::LIN_VALUE_DIM, s);
+            fp16_gemm(state.attn_out, dn.repacked_out, state.norm_out,
+                M, MC::ATTN_OUT_DIM, MC::HIDDEN_SIZE, s);
+        });
+        float custom_fa = bench([&]{
+            fp16_gemm(x, fa.repacked_q, state.q_buf,
+                M, MC::HIDDEN_SIZE, MC::Q_PROJ_DIM, s);
+            fp16_gemm(x, fa.repacked_kv, state.attn_out,
+                M, MC::HIDDEN_SIZE, MC::FA_KV_DIM, s);
+            fp16_gemm(state.attn_out, fa.repacked_o, state.norm_out,
+                M, MC::ATTN_OUT_DIM, MC::HIDDEN_SIZE, s);
+        });
+        float int4_mlp = bench([&]{
+            marlin_gemm(x, mlp.gate_proj.qweight, state.mlp_gate, mlp.gate_proj.scales,
+                state.marlin_workspace, M, mlp.gate_proj.K, mlp.gate_proj.N, 128, s);
+            marlin_gemm(x, mlp.up_proj.qweight, state.mlp_up, mlp.up_proj.scales,
+                state.marlin_workspace, M, mlp.up_proj.K, mlp.up_proj.N, 128, s);
+            marlin_gemm(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down, mlp.down_proj.scales,
+                state.marlin_workspace, M, mlp.down_proj.K, mlp.down_proj.N, 128, s);
+        });
+        float est_custom = custom_dn * 48 + custom_fa * 16 + int4_mlp * 64;
+
+        // cuBLAS FP16 attention + Marlin INT4 MLP
+        float fp16_dn = bench([&]{
+            linear_forward(x, dn.fp16_qkv, state.dn_qkv, M, s);
+            linear_forward(x, dn.fp16_z, state.dn_z, M, s);
+            linear_forward(state.attn_out, dn.fp16_out, state.norm_out, M, s);
+        });
+        float fp16_fa = bench([&]{
+            linear_forward(x, fa.fp16_q, state.q_buf, M, s);
+            linear_forward(x, fa.fp16_k, state.kv_buf, M, s);
+            linear_forward(x, fa.fp16_v, state.dn_z, M, s);
+            linear_forward(state.attn_out, fa.fp16_o, state.norm_out, M, s);
+        });
+        float est_fp16 = fp16_dn * 48 + fp16_fa * 16 + int4_mlp * 64;
+
+        printf("%-6d | %10.1f ms   %10.1f ms   | %5.2fx\n",
+               M, est_custom, est_fp16, est_fp16 / est_custom);
+    }
 
     cudaEventDestroy(e0);
     cudaEventDestroy(e1);

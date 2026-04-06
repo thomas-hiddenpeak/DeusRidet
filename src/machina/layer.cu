@@ -500,7 +500,7 @@ __global__ void fp16_gemv_kernel(
     }
 }
 
-static void fp16_gemv(const __half* x, const __half* W, __half* y,
+void fp16_gemv(const __half* x, const __half* W, __half* y,
                       int K, int N, cudaStream_t stream) {
     int grid = (N + FP16_GEMV_WARPS - 1) / FP16_GEMV_WARPS;
     fp16_gemv_kernel<<<grid, FP16_GEMV_BLOCK, 0, stream>>>(x, W, y, K, N);

@@ -9,6 +9,7 @@
 #include "model.h"
 #include "layer.h"
 #include "marlin.h"
+#include "fp16_gemm.h"
 #include "safetensors.h"
 #include "allocator.h"
 #include "convert.h"
@@ -108,6 +109,13 @@ static void assign_int8_linear(Int8Linear& int8, void* d_ptr, const Tensor& tens
     quantize_fp16_to_int8(static_cast<const __half*>(d_ptr), int8, N, K, stream);
 }
 
+// Save FP16 pointer from pool (no extra alloc — data lives in pool_blocks)
+static void assign_fp16_linear(Linear& lin, void* d_ptr, const Tensor& tensor) {
+    lin.weight = static_cast<__half*>(d_ptr);
+    lin.out_features = (int)tensor.shape()[0];
+    lin.in_features  = (int)tensor.shape()[1];
+}
+
 // Set GPTQ qweight fields
 static void assign_gptq_qweight(GptqWeight& gptq, void* d_ptr, const Tensor& tensor) {
     gptq.qweight = static_cast<const uint32_t*>(d_ptr);
@@ -179,19 +187,19 @@ static void dispatch_tensor(const std::string& name, Tensor& tensor,
     // Full Attention
     else if (strcmp(suffix, "self_attn.q_proj.weight") == 0) {
         copy_tensor_to_device(d_ptr, tensor, false, stream);
-        assign_int8_linear(lw.full_attn.q_proj, d_ptr, tensor, stream);
+        assign_fp16_linear(lw.full_attn.fp16_q, d_ptr, tensor);
     }
     else if (strcmp(suffix, "self_attn.k_proj.weight") == 0) {
         copy_tensor_to_device(d_ptr, tensor, false, stream);
-        assign_int8_linear(lw.full_attn.k_proj, d_ptr, tensor, stream);
+        assign_fp16_linear(lw.full_attn.fp16_k, d_ptr, tensor);
     }
     else if (strcmp(suffix, "self_attn.v_proj.weight") == 0) {
         copy_tensor_to_device(d_ptr, tensor, false, stream);
-        assign_int8_linear(lw.full_attn.v_proj, d_ptr, tensor, stream);
+        assign_fp16_linear(lw.full_attn.fp16_v, d_ptr, tensor);
     }
     else if (strcmp(suffix, "self_attn.o_proj.weight") == 0) {
         copy_tensor_to_device(d_ptr, tensor, false, stream);
-        assign_int8_linear(lw.full_attn.o_proj, d_ptr, tensor, stream);
+        assign_fp16_linear(lw.full_attn.fp16_o, d_ptr, tensor);
     }
     else if (strcmp(suffix, "self_attn.q_norm.weight") == 0) {
         lw.full_attn.q_norm = static_cast<__half*>(d_ptr);
@@ -204,23 +212,23 @@ static void dispatch_tensor(const std::string& name, Tensor& tensor,
     // DeltaNet
     else if (strcmp(suffix, "linear_attn.in_proj_qkv.weight") == 0) {
         copy_tensor_to_device(d_ptr, tensor, false, stream);
-        assign_int8_linear(lw.delta_net.in_proj_qkv, d_ptr, tensor, stream);
+        assign_fp16_linear(lw.delta_net.fp16_qkv, d_ptr, tensor);
     }
     else if (strcmp(suffix, "linear_attn.in_proj_z.weight") == 0) {
         copy_tensor_to_device(d_ptr, tensor, false, stream);
-        assign_int8_linear(lw.delta_net.in_proj_z, d_ptr, tensor, stream);
+        assign_fp16_linear(lw.delta_net.fp16_z, d_ptr, tensor);
     }
     else if (strcmp(suffix, "linear_attn.in_proj_a.weight") == 0) {
         copy_tensor_to_device(d_ptr, tensor, false, stream);
-        assign_int8_linear(lw.delta_net.in_proj_a, d_ptr, tensor, stream);
+        assign_fp16_linear(lw.delta_net.fp16_a, d_ptr, tensor);
     }
     else if (strcmp(suffix, "linear_attn.in_proj_b.weight") == 0) {
         copy_tensor_to_device(d_ptr, tensor, false, stream);
-        assign_int8_linear(lw.delta_net.in_proj_b, d_ptr, tensor, stream);
+        assign_fp16_linear(lw.delta_net.fp16_b, d_ptr, tensor);
     }
     else if (strcmp(suffix, "linear_attn.out_proj.weight") == 0) {
         copy_tensor_to_device(d_ptr, tensor, false, stream);
-        assign_int8_linear(lw.delta_net.out_proj, d_ptr, tensor, stream);
+        assign_fp16_linear(lw.delta_net.fp16_out, d_ptr, tensor);
     }
     else if (strcmp(suffix, "linear_attn.conv1d.weight") == 0) {
         lw.delta_net.conv1d_weight = static_cast<__half*>(d_ptr);
@@ -269,7 +277,8 @@ static void dispatch_tensor(const std::string& name, Tensor& tensor,
 // Public API: load_model_weights (stream_load + pool allocation)
 // ============================================================================
 
-bool load_model_weights(const std::string& model_dir, ModelWeights& weights) {
+bool load_model_weights(const std::string& model_dir, ModelWeights& weights,
+                        bool repack_marlin_flag) {
     using Clock = std::chrono::steady_clock;
     auto t0 = Clock::now();
     using MC = ModelConfig;
@@ -360,7 +369,8 @@ bool load_model_weights(const std::string& model_dir, ModelWeights& weights) {
                  elapsed, (weights.total_bytes / 1048576.0) / elapsed);
 
         // Repack GPTQ weights to Marlin tile format (in-place)
-        repack_all_marlin(weights);
+        if (repack_marlin_flag)
+            repack_all_marlin(weights);
     } else {
         LOG_ERROR("Model", "Weight loading FAILED");
     }
@@ -369,42 +379,51 @@ bool load_model_weights(const std::string& model_dir, ModelWeights& weights) {
 }
 
 // ============================================================================
-// merge_projection_weights — create merged INT8 weights for prefill
+// merge_projection_weights — create repacked FP16 weights for prefill GEMM
 //
-// DN: qkv[10240,5120] + a[48,5120] + b[48,5120] → merged[10496,5120] (Marlin 256-aligned)
-// FA: k[1024,5120] + v[1024,5120] → merged[2048,5120]
+// For prefill (M>1), the custom fp16_gemm kernel requires tile-repacked weights.
+// This function creates repacked FP16 weights for all attention projections:
+//   DN: qkv+a+b merged → repacked_qkv_ab [10496,5120]
+//       z → repacked_z [6144,5120], out → repacked_out [5120,6144]
+//   FA: q → repacked_q [12288,5120]
+//       k+v merged → repacked_kv [2048,5120], o → repacked_o [5120,6144]
+// Decode (M=1) uses original FP16 row-major weights with fp16_gemv.
 // ============================================================================
 
-static bool create_merged_int8(const Int8Linear* src, int nsrc,
-                               Int8Linear& merged, int merged_N, int K) {
-    size_t weight_bytes = (size_t)merged_N * K * sizeof(int8_t);
-    size_t scales_bytes = (size_t)merged_N * sizeof(float);
+// Helper: allocate + repack a single FP16 weight for fp16_gemm
+static bool repack_fp16_weight(const __half* src, __half*& dst, int N, int K) {
+    size_t bytes = (size_t)N * K * sizeof(__half);
+    if (cudaMalloc(&dst, bytes) != cudaSuccess) return false;
+    fp16_repack_b(src, dst, N, K);
+    return true;
+}
 
-    if (cudaMalloc(&merged.weight, weight_bytes) != cudaSuccess) return false;
-    if (cudaMalloc(&merged.scales, scales_bytes) != cudaSuccess) {
-        cudaFree(merged.weight); merged.weight = nullptr;
-        return false;
-    }
+// Helper: create merged FP16 from multiple row-major sources, then repack
+static bool merge_and_repack_fp16(const Linear* srcs, int nsrc,
+                                  __half*& repacked, int merged_N, int K) {
+    size_t bytes = (size_t)merged_N * K * sizeof(__half);
 
-    // Zero-fill (handles padding rows automatically)
-    cudaMemset(merged.weight, 0, weight_bytes);
-    cudaMemset(merged.scales, 0, scales_bytes);
+    // Temporary merged buffer
+    __half* temp = nullptr;
+    if (cudaMalloc(&temp, bytes) != cudaSuccess) return false;
+    cudaMemset(temp, 0, bytes);  // zero-fill (handles padding rows)
 
     // Copy rows from each source
-    int row_offset = 0;
+    size_t row_offset = 0;
     for (int i = 0; i < nsrc; i++) {
-        int N_src = src[i].out_features;
-        cudaMemcpy(merged.weight + (size_t)row_offset * K,
-                   src[i].weight, (size_t)N_src * K * sizeof(int8_t),
-                   cudaMemcpyDeviceToDevice);
-        cudaMemcpy(merged.scales + row_offset,
-                   src[i].scales, (size_t)N_src * sizeof(float),
-                   cudaMemcpyDeviceToDevice);
+        int N_src = srcs[i].out_features;
+        cudaMemcpy(temp + row_offset * K, srcs[i].weight,
+                   (size_t)N_src * K * sizeof(__half), cudaMemcpyDeviceToDevice);
         row_offset += N_src;
     }
 
-    merged.in_features  = K;
-    merged.out_features = merged_N;
+    // Allocate repacked buffer and repack
+    if (cudaMalloc(&repacked, bytes) != cudaSuccess) {
+        cudaFree(temp);
+        return false;
+    }
+    fp16_repack_b(temp, repacked, merged_N, K);
+    cudaFree(temp);
     return true;
 }
 
@@ -416,148 +435,65 @@ bool merge_projection_weights(ModelWeights& weights) {
         auto& lw = weights.layers[i];
 
         if (!MC::is_full_attention(i)) {
-            // DN: merge qkv + a + b
             auto& dn = lw.delta_net;
-            Int8Linear srcs[3] = { dn.in_proj_qkv, dn.in_proj_a, dn.in_proj_b };
-            if (!create_merged_int8(srcs, 3, dn.in_proj_qkv_ab,
-                                    MC::LIN_QKV_AB_DIM, MC::HIDDEN_SIZE)) {
-                LOG_ERROR("Model", "Failed to merge DN qkv+ab for layer %d", i);
+
+            // Merged qkv+a+b → repacked [10496, 5120]
+            Linear srcs[3] = { dn.fp16_qkv, dn.fp16_a, dn.fp16_b };
+            if (!merge_and_repack_fp16(srcs, 3, dn.repacked_qkv_ab,
+                                       MC::LIN_QKV_AB_DIM, MC::HIDDEN_SIZE)) {
+                LOG_ERROR("Model", "Failed to repack DN qkv_ab for layer %d", i);
                 return false;
             }
-            total_bytes += (size_t)MC::LIN_QKV_AB_DIM * MC::HIDDEN_SIZE + MC::LIN_QKV_AB_DIM * 4;
+            total_bytes += (size_t)MC::LIN_QKV_AB_DIM * MC::HIDDEN_SIZE * sizeof(__half);
+
+            // z → repacked [6144, 5120]
+            if (!repack_fp16_weight(dn.fp16_z.weight, dn.repacked_z,
+                                    dn.fp16_z.out_features, dn.fp16_z.in_features)) {
+                LOG_ERROR("Model", "Failed to repack DN z for layer %d", i);
+                return false;
+            }
+            total_bytes += (size_t)dn.fp16_z.out_features * dn.fp16_z.in_features * sizeof(__half);
+
+            // out → repacked [5120, 6144]
+            if (!repack_fp16_weight(dn.fp16_out.weight, dn.repacked_out,
+                                    dn.fp16_out.out_features, dn.fp16_out.in_features)) {
+                LOG_ERROR("Model", "Failed to repack DN out for layer %d", i);
+                return false;
+            }
+            total_bytes += (size_t)dn.fp16_out.out_features * dn.fp16_out.in_features * sizeof(__half);
         } else {
-            // FA: merge k + v
             auto& fa = lw.full_attn;
-            Int8Linear srcs[2] = { fa.k_proj, fa.v_proj };
-            if (!create_merged_int8(srcs, 2, fa.kv_proj,
-                                    MC::FA_KV_DIM, MC::HIDDEN_SIZE)) {
-                LOG_ERROR("Model", "Failed to merge FA kv for layer %d", i);
+
+            // q → repacked [12288, 5120]
+            if (!repack_fp16_weight(fa.fp16_q.weight, fa.repacked_q,
+                                    fa.fp16_q.out_features, fa.fp16_q.in_features)) {
+                LOG_ERROR("Model", "Failed to repack FA q for layer %d", i);
                 return false;
             }
-            total_bytes += (size_t)MC::FA_KV_DIM * MC::HIDDEN_SIZE + MC::FA_KV_DIM * 4;
+            total_bytes += (size_t)fa.fp16_q.out_features * fa.fp16_q.in_features * sizeof(__half);
+
+            // Merged k+v → repacked [2048, 5120]
+            Linear kv_srcs[2] = { fa.fp16_k, fa.fp16_v };
+            if (!merge_and_repack_fp16(kv_srcs, 2, fa.repacked_kv,
+                                       MC::FA_KV_DIM, MC::HIDDEN_SIZE)) {
+                LOG_ERROR("Model", "Failed to repack FA kv for layer %d", i);
+                return false;
+            }
+            total_bytes += (size_t)MC::FA_KV_DIM * MC::HIDDEN_SIZE * sizeof(__half);
+
+            // o → repacked [5120, 6144]
+            if (!repack_fp16_weight(fa.fp16_o.weight, fa.repacked_o,
+                                    fa.fp16_o.out_features, fa.fp16_o.in_features)) {
+                LOG_ERROR("Model", "Failed to repack FA o for layer %d", i);
+                return false;
+            }
+            total_bytes += (size_t)fa.fp16_o.out_features * fa.fp16_o.in_features * sizeof(__half);
         }
     }
 
     cudaDeviceSynchronize();
-    LOG_INFO("Model", "Merged projection weights: %.1f MB (DN %d layers, FA %d layers)",
+    LOG_INFO("Model", "Repacked FP16 attention weights: %.1f MB (DN %d layers, FA %d layers)",
              total_bytes / 1048576.0, MC::NUM_LAYERS * 3 / 4, MC::NUM_LAYERS / 4);
-    return true;
-}
-
-// ============================================================================
-// quantize_attn_to_marlin — INT8 attention → GPTQ INT4 → Marlin format
-//
-// Re-quantizes INT8 per-channel attention projections to GPTQ INT4 per-group
-// (group_size=128), then repacks to Marlin tile format for prefill GEMM.
-// Halves attention data volume + enables ~90% BW Marlin kernel vs ~75% INT8.
-// ============================================================================
-
-static void quantize_and_repack(const Int8Linear& src, GptqWeight& dst,
-                                int* d_perm, int* d_scale_perm,
-                                void* temp_buf, size_t temp_buf_bytes,
-                                cudaStream_t stream) {
-    // Step 1: INT8 → GPTQ INT4 (per-group symmetric, group_size=128)
-    quantize_int8_to_gptq_int4(src, dst, GPTQ_GROUP_SIZE, stream);
-    cudaStreamSynchronize(stream);
-
-    // Step 2: Repack GPTQ → Marlin tile format (in-place on qweight + scales)
-    repack_gptq_to_marlin(
-        const_cast<uint32_t*>(dst.qweight),
-        const_cast<__half*>(dst.scales),
-        dst.K, dst.N,
-        d_perm, d_scale_perm, temp_buf, temp_buf_bytes, stream);
-}
-
-bool quantize_attn_to_marlin(ModelWeights& weights) {
-    using MC = ModelConfig;
-    printf("[marlin] Re-quantizing attention INT8 → INT4 Marlin...\n");
-
-    auto t0 = std::chrono::steady_clock::now();
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-
-    // Upload permutation tables
-    int* d_perm = nullptr;
-    int* d_scale_perm = nullptr;
-    upload_marlin_perm_tables(&d_perm, &d_scale_perm);
-
-    // Temp buffer for repack: max qweight size across all projections
-    // Largest: q_proj K=5120, N=12288 → (5120/8)*12288 = 7,864,320 uint32 = 30 MB
-    // DN qkv_ab: (5120/8)*10368 = 6,635,520 uint32 = 25.3 MB
-    size_t max_qw_elems = 0;
-    {
-        size_t candidates[] = {
-            (size_t)(MC::HIDDEN_SIZE / 8) * MC::LIN_QKV_AB_DIM,  // qkv_ab
-            (size_t)(MC::HIDDEN_SIZE / 8) * MC::LIN_VALUE_DIM,   // z, out
-            (size_t)(MC::ATTN_OUT_DIM / 8) * MC::HIDDEN_SIZE,    // out_proj
-            (size_t)(MC::HIDDEN_SIZE / 8) * MC::Q_PROJ_DIM,      // q_proj
-            (size_t)(MC::HIDDEN_SIZE / 8) * MC::FA_KV_DIM,       // kv_proj
-            (size_t)(MC::ATTN_OUT_DIM / 8) * MC::HIDDEN_SIZE,    // o_proj
-        };
-        for (auto c : candidates) if (c > max_qw_elems) max_qw_elems = c;
-    }
-    size_t temp_bytes = max_qw_elems * sizeof(uint32_t);
-    void* temp_buf = nullptr;
-    cudaMalloc(&temp_buf, temp_bytes);
-
-    size_t total_int4_bytes = 0;
-    int count = 0;
-
-    for (int i = 0; i < MC::NUM_LAYERS; i++) {
-        auto& lw = weights.layers[i];
-
-        if (!MC::is_full_attention(i)) {
-            auto& dn = lw.delta_net;
-
-            // qkv_ab: merged [10368, 5120] INT8 → INT4 Marlin
-            quantize_and_repack(dn.in_proj_qkv_ab, dn.marlin_qkv_ab,
-                                d_perm, d_scale_perm, temp_buf, temp_bytes, stream);
-            total_int4_bytes += (size_t)(dn.marlin_qkv_ab.K / 8) * dn.marlin_qkv_ab.N * 4;
-
-            // z: [6144, 5120] INT8 → INT4 Marlin
-            quantize_and_repack(dn.in_proj_z, dn.marlin_z,
-                                d_perm, d_scale_perm, temp_buf, temp_bytes, stream);
-            total_int4_bytes += (size_t)(dn.marlin_z.K / 8) * dn.marlin_z.N * 4;
-
-            // out: [5120, 6144] INT8 → INT4 Marlin
-            quantize_and_repack(dn.out_proj, dn.marlin_out,
-                                d_perm, d_scale_perm, temp_buf, temp_bytes, stream);
-            total_int4_bytes += (size_t)(dn.marlin_out.K / 8) * dn.marlin_out.N * 4;
-
-            count += 3;
-        } else {
-            auto& fa = lw.full_attn;
-
-            // q: [12288, 5120] INT8 → INT4 Marlin
-            quantize_and_repack(fa.q_proj, fa.marlin_q,
-                                d_perm, d_scale_perm, temp_buf, temp_bytes, stream);
-            total_int4_bytes += (size_t)(fa.marlin_q.K / 8) * fa.marlin_q.N * 4;
-
-            // kv: merged [2048, 5120] INT8 → INT4 Marlin
-            quantize_and_repack(fa.kv_proj, fa.marlin_kv,
-                                d_perm, d_scale_perm, temp_buf, temp_bytes, stream);
-            total_int4_bytes += (size_t)(fa.marlin_kv.K / 8) * fa.marlin_kv.N * 4;
-
-            // o: [5120, 6144] INT8 → INT4 Marlin
-            quantize_and_repack(fa.o_proj, fa.marlin_o,
-                                d_perm, d_scale_perm, temp_buf, temp_bytes, stream);
-            total_int4_bytes += (size_t)(fa.marlin_o.K / 8) * fa.marlin_o.N * 4;
-
-            count += 3;
-        }
-    }
-
-    cudaStreamSynchronize(stream);
-    cudaStreamDestroy(stream);
-    cudaFree(temp_buf);
-    cudaFree(d_perm);
-    cudaFree(d_scale_perm);
-
-    auto t1 = std::chrono::steady_clock::now();
-    double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    printf("[marlin] Re-quantized %d attention projections: %.1f MB INT4, %.1f ms\n",
-           count, total_int4_bytes / 1048576.0, ms);
-
     return true;
 }
 
@@ -578,28 +514,16 @@ void free_model_weights(ModelWeights& w) {
     if (w.lm_head_int8.scales) { cudaFree(w.lm_head_int8.scales); }
     w.lm_head_int8 = Int8Linear{};
 
-    // Free merged projection weights (allocated by merge_projection_weights)
-    auto free_int8 = [](Int8Linear& l) {
-        if (l.weight) cudaFree(l.weight);
-        if (l.scales) cudaFree(l.scales);
-        l = Int8Linear{};
-    };
-    auto free_gptq = [](GptqWeight& g) {
-        if (g.qweight) cudaFree(const_cast<uint32_t*>(g.qweight));
-        if (g.scales) cudaFree(const_cast<__half*>(g.scales));
-        g = GptqWeight{};
-    };
+    // Free repacked FP16 attention weights (allocated by merge_projection_weights)
+    auto free_half = [](__half*& p) { if (p) { cudaFree(p); p = nullptr; } };
     for (int i = 0; i < ModelConfig::NUM_LAYERS; i++) {
         auto& lw = w.layers[i];
-        free_int8(lw.delta_net.in_proj_qkv_ab);
-        free_int8(lw.full_attn.kv_proj);
-        // Free Marlin INT4 attention weights
-        free_gptq(lw.delta_net.marlin_qkv_ab);
-        free_gptq(lw.delta_net.marlin_z);
-        free_gptq(lw.delta_net.marlin_out);
-        free_gptq(lw.full_attn.marlin_q);
-        free_gptq(lw.full_attn.marlin_kv);
-        free_gptq(lw.full_attn.marlin_o);
+        free_half(lw.delta_net.repacked_qkv_ab);
+        free_half(lw.delta_net.repacked_z);
+        free_half(lw.delta_net.repacked_out);
+        free_half(lw.full_attn.repacked_q);
+        free_half(lw.full_attn.repacked_kv);
+        free_half(lw.full_attn.repacked_o);
     }
 
     // Zero out all pointers (they pointed into freed pool blocks)

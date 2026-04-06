@@ -77,6 +77,10 @@ void sigmoid_gate(const __half* x, const __half* gate, __half* out,
 // Linear (cuBLAS GEMM for non-quantized layers)
 // ============================================================================
 
+// Y[N] = x[K] @ W^T[K,N]  where W is [N,K] row-major. Single-vector GEMV.
+void fp16_gemv(const __half* x, const __half* W, __half* y,
+               int K, int N, cudaStream_t stream = 0);
+
 // Y[M,N] = X[M,K] @ W^T[K,N]  where W is [N,K] row-major
 // Uses cuBLAS FP16 GEMM.
 void linear_forward(const __half* X, const Linear& weight, __half* Y,

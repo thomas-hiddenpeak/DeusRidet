@@ -109,4 +109,10 @@ void profile_sublayer_prefill(const ModelWeights& model,
                               int M, int pos_start, int max_kv_len,
                               cudaStream_t stream = 0);
 
+// Benchmark: Marlin INT4 vs cuBLAS FP16 attention projections at various M.
+// Requires FP16 weight pointers (fp16_*) to be populated during loading.
+void bench_prefill_projections(const ModelWeights& model,
+                               InferenceState& state,
+                               cudaStream_t stream = 0);
+
 } // namespace deusridet

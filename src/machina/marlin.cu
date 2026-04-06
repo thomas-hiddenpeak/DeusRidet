@@ -887,6 +887,12 @@ void marlin_gemm(
     marlin_gemm_impl(A, B, C, s, workspace, M, K, N, groupsize, stream, nullptr);
 }
 
+// WARNING: marlin_gemm_add is BROKEN for in-place mode (C == residual) when
+// slice_count > 1.  The global_reduce path uses C as scratch for partial sums,
+// which corrupts the residual before write_result reads it.  This happens for
+// almost all practical shapes on 16 SMs.  To use safely, pass a SEPARATE output
+// buffer C != residual, then copy C → residual afterwards.  For now, prefer
+// marlin_gemm + elementwise_add instead.
 void marlin_gemm_add(
     const __half* A, const uint32_t* B, __half* C, const __half* s,
     int* workspace, int M, int K, int N,

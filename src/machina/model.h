@@ -91,20 +91,17 @@ struct Int8Linear {
 // ============================================================================
 
 struct DeltaNetWeights {
-    Int8Linear in_proj_qkv;   // 5120 → 10240 (key*2 + value)
-    Int8Linear in_proj_z;     // 5120 → 6144  (value_dim, for gate)
-    Int8Linear in_proj_a;     // 5120 → 48    (num_v_heads, for decay)
-    Int8Linear in_proj_b;     // 5120 → 48    (num_v_heads, for beta)
-    Int8Linear out_proj;      // 6144 → 5120
+    // FP16 weights (point into pool_blocks, no extra alloc)
+    Linear fp16_qkv;   // 5120 → 10240
+    Linear fp16_z;     // 5120 → 6144
+    Linear fp16_a;     // 5120 → 48   (num_v_heads, for decay)
+    Linear fp16_b;     // 5120 → 48   (num_v_heads, for beta)
+    Linear fp16_out;   // 6144 → 5120
 
-    // Merged qkv+a+b projection for prefill (created post-load)
-    // [10368, 5120] = qkv[0:10240] + a[10240:10288] + b[10288:10336] + pad[10336:10368]
-    Int8Linear in_proj_qkv_ab;  // 5120 → 10368 (prefill only)
-
-    // Marlin INT4 weights for prefill (re-quantized from INT8 at load time)
-    GptqWeight marlin_qkv_ab;  // 5120 → 10368 (Marlin tile format)
-    GptqWeight marlin_z;       // 5120 → 6144
-    GptqWeight marlin_out;     // 6144 → 5120
+    // Repacked FP16 weights for prefill fp16_gemm (created post-load)
+    __half* repacked_qkv_ab = nullptr;  // merged qkv+a+b [10496, 5120] tile-repacked
+    __half* repacked_z      = nullptr;  // [6144, 5120] tile-repacked
+    __half* repacked_out    = nullptr;  // [5120, 6144] tile-repacked
 
     __half* conv1d_weight = nullptr;  // [conv_dim, kernel] = [10240, 4]
     float*  A_log         = nullptr;  // [48]
@@ -113,19 +110,16 @@ struct DeltaNetWeights {
 };
 
 struct FullAttentionWeights {
-    Int8Linear q_proj;   // 5120 → 12288 (includes output gate, split in kernel)
-    Int8Linear k_proj;   // 5120 → 1024
-    Int8Linear v_proj;   // 5120 → 1024
-    Int8Linear o_proj;   // 6144 → 5120
+    // FP16 weights (point into pool_blocks, no extra alloc)
+    Linear fp16_q;   // 5120 → 12288
+    Linear fp16_k;   // 5120 → 1024
+    Linear fp16_v;   // 5120 → 1024
+    Linear fp16_o;   // 6144 → 5120
 
-    // Merged k+v projection for prefill (created post-load)
-    // [2048, 5120] = k[0:1024] + v[1024:2048]
-    Int8Linear kv_proj;  // 5120 → 2048 (prefill only)
-
-    // Marlin INT4 weights for prefill (re-quantized from INT8 at load time)
-    GptqWeight marlin_q;    // 5120 → 12288
-    GptqWeight marlin_kv;   // 5120 → 2048
-    GptqWeight marlin_o;    // 6144 → 5120
+    // Repacked FP16 weights for prefill fp16_gemm (created post-load)
+    __half* repacked_q  = nullptr;  // [12288, 5120] tile-repacked
+    __half* repacked_kv = nullptr;  // merged k+v [2048, 5120] tile-repacked
+    __half* repacked_o  = nullptr;  // [5120, 6144] tile-repacked
 
     __half* q_norm = nullptr;  // [256] precomputed (1+w)
     __half* k_norm = nullptr;  // [256] precomputed (1+w)
@@ -173,19 +167,16 @@ struct ModelWeights {
 
 // Load all model weights from safetensors shards into device memory.
 // BF16 weights are converted to FP16. RMSNorm weights are precomputed as (1+w).
-bool load_model_weights(const std::string& model_dir, ModelWeights& weights);
+// If repack_marlin=false, GPTQ weights are left in original format (for custom GPTQ kernel).
+bool load_model_weights(const std::string& model_dir, ModelWeights& weights,
+                        bool repack_marlin = true);
 
-// Create merged projection weights for prefill optimization.
+// Create merged+repacked FP16 projection weights for prefill optimization.
 // Must be called after load_model_weights. Creates:
-//   - DN in_proj_qkv_ab: qkv+a+b merged [10368, 5120] × 48 layers
-//   - FA kv_proj: k+v merged [2048, 5120] × 16 layers
+//   - DN repacked_qkv_ab: qkv+a+b merged+repacked [10496, 5120] × 48 layers
+//   - DN repacked_z, repacked_out × 48 layers
+//   - FA repacked_q, repacked_kv (k+v merged), repacked_o × 16 layers
 bool merge_projection_weights(ModelWeights& weights);
-
-// Re-quantize attention INT8 projections to GPTQ INT4 and repack to Marlin
-// tile format for high-throughput prefill. Must be called after
-// merge_projection_weights. Creates GptqWeight (Marlin format) for all
-// attention projections used in prefill.
-bool quantize_attn_to_marlin(ModelWeights& weights);
 
 // Release all device memory held by the model.
 void free_model_weights(ModelWeights& weights);
@@ -227,7 +218,7 @@ struct InferenceState {
     __half* mlp_down    = nullptr;  // [max_seq, hidden_size]
 
     // DeltaNet scratch
-    __half* dn_qkv      = nullptr;  // [max_seq, qkv_ab_dim] (10368, merged for prefill)
+    __half* dn_qkv      = nullptr;  // [max_seq, qkv_ab_dim=10496] (qkv+a+b, used by fused kernel both prefill & decode)
     __half* dn_z        = nullptr;  // [max_seq, lin_value_dim] (6144)
     __half* dn_a        = nullptr;  // [max_seq, num_v_heads] (48)
     __half* dn_b        = nullptr;  // [max_seq, num_v_heads] (48)
