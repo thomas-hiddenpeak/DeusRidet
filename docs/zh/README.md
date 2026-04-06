@@ -6,7 +6,7 @@
 
 > *人类一思考，上帝就发笑；AI一思考，人类就不笑了。*
 
-**[English](../../README.md) | [Latina](../la/README.md)**
+**[English](../en/README.md) | [Latina](../../README.md)**
 
 ---
 
