@@ -26,6 +26,7 @@
 #include <signal.h>
 #include "nexus/ws_server.h"
 #include "sensus/auditus/audio_pipeline.h"
+#include "orator/wavlm_ecapa_encoder.h"
 
 namespace deusridet {
 
@@ -1027,6 +1028,230 @@ int cmd_bench_prefill(const std::string& model_dir) {
 }
 
 // ============================================================================
+// test-wavlm-cnn: Layer-by-layer validation of WavLM CNN feature extractor
+// ============================================================================
+
+int cmd_test_wavlm_cnn() {
+    printf("[test-wavlm-cnn] WavLM CNN Feature Extractor validation\n");
+
+    // Paths
+    const char* model_path = "/home/rm01/models/dev/speaker/espnet_wavlm_ecapa/wavlm_ecapa.safetensors";
+    const char* ref_dir    = "/home/rm01/models/dev/speaker/espnet_wavlm_ecapa/ref_dump/";
+
+    // Helper: load reference binary tensor
+    auto load_ref = [&](const char* name) -> std::vector<float> {
+        std::string path = std::string(ref_dir) + name;
+        FILE* f = fopen(path.c_str(), "rb");
+        if (!f) {
+            fprintf(stderr, "  ERROR: cannot open %s\n", path.c_str());
+            return {};
+        }
+        fseek(f, 0, SEEK_END);
+        size_t bytes = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        std::vector<float> data(bytes / sizeof(float));
+        size_t r_ = fread(data.data(), 1, bytes, f);
+        (void)r_;
+        fclose(f);
+        return data;
+    };
+
+    // Helper: compare GPU buffer vs CPU reference
+    auto compare = [](const float* d_gpu, const std::vector<float>& ref,
+                      const char* label) -> float {
+        std::vector<float> gpu(ref.size());
+        cudaMemcpy(gpu.data(), d_gpu, ref.size() * sizeof(float),
+                   cudaMemcpyDeviceToHost);
+        float max_diff = 0;
+        float max_val = 0;
+        int max_idx = 0;
+        for (size_t i = 0; i < ref.size(); i++) {
+            float diff = fabsf(gpu[i] - ref[i]);
+            if (diff > max_diff) {
+                max_diff = diff;
+                max_val = ref[i];
+                max_idx = (int)i;
+            }
+        }
+        printf("  %-40s max_diff=%.6f (at [%d], ref=%.6f, gpu=%.6f)\n",
+               label, max_diff, max_idx, max_val,
+               max_idx < (int)gpu.size() ? gpu[max_idx] : 0.0f);
+        return max_diff;
+    };
+
+    // 1. Init encoder
+    WavLMEcapaEncoder enc;
+    if (!enc.init(model_path)) {
+        fprintf(stderr, "[test-wavlm-cnn] Failed to init encoder\n");
+        return 1;
+    }
+
+    // 2. Load reference input
+    auto ref_wav = load_ref("input_wav.bin");
+    if (ref_wav.empty()) return 1;
+    int n_samples = (int)ref_wav.size();
+    printf("  Input: %d samples (%.2f sec)\n", n_samples, n_samples / 16000.0f);
+
+    // Upload to GPU
+    float* d_wav = nullptr;
+    cudaMalloc(&d_wav, n_samples * sizeof(float));
+    cudaMemcpy(d_wav, ref_wav.data(), n_samples * sizeof(float),
+               cudaMemcpyHostToDevice);
+
+    // 3. Run CNN
+    int T_out = 0;
+    float* d_cnn_out = enc.test_cnn(d_wav, n_samples, T_out);
+    printf("  CNN output: T'=%d (512 channels)\n", T_out);
+
+    // 4. Compare against reference tensors
+    printf("\n  --- CNN layer comparisons ---\n");
+    // We compare the final CNN output (layer6_out)
+    auto ref_cnn6 = load_ref("wavlm_cnn_layer6_out.bin");
+    if (!ref_cnn6.empty()) {
+        compare(d_cnn_out, ref_cnn6, "wavlm/cnn/layer6_out");
+    }
+
+    // Also check input normalization
+    auto ref_norm = load_ref("wavlm_input_norm.bin");
+    if (!ref_norm.empty()) {
+        printf("  (input normalization checked via CNN output diff)\n");
+    }
+
+    // 5. Test feature projection: LN(512) + Linear(512→1024)
+    printf("\n  --- Feature Projection ---\n");
+    int T_proj = 0;
+    float* d_proj = enc.test_projection(d_cnn_out, T_out, T_proj);
+    printf("  Projection output: [%d, 1024]\n", T_proj);
+
+    auto ref_pre_ln = load_ref("wavlm_features_pre_ln.bin");
+    // ref_pre_ln is [1, T', 512] → compare transposed CNN output (via projection intermediate)
+    // We can't easily compare intermediates, but post_extract_proj is the final output
+
+    auto ref_post_proj = load_ref("wavlm_post_extract_proj.bin");
+    if (!ref_post_proj.empty()) {
+        compare(d_proj, ref_post_proj, "wavlm/post_extract_proj");
+    }
+
+    // 6. Test positional convolution
+    printf("\n  --- Positional Conv ---\n");
+    int T_pos = 0;
+    float* d_pos = enc.test_pos_conv(d_proj, T_proj, T_pos);
+    printf("  Pos conv output: [%d, 1024]\n", T_pos);
+
+    // d_pos is after residual add (input + GELU(conv))
+    auto ref_after_pos = load_ref("wavlm_after_pos_add.bin");
+    if (!ref_after_pos.empty()) {
+        compare(d_pos, ref_after_pos, "wavlm/after_pos_add");
+    }
+
+    // 7. Test transformer encoder (24 layers + final LN)
+    printf("\n  --- Transformer Encoder ---\n");
+
+    // First check position bias
+    auto ref_pos_bias = load_ref("wavlm_encoder_rel_pos_bias.bin");
+
+    int T_enc = 0;
+    float* d_enc = enc.test_encoder(d_pos, T_pos, T_enc);
+    printf("  Encoder output: [%d, 1024]\n", T_enc);
+
+    // Compare position bias
+    if (!ref_pos_bias.empty()) {
+        const float* gpu_pb = enc.get_pos_bias();
+        if (gpu_pb) {
+            printf("  ref_pos_bias size=%zu, first5: %.4f %.4f %.4f %.4f %.4f\n",
+                   ref_pos_bias.size(),
+                   ref_pos_bias[0], ref_pos_bias[1], ref_pos_bias[2],
+                   ref_pos_bias[3], ref_pos_bias[4]);
+            std::vector<float> gpu_pb_h(std::min(ref_pos_bias.size(), (size_t)10));
+            cudaMemcpy(gpu_pb_h.data(), gpu_pb, gpu_pb_h.size() * sizeof(float),
+                       cudaMemcpyDeviceToHost);
+            printf("  gpu_pos_bias first5: %.4f %.4f %.4f %.4f %.4f\n",
+                   gpu_pb_h[0], gpu_pb_h[1], gpu_pb_h[2],
+                   gpu_pb_h[3], gpu_pb_h[4]);
+            compare(gpu_pb, ref_pos_bias, "rel_pos_bias");
+        }
+    }
+
+    // Compare individual layer outputs
+    for (int i = 0; i < 24; i++) {
+        char ref_name[64];
+        snprintf(ref_name, sizeof(ref_name), "wavlm_encoder_layer%d_out.bin", i);
+        auto ref_layer = load_ref(ref_name);
+        if (!ref_layer.empty()) {
+            const float* hs = enc.get_hidden_state(i + 1);  // layer i output = hidden_state[i+1]
+            if (hs) {
+                char label[64];
+                snprintf(label, sizeof(label), "wavlm/encoder/layer%d_out", i);
+                float md = compare(hs, ref_layer, label);
+                if (md > 0.01f && i < 3) {
+                    // Print first few values for debugging
+                    std::vector<float> gpu(10);
+                    cudaMemcpy(gpu.data(), hs, 10 * sizeof(float), cudaMemcpyDeviceToHost);
+                    printf("    gpu[0..4]: %.6f %.6f %.6f %.6f %.6f\n",
+                           gpu[0], gpu[1], gpu[2], gpu[3], gpu[4]);
+                    printf("    ref[0..4]: %.6f %.6f %.6f %.6f %.6f\n",
+                           ref_layer[0], ref_layer[1], ref_layer[2], ref_layer[3], ref_layer[4]);
+                }
+            }
+        }
+    }
+
+    // Compare final layer norm output
+    auto ref_final_ln = load_ref("wavlm_encoder_final_ln.bin");
+    if (!ref_final_ln.empty()) {
+        // Final LN output is stored in hidden_states[24]
+        const float* hs24 = enc.get_hidden_state(24);
+        if (hs24) compare(hs24, ref_final_ln, "wavlm/encoder/final_ln");
+    }
+
+    // ======================================================================
+    // 8. Featurizer + MVN + ECAPA + Pooling + Projector (end-to-end)
+    // ======================================================================
+    printf("\n  --- Full Extract (end-to-end) ---\n");
+    auto result = enc.extract_gpu(d_wav, n_samples);
+    printf("  Embedding dim: %d\n", (int)result.size());
+
+    // Compare intermediate stages
+    auto ref_feat = load_ref("featurizer_output.bin");
+    if (!ref_feat.empty()) {
+        printf("  featurizer ref: %zu floats\n", ref_feat.size());
+    }
+
+    auto ref_mvn = load_ref("normalize_output.bin");
+    if (!ref_mvn.empty()) {
+        printf("  MVN ref: %zu floats\n", ref_mvn.size());
+    }
+
+    // Compare final embedding
+    auto ref_emb = load_ref("output_embedding.bin");
+    if (!ref_emb.empty()) {
+        printf("  ref embedding dim=%zu\n", ref_emb.size());
+        float max_diff = 0;
+        int max_idx = 0;
+        for (size_t i = 0; i < std::min(result.size(), ref_emb.size()); i++) {
+            float diff = fabsf(result[i] - ref_emb[i]);
+            if (diff > max_diff) { max_diff = diff; max_idx = (int)i; }
+        }
+        printf("  %-40s max_diff=%.6f (at [%d], ref=%.6f, gpu=%.6f)\n",
+               "output_embedding", max_diff, max_idx,
+               max_idx < (int)ref_emb.size() ? ref_emb[max_idx] : 0.0f,
+               max_idx < (int)result.size() ? result[max_idx] : 0.0f);
+        // Print first 8 values
+        printf("  gpu[0..7]:");
+        for (int i = 0; i < std::min(8, (int)result.size()); i++)
+            printf(" %.6f", result[i]);
+        printf("\n  ref[0..7]:");
+        for (int i = 0; i < std::min(8, (int)ref_emb.size()); i++)
+            printf(" %.6f", ref_emb[i]);
+        printf("\n");
+    }
+
+    cudaFree(d_wav);
+    printf("\n[test-wavlm-cnn] Done.\n");
+    return 0;
+}
+
+// ============================================================================
 // test-ws: WebSocket server + audio pipeline (Ring → Mel → VAD) with WebUI.
 // ============================================================================
 
@@ -1056,6 +1281,28 @@ int cmd_test_ws(const std::string& webui_dir) {
     // Configure TEN VAD model path.
     audio_cfg.ten.model_path = home + "/models/dev/vad/ten/ten-vad.onnx";
 
+    // Configure CAM++ speaker encoder model path.
+    audio_cfg.speaker.model_path = home + "/models/dev/speaker/campplus/campplus.safetensors";
+
+    // Configure WavLM ONNX speaker encoder.
+    audio_cfg.wavlm.model_path = home + "/models/dev/speaker/wavlm/wavlm_base_plus_sv.onnx";
+    audio_cfg.wavlm.name = "wavlm";
+    audio_cfg.wavlm.input_name = "input_values";
+    audio_cfg.wavlm.output_name = "onnx::Gemm_3633";
+    audio_cfg.wavlm.embedding_dim = 512;
+
+    // Configure ECAPA-TDNN-1024-LM speaker encoder (WeSpeaker, fbank input).
+    // Adapted from WeSpeaker ECAPA-TDNN with Attentive Statistical Pooling (ASTP).
+    audio_cfg.unispeech.model_path = home + "/models/dev/speaker/ecapa_tdnn/ecapa_tdnn1024_lm.onnx";
+    audio_cfg.unispeech.name = "ecapa";
+    audio_cfg.unispeech.input_name = "feats";
+    audio_cfg.unispeech.output_name = "embs";
+    audio_cfg.unispeech.embedding_dim = 192;
+
+    // Configure WavLM-Large + ECAPA-TDNN native GPU speaker encoder.
+    audio_cfg.wavlm_ecapa_model = home + "/models/dev/speaker/espnet_wavlm_ecapa/wavlm_ecapa.safetensors";
+    audio_cfg.wavlm_ecapa_threshold = 0.55f;
+
     // Track WS-level stats.
     std::atomic<uint64_t> total_frames{0};
     std::atomic<uint64_t> total_bytes{0};
@@ -1080,17 +1327,54 @@ int cmd_test_ws(const std::string& webui_dir) {
             printf("[test-ws] VAD: speech END at frame %d\n", frame_idx);
     });
 
+    // Helper: serialize a SpeakerDb's roster as a JSON array string.
+    auto speaker_list_json = [](auto& db) -> std::string {
+        auto spks = db.all_speakers();
+        if (spks.empty()) return "[]";
+        std::string s = "[";
+        for (size_t i = 0; i < spks.size(); ++i) {
+            char buf[320];
+            snprintf(buf, sizeof(buf),
+                R"({"id":%d,"name":"%s","count":%d,"exemplars":%d,"min_diversity":%.4f})",
+                spks[i].id, spks[i].name.c_str(), spks[i].match_count,
+                spks[i].exemplar_count, spks[i].min_diversity);
+            if (i > 0) s += ',';
+            s += buf;
+        }
+        s += ']';
+        return s;
+    };
+
     audio.set_on_stats([&](const AudioPipelineStats& st) {
         int fd = active_ws_fd.load(std::memory_order_relaxed);
         if (fd < 0) return;
-        char json[1024];
+
+        // Build speaker lists JSON — always included so the roster stays current.
+        std::string lists_json;
+        lists_json += R"(,"speaker_lists":[)";
+        lists_json += R"({"model":"CAM++","speakers":)" + speaker_list_json(audio.speaker_db()) + "},";
+        lists_json += R"({"model":"WavLM","speakers":)" + speaker_list_json(audio.wavlm_db()) + "},";
+        lists_json += R"({"model":"ECAPA-TDNN","speakers":)" + speaker_list_json(audio.unispeech_db()) + "},";
+        lists_json += R"({"model":"WL-ECAPA","speakers":)" + speaker_list_json(audio.wlecapa_db()) + "}]";
+
+        char json[2800];
         snprintf(json, sizeof(json),
             R"({"type":"pipeline_stats","pcm_samples":%lu,"mel_frames":%lu,)"
             R"("speech_frames":%lu,"rms":%.4f,"energy":%.2f,"is_speech":%s,)"
             R"("threshold":%.2f,"noise_floor":%.2f,"gain":%.1f,)"
             R"("silero_prob":%.3f,"silero_speech":%s,"silero_threshold":%.2f,"silero_enabled":%s,)"
             R"("fsmn_prob":%.3f,"fsmn_speech":%s,"fsmn_threshold":%.2f,"fsmn_enabled":%s,)"
-            R"("ten_prob":%.3f,"ten_speech":%s,"ten_threshold":%.2f,"ten_enabled":%s})",
+            R"("ten_prob":%.3f,"ten_speech":%s,"ten_threshold":%.2f,"ten_enabled":%s,)"
+            R"("vad_source":%d,)"
+            R"("speaker_id":%d,"speaker_sim":%.3f,"speaker_new":%s,"speaker_count":%d,)"
+            R"("speaker_name":"%s","speaker_enabled":%s,"speaker_threshold":%.2f,"speaker_active":%s,)"
+            R"("wavlm_id":%d,"wavlm_sim":%.3f,"wavlm_new":%s,"wavlm_count":%d,)"
+            R"("wavlm_name":"%s","wavlm_enabled":%s,"wavlm_threshold":%.2f,"wavlm_active":%s,)"
+            R"("unispeech_id":%d,"unispeech_sim":%.3f,"unispeech_new":%s,"unispeech_count":%d,)"
+            R"("unispeech_name":"%s","unispeech_enabled":%s,"unispeech_threshold":%.2f,"unispeech_active":%s,)"
+            R"("wlecapa_id":%d,"wlecapa_sim":%.3f,"wlecapa_new":%s,"wlecapa_count":%d,)"
+            R"("wlecapa_exemplars":%d,"wlecapa_hits_above":%d,)"
+            R"("wlecapa_name":"%s","wlecapa_enabled":%s,"wlecapa_threshold":%.2f,"wlecapa_active":%s)",
             (unsigned long)st.pcm_samples_in,
             (unsigned long)st.mel_frames,
             (unsigned long)st.speech_frames,
@@ -1106,8 +1390,79 @@ int cmd_test_ws(const std::string& webui_dir) {
             audio.fsmn_enabled() ? "true" : "false",
             st.ten_prob, st.ten_speech ? "true" : "false",
             audio.ten_threshold(),
-            audio.ten_enabled() ? "true" : "false");
+            audio.ten_enabled() ? "true" : "false",
+            static_cast<int>(audio.vad_source()),
+            st.speaker_id, st.speaker_sim,
+            st.speaker_new ? "true" : "false",
+            st.speaker_count, st.speaker_name,
+            audio.speaker_enabled() ? "true" : "false",
+            audio.speaker_threshold(),
+            st.speaker_active ? "true" : "false",
+            st.wavlm_id, st.wavlm_sim,
+            st.wavlm_new ? "true" : "false",
+            st.wavlm_count, st.wavlm_name,
+            audio.wavlm_enabled() ? "true" : "false",
+            audio.wavlm_threshold(),
+            st.wavlm_active ? "true" : "false",
+            st.unispeech_id, st.unispeech_sim,
+            st.unispeech_new ? "true" : "false",
+            st.unispeech_count, st.unispeech_name,
+            audio.unispeech_enabled() ? "true" : "false",
+            audio.unispeech_threshold(),
+            st.unispeech_active ? "true" : "false",
+            st.wlecapa_id, st.wlecapa_sim,
+            st.wlecapa_new ? "true" : "false",
+            st.wlecapa_count,
+            st.wlecapa_exemplars, st.wlecapa_hits_above,
+            st.wlecapa_name,
+            audio.wlecapa_enabled() ? "true" : "false",
+            audio.wlecapa_threshold(),
+            st.wlecapa_active ? "true" : "false");
+
+        // Append speaker lists (if changed) and closing brace.
+        std::string full_json(json);
+
+        // WL-ECAPA latency breakdown (when extraction happened this tick).
+        if (st.wlecapa_active) {
+            char lat[384];
+            snprintf(lat, sizeof(lat),
+                R"(,"lat_cnn_ms":%.1f,"lat_encoder_ms":%.1f,"lat_ecapa_ms":%.1f,"lat_total_ms":%.1f,"wlecapa_is_early":%s,"early_trigger_sec":%.2f)",
+                st.wlecapa_lat_cnn_ms, st.wlecapa_lat_encoder_ms,
+                st.wlecapa_lat_ecapa_ms, st.wlecapa_lat_total_ms,
+                st.wlecapa_is_early ? "true" : "false",
+                audio.early_trigger_sec());
+            full_json += lat;
+
+            // Change detection data.
+            if (st.wlecapa_change_valid && !st.wlecapa_is_early) {
+                char cd[128];
+                snprintf(cd, sizeof(cd),
+                    R"(,"change_similarity":%.4f)", st.wlecapa_change_sim);
+                full_json += cd;
+            }
+
+
+        }
+
+        full_json += lists_json;
+        full_json += '}';
+        server.send_text(fd, full_json);
+    });
+
+    audio.set_on_speaker([&](const SpeakerMatch& match) {
+        int fd = active_ws_fd.load(std::memory_order_relaxed);
+        if (fd < 0) return;
+        char json[256];
+        snprintf(json, sizeof(json),
+            R"({"type":"speaker","id":%d,"sim":%.3f,"new":%s,"name":"%s"})",
+            match.speaker_id, match.similarity,
+            match.is_new ? "true" : "false",
+            match.name.c_str());
         server.send_text(fd, json);
+        printf("[test-ws] Speaker: id=%d sim=%.3f %s%s\n",
+               match.speaker_id, match.similarity,
+               match.is_new ? "NEW " : "",
+               match.name.empty() ? "(unnamed)" : match.name.c_str());
     });
 
     server.set_on_connect([&](int fd) {
@@ -1202,6 +1557,194 @@ int cmd_test_ws(const std::string& webui_dir) {
                 R"({"type":"ten_enable","enabled":%s})", on ? "true" : "false");
             server.send_text(fd, json);
             printf("[test-ws] TEN %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg.rfind("vad_source:", 0) == 0) {
+            auto val = msg.substr(11);
+            VadSource src = VadSource::ANY;
+            if (val == "silero") src = VadSource::SILERO;
+            else if (val == "fsmn") src = VadSource::FSMN;
+            else if (val == "ten") src = VadSource::TEN;
+            else src = VadSource::ANY;
+            audio.set_vad_source(src);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"vad_source","value":%d})", static_cast<int>(src));
+            server.send_text(fd, json);
+            printf("[test-ws] VAD source = %s (%d) (fd=%d)\n", val.c_str(), static_cast<int>(src), fd);
+        } else if (msg == "speaker_enable:on" || msg == "speaker_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.set_speaker_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"speaker_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] Speaker %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg == "wavlm_enable:on" || msg == "wavlm_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.set_wavlm_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"wavlm_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] WavLM %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg == "unispeech_enable:on" || msg == "unispeech_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.set_unispeech_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"unispeech_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] UniSpeech %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg.rfind("speaker_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 18, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.set_speaker_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"speaker_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] Speaker threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("wavlm_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 16, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.set_wavlm_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"wavlm_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] WavLM threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("unispeech_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 20, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.set_unispeech_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"unispeech_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] UniSpeech threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg == "speaker_clear") {
+            audio.clear_speaker_db();
+            server.send_text(fd, R"({"type":"speaker_clear"})");
+            printf("[test-ws] Speaker (CAM++) DB cleared (fd=%d)\n", fd);
+        } else if (msg == "wavlm_clear") {
+            audio.clear_wavlm_db();
+            server.send_text(fd, R"({"type":"wavlm_clear"})");
+            printf("[test-ws] WavLM DB cleared (fd=%d)\n", fd);
+        } else if (msg == "unispeech_clear") {
+            audio.clear_unispeech_db();
+            server.send_text(fd, R"({"type":"unispeech_clear"})");
+            printf("[test-ws] UniSpeech DB cleared (fd=%d)\n", fd);
+        } else if (msg.rfind("speaker_name:", 0) == 0) {
+            // Format: speaker_name:ID:Name
+            auto rest = msg.substr(13);
+            auto colon = rest.find(':');
+            if (colon != std::string::npos) {
+                int id = std::stoi(rest.substr(0, colon));
+                std::string name = rest.substr(colon + 1);
+                audio.set_speaker_name(id, name);
+                char json[256];
+                snprintf(json, sizeof(json),
+                    R"({"type":"speaker_name","id":%d,"name":"%s"})", id, name.c_str());
+                server.send_text(fd, json);
+                printf("[test-ws] CAM++ Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
+            }
+        } else if (msg.rfind("wavlm_name:", 0) == 0) {
+            auto rest = msg.substr(11);
+            auto colon = rest.find(':');
+            if (colon != std::string::npos) {
+                int id = std::stoi(rest.substr(0, colon));
+                std::string name = rest.substr(colon + 1);
+                audio.set_wavlm_name(id, name);
+                char json[256];
+                snprintf(json, sizeof(json),
+                    R"({"type":"wavlm_name","id":%d,"name":"%s"})", id, name.c_str());
+                server.send_text(fd, json);
+                printf("[test-ws] WavLM Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
+            }
+        } else if (msg.rfind("unispeech_name:", 0) == 0) {
+            auto rest = msg.substr(15);
+            auto colon = rest.find(':');
+            if (colon != std::string::npos) {
+                int id = std::stoi(rest.substr(0, colon));
+                std::string name = rest.substr(colon + 1);
+                audio.set_unispeech_name(id, name);
+                char json[256];
+                snprintf(json, sizeof(json),
+                    R"({"type":"unispeech_name","id":%d,"name":"%s"})", id, name.c_str());
+                server.send_text(fd, json);
+                printf("[test-ws] UniSpeech Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
+            }
+        } else if (msg == "wlecapa_enable:on" || msg == "wlecapa_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.set_wlecapa_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"wlecapa_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] WL-ECAPA %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg.rfind("wlecapa_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 18, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.set_wlecapa_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"wlecapa_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] WL-ECAPA threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("early_trigger:", 0) == 0) {
+            float s = std::strtof(msg.c_str() + 14, nullptr);
+            if (s < 0.5f) s = 0.5f;
+            if (s > 5.0f) s = 5.0f;
+            audio.set_early_trigger_sec(s);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"early_trigger","value":%.2f})", s);
+            server.send_text(fd, json);
+            printf("[test-ws] Early trigger = %.2fs (fd=%d)\n", s, fd);
+        } else if (msg == "wlecapa_clear") {
+            audio.clear_wlecapa_db();
+            server.send_text(fd, R"({"type":"wlecapa_clear"})");
+            printf("[test-ws] WL-ECAPA DB cleared (fd=%d)\n", fd);
+        } else if (msg.rfind("wlecapa_name:", 0) == 0) {
+            auto rest = msg.substr(13);
+            auto colon = rest.find(':');
+            if (colon != std::string::npos) {
+                int id = std::stoi(rest.substr(0, colon));
+                std::string name = rest.substr(colon + 1);
+                audio.set_wlecapa_name(id, name);
+                char json[256];
+                snprintf(json, sizeof(json),
+                    R"({"type":"wlecapa_name","id":%d,"name":"%s"})", id, name.c_str());
+                server.send_text(fd, json);
+                printf("[test-ws] WL-ECAPA Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
+            }
+        } else if (msg.rfind("wlecapa_delete:", 0) == 0) {
+            // Format: wlecapa_delete:ID
+            int id = std::stoi(msg.substr(15));
+            bool ok = audio.remove_wlecapa_speaker(id);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"wlecapa_delete","id":%d,"ok":%s})", id, ok ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] WL-ECAPA delete #%d %s (fd=%d)\n", id, ok ? "OK" : "FAIL", fd);
+        } else if (msg.rfind("wlecapa_merge:", 0) == 0) {
+            // Format: wlecapa_merge:DST_ID:SRC_ID
+            auto rest = msg.substr(14);
+            auto colon = rest.find(':');
+            if (colon != std::string::npos) {
+                int dst = std::stoi(rest.substr(0, colon));
+                int src = std::stoi(rest.substr(colon + 1));
+                bool ok = audio.merge_wlecapa_speakers(dst, src);
+                char json[128];
+                snprintf(json, sizeof(json),
+                    R"({"type":"wlecapa_merge","dst":%d,"src":%d,"ok":%s})",
+                    dst, src, ok ? "true" : "false");
+                server.send_text(fd, json);
+                printf("[test-ws] WL-ECAPA merge #%d←#%d %s (fd=%d)\n", dst, src, ok ? "OK" : "FAIL", fd);
+            }
         } else {
             printf("[test-ws] Text from fd=%d: %s\n", fd, msg.c_str());
         }

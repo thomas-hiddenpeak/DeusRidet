@@ -97,13 +97,24 @@ add_library(sensus STATIC ${SENSUS_SOURCES})
 target_link_libraries(sensus PRIVATE communis CUDA::cudart onnxruntime ten_vad)
 
 # ============================================================================
+# Speaker identification static library (orator — CAM++ speaker encoder)
+# ============================================================================
+file(GLOB_RECURSE ORATOR_SOURCES
+    "src/orator/*.cpp"
+    "src/orator/*.cu"
+)
+
+add_library(orator STATIC ${ORATOR_SOURCES})
+target_link_libraries(orator PRIVATE communis CUDA::cudart CUDA::cublas cudnn onnxruntime)
+
+# ============================================================================
 # Main executable
 # ============================================================================
 add_executable(deusridet
     src/main.cpp
     src/commands.cpp
 )
-target_link_libraries(deusridet PRIVATE machina communis nexus sensus stdc++fs rt dl)
+target_link_libraries(deusridet PRIVATE machina communis nexus sensus orator stdc++fs rt dl)
 
 # Embed RPATH (not RUNPATH) so the binary finds CUDA 12.9 libs.
 # DT_RPATH takes precedence over ldconfig cache, unlike DT_RUNPATH.

@@ -1,8 +1,8 @@
-// fsmn_fbank_gpu.h — GPU Fbank for FSMN VAD.
+// fsmn_fbank_gpu.h — GPU Fbank feature extractor.
 //
-// Computes: Hamming window → DFT → power spectrum → Mel(80) → log
-// on GPU. Same architecture as mel_gpu.h but with FSMN-specific params
-// (n_fft=512, n_mels=80, frame_len=400, hop=160, Hamming window).
+// Computes: window → DFT → power spectrum → Mel(80) → log on GPU.
+// Supports Hamming window (FSMN VAD) and Povey window (CAM++ speaker).
+// Parameters: n_fft=512, n_mels=80, frame_len=400 samples, hop=160.
 
 #pragma once
 
@@ -11,10 +11,15 @@
 
 namespace deusridet {
 
-// Launch the fused Fbank kernel for FSMN VAD.
+enum class FbankWindowType {
+    HAMMING,  // 0.54 - 0.46*cos(2π*n/(N-1)) — used by FSMN VAD
+    POVEY,    // (0.5 - 0.5*cos(2π*n/(N-1)))^0.85 — Kaldi default, used by CAM++
+};
+
+// Launch the fused Fbank kernel.
 void launch_fsmn_fbank(
     const float* d_pcm,
-    const float* d_window,   // Hamming [frame_len]
+    const float* d_window,   // window [frame_len]
     const float* d_mel_fb,   // [n_mels * (n_fft/2+1)]
     float* d_out,            // [n_frames * n_mels]
     int n_frames,
@@ -26,8 +31,11 @@ void launch_fsmn_fbank(
     float min_level,
     cudaStream_t stream = nullptr);
 
-// Streaming GPU Fbank extractor for FSMN VAD.
+// Streaming GPU Fbank extractor.
 // Manages GPU buffers, accepts int16 PCM, produces fbank frames on host.
+// Window type and PCM normalization are configurable:
+//   FSMN VAD: Hamming window, int16 scale (normalize_pcm=false)
+//   CAM++ speaker: Povey window, [-1,1] scale (normalize_pcm=true)
 class FsmnFbankGpu {
 public:
     FsmnFbankGpu();
@@ -37,7 +45,9 @@ public:
     FsmnFbankGpu& operator=(const FsmnFbankGpu&) = delete;
 
     bool init(int n_mels = 80, int frame_len = 400, int hop = 160,
-              int n_fft = 512, int sample_rate = 16000);
+              int n_fft = 512, int sample_rate = 16000,
+              FbankWindowType window_type = FbankWindowType::HAMMING,
+              bool normalize_pcm = false);
 
     // Push int16 PCM. Returns number of new fbank frames available.
     int push_pcm(const int16_t* pcm_host, int n_samples);
@@ -60,8 +70,11 @@ private:
     int n_fft_      = 512;
     int freq_bins_  = 257;  // n_fft/2 + 1
 
+    bool normalize_pcm_ = false;
+    FbankWindowType window_type_ = FbankWindowType::HAMMING;
+
     // GPU buffers.
-    float* d_hamming_   = nullptr;  // [frame_len]
+    float* d_window_    = nullptr;  // [frame_len]
     float* d_mel_fb_    = nullptr;  // [n_mels * freq_bins]
     float* d_pcm_       = nullptr;  // rolling PCM
     float* d_fbank_out_ = nullptr;  // [max_frames * n_mels]

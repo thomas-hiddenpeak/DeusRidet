@@ -1,3 +1,6 @@
 build/
 *.o
 *.a
+hub/
+*.mp3
+*.wav

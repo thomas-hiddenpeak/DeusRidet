@@ -2,17 +2,26 @@
 //
 // Wires: WS PCM input → Ring Buffer → Gain → Mel (GPU) → Energy VAD
 //                                          └→ Silero VAD (ONNX, CPU)
+//                                          └→ FSMN VAD (ONNX, GPU fbank)
+//                                          └→ TEN VAD (ONNX, CPU)
+//                                          └→ Speaker Encoder (CAM++ GPU)
 // Runs a processing thread that pulls from the ring buffer, computes
-// Mel frames on GPU, runs both VAD engines, and reports results.
+// Mel frames on GPU, runs VAD engines, extracts speaker embeddings, and reports results.
 
 #pragma once
 
 #include "mel_gpu.h"
 #include "silero_vad.h"
 #include "fsmn_vad.h"
+#include "fsmn_fbank_gpu.h"
 #include "ten_vad_wrapper.h"
 #include "vad.h"
 #include "../../communis/ring_buffer.h"
+#include "../../orator/speaker_encoder.h"
+#include "../../orator/onnx_speaker_encoder.h"
+#include "../../orator/wavlm_ecapa_encoder.h"
+#include "../../orator/speaker_db.h"
+#include "../../orator/speaker_vector_store.h"
 
 #include <atomic>
 #include <cstdint>
@@ -21,14 +30,30 @@
 
 namespace deusridet {
 
+// Which VAD engine drives the speech detection for speaker extraction.
+enum class VadSource : int {
+    SILERO = 0,
+    FSMN   = 1,
+    TEN    = 2,
+    ANY    = 3,  // OR of all enabled VADs
+};
+
 struct AudioPipelineConfig {
     MelConfig mel;
     VadConfig vad;
     SileroVadConfig silero;             // Silero VAD model config
     FsmnVadConfig fsmn;                 // FSMN VAD model config
     TenVadConfig  ten;                  // TEN VAD model config
+    SpeakerEncoderConfig speaker;       // CAM++ speaker encoder config
+    OnnxSpeakerConfig wavlm;              // WavLM speaker encoder config
+    OnnxSpeakerConfig unispeech;          // ECAPA-TDNN speaker encoder config (uses fbank, not raw PCM)
+    std::string wavlm_ecapa_model;         // WavLM-Large+ECAPA-TDNN safetensors path (native GPU)
+    float wavlm_ecapa_threshold = 0.55f;   // default cosine sim threshold
     size_t ring_buffer_bytes = 1 << 20;  // 1 MB (~32 seconds of int16 mono 16kHz)
     int process_chunk_ms     = 100;      // process in 100ms chunks (10 mel frames)
+    float speaker_threshold  = 0.50f;    // CAM++ cosine sim threshold (same ~0.67, diff ~0.07)
+    float wavlm_threshold    = 0.80f;    // WavLM Gemm threshold (same ~0.86-0.93, diff ~0.36-0.76)
+    float unispeech_threshold= 0.55f;    // ECAPA-TDNN threshold (same ~0.57, diff ~0.03-0.45)
 };
 
 struct AudioPipelineStats {
@@ -47,12 +72,53 @@ struct AudioPipelineStats {
     // TEN VAD.
     float    ten_prob;         // latest TEN speech probability [0,1]
     bool     ten_speech;       // TEN VAD speech state
+    // Speaker identification (CAM++).
+    int      speaker_id;       // current speaker ID (-1 = unknown)
+    float    speaker_sim;      // best cosine similarity
+    bool     speaker_new;      // true if newly registered speaker
+    int      speaker_count;    // number of known speakers
+    char     speaker_name[64]; // current speaker name (empty if unnamed)
+    // Speaker identification (WavLM).
+    int      wavlm_id;         // WavLM speaker ID
+    float    wavlm_sim;        // WavLM best similarity
+    bool     wavlm_new;
+    int      wavlm_count;
+    char     wavlm_name[64];
+    // Speaker identification (UniSpeech-SAT).
+    int      unispeech_id;
+    float    unispeech_sim;
+    bool     unispeech_new;
+    int      unispeech_count;
+    char     unispeech_name[64];
+    // Speaker identification (WavLM-Large + ECAPA-TDNN, native GPU).
+    int      wlecapa_id;
+    float    wlecapa_sim;
+    bool     wlecapa_new;
+    int      wlecapa_count;
+    int      wlecapa_exemplars;      // exemplar count for matched speaker
+    int      wlecapa_hits_above;     // exemplars above threshold in this match
+    char     wlecapa_name[64];
+    // Active flags — true only on the tick when extraction happened.
+    bool     speaker_active;
+    bool     wavlm_active;
+    bool     unispeech_active;
+    bool     wlecapa_active;
+    // WL-ECAPA latency breakdown (ms), set after each extraction.
+    float    wlecapa_lat_cnn_ms;
+    float    wlecapa_lat_encoder_ms;
+    float    wlecapa_lat_ecapa_ms;
+    float    wlecapa_lat_total_ms;
+    bool     wlecapa_is_early;       // true if this was an early extraction (not end-of-segment)
+    // Change detection: cosine similarity between consecutive segment embeddings.
+    float    wlecapa_change_sim;     // -1 if no previous segment
+    bool     wlecapa_change_valid;   // true when change_sim is meaningful
 };
 
 class AudioPipeline {
 public:
-    using OnVadEvent = std::function<void(const VadResult&, int frame_idx)>;
-    using OnStats    = std::function<void(const AudioPipelineStats&)>;
+    using OnVadEvent  = std::function<void(const VadResult&, int frame_idx)>;
+    using OnStats     = std::function<void(const AudioPipelineStats&)>;
+    using OnSpeaker   = std::function<void(const SpeakerMatch&)>;
 
     AudioPipeline();
     ~AudioPipeline();
@@ -70,6 +136,7 @@ public:
     // Register callbacks.
     void set_on_vad(OnVadEvent cb) { on_vad_ = std::move(cb); }
     void set_on_stats(OnStats cb)  { on_stats_ = std::move(cb); }
+    void set_on_speaker(OnSpeaker cb) { on_speaker_ = std::move(cb); }
 
     const AudioPipelineStats& stats() const { return stats_; }
 
@@ -99,9 +166,80 @@ public:
     void set_ten_enabled(bool e) { enable_ten_.store(e, std::memory_order_relaxed); }
     bool ten_enabled() const { return enable_ten_.load(std::memory_order_relaxed); }
 
+    // Speaker encoder enable/disable (thread-safe).
+    void set_speaker_enabled(bool e) { enable_speaker_.store(e, std::memory_order_relaxed); }
+    bool speaker_enabled() const { return enable_speaker_.load(std::memory_order_relaxed); }
+    void set_wavlm_enabled(bool e) { enable_wavlm_.store(e, std::memory_order_relaxed); }
+    bool wavlm_enabled() const { return enable_wavlm_.load(std::memory_order_relaxed); }
+    void set_unispeech_enabled(bool e) { enable_unispeech_.store(e, std::memory_order_relaxed); }
+    bool unispeech_enabled() const { return enable_unispeech_.load(std::memory_order_relaxed); }
+    void set_wlecapa_enabled(bool e) { enable_wlecapa_.store(e, std::memory_order_relaxed); }
+    bool wlecapa_enabled() const { return enable_wlecapa_.load(std::memory_order_relaxed); }
+
+    // Per-backend threshold control.
+    void set_speaker_threshold(float t) { speaker_threshold_.store(t, std::memory_order_relaxed); }
+    float speaker_threshold() const { return speaker_threshold_.load(std::memory_order_relaxed); }
+    void set_wavlm_threshold(float t) { wavlm_threshold_.store(t, std::memory_order_relaxed); }
+    float wavlm_threshold() const { return wavlm_threshold_.load(std::memory_order_relaxed); }
+    void set_unispeech_threshold(float t) { unispeech_threshold_.store(t, std::memory_order_relaxed); }
+    float unispeech_threshold() const { return unispeech_threshold_.load(std::memory_order_relaxed); }
+    void set_wlecapa_threshold(float t) { wlecapa_threshold_.store(t, std::memory_order_relaxed); }
+    float wlecapa_threshold() const { return wlecapa_threshold_.load(std::memory_order_relaxed); }
+
+    // Early extraction trigger (in seconds of speech).
+    void set_early_trigger_sec(float s) { early_trigger_samples_.store((int)(s * 16000), std::memory_order_relaxed); }
+    float early_trigger_sec() const { return early_trigger_samples_.load(std::memory_order_relaxed) / 16000.0f; }
+
+    // Per-backend speaker database access.
+    SpeakerDb& speaker_db() { return speaker_db_; }
+    SpeakerDb& wavlm_db() { return wavlm_db_; }
+    SpeakerDb& unispeech_db() { return unispeech_db_; }
+    SpeakerVectorStore& wlecapa_db() { return wlecapa_db_; }
+
+    // Per-backend clear and name.
+    void clear_speaker_db() {
+        speaker_db_.clear();
+        stats_.speaker_id = -1; stats_.speaker_sim = 0;
+        stats_.speaker_new = false; stats_.speaker_count = 0;
+        stats_.speaker_active = true;  // trigger UI refresh
+        stats_.speaker_name[0] = '\0';
+    }
+    void clear_wavlm_db() {
+        wavlm_db_.clear();
+        stats_.wavlm_id = -1; stats_.wavlm_sim = 0;
+        stats_.wavlm_new = false; stats_.wavlm_count = 0;
+        stats_.wavlm_active = true;  // trigger UI refresh
+        stats_.wavlm_name[0] = '\0';
+    }
+    void clear_unispeech_db() {
+        unispeech_db_.clear();
+        stats_.unispeech_id = -1; stats_.unispeech_sim = 0;
+        stats_.unispeech_new = false; stats_.unispeech_count = 0;
+        stats_.unispeech_active = true;  // trigger UI refresh
+        stats_.unispeech_name[0] = '\0';
+    }
+    void clear_wlecapa_db() {
+        wlecapa_db_.clear();
+        stats_.wlecapa_id = -1; stats_.wlecapa_sim = 0;
+        stats_.wlecapa_new = false; stats_.wlecapa_count = 0;
+        stats_.wlecapa_exemplars = 0; stats_.wlecapa_hits_above = 0;
+        stats_.wlecapa_active = true;
+        stats_.wlecapa_name[0] = '\0';
+    }
+    void set_speaker_name(int id, const std::string& name) { speaker_db_.set_name(id, name); }
+    void set_wavlm_name(int id, const std::string& name) { wavlm_db_.set_name(id, name); }
+    void set_unispeech_name(int id, const std::string& name) { unispeech_db_.set_name(id, name); }
+    void set_wlecapa_name(int id, const std::string& name) { wlecapa_db_.set_name(id, name); }
+    bool remove_wlecapa_speaker(int id) { return wlecapa_db_.remove_speaker(id); }
+    bool merge_wlecapa_speakers(int dst_id, int src_id) { return wlecapa_db_.merge_speakers(dst_id, src_id); }
+
     // Input gain (applied before Mel + VAD). 1.0 = unity.
     void set_gain(float g) { gain_.store(g, std::memory_order_relaxed); }
     float gain() const { return gain_.load(std::memory_order_relaxed); }
+
+    // VAD source selection for speaker extraction pipeline routing.
+    void set_vad_source(VadSource s) { vad_source_.store(static_cast<int>(s), std::memory_order_relaxed); }
+    VadSource vad_source() const { return static_cast<VadSource>(vad_source_.load(std::memory_order_relaxed)); }
 
 private:
     void process_loop();
@@ -116,15 +254,43 @@ private:
     SileroVad silero_;
     FsmnVad fsmn_;
     TenVadWrapper ten_;
+    SpeakerEncoder speaker_enc_;
+    SpeakerDb speaker_db_{"CAM++Db"};
+    FsmnFbankGpu speaker_fbank_;  // 80-dim fbank for CAM++
+    OnnxSpeakerEncoder wavlm_enc_;
+    SpeakerDb wavlm_db_{"WavLMDb", 0.1f};       // low EMA to resist centroid contamination
+    OnnxSpeakerEncoder unispeech_enc_;
+    SpeakerDb unispeech_db_{"ECAPADb", 0.15f};  // ECAPA-TDNN: higher EMA for stable centroids
+    WavLMEcapaEncoder wlecapa_enc_;
+    SpeakerVectorStore wlecapa_db_{"WLEcapaDb", 192, 0.15f};
 
     AudioPipelineStats stats_{};
     std::atomic<float> gain_{1.0f};
+    std::atomic<int> vad_source_{static_cast<int>(VadSource::SILERO)};
     std::atomic<bool> enable_silero_{true};
-    std::atomic<bool> enable_fsmn_{true};
-    std::atomic<bool> enable_ten_{true};
+    std::atomic<bool> enable_fsmn_{false};
+    std::atomic<bool> enable_ten_{false};
+    std::atomic<bool> enable_speaker_{false};
+    std::atomic<bool> enable_wavlm_{false};
+    std::atomic<bool> enable_unispeech_{false};
+    std::atomic<bool> enable_wlecapa_{true};
+    std::atomic<float> speaker_threshold_{0.50f};
+    std::atomic<float> wavlm_threshold_{0.80f};
+    std::atomic<float> unispeech_threshold_{0.55f};
+    std::atomic<float> wlecapa_threshold_{0.55f};
+    std::atomic<int>   early_trigger_samples_{27200};  // 1.7s default
+
+    // PCM buffer for speech segments (accumulated for speaker embedding).
+    std::vector<int16_t> speech_pcm_buf_;
+    bool in_speech_segment_ = false;
+    bool early_extracted_   = false;   // true after early extraction during speech
+
+    // Change detection: previous segment embedding for inter-segment cosine similarity.
+    std::vector<float> prev_wlecapa_emb_;  // 192-dim, empty if first segment
 
     OnVadEvent on_vad_;
     OnStats    on_stats_;
+    OnSpeaker  on_speaker_;
 };
 
 } // namespace deusridet

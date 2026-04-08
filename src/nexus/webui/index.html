@@ -92,8 +92,8 @@
             </div>
             <div class="vad-threshold-control">
                 <label for="fsmn-threshold" class="vad-threshold-label">
-                    <button id="fsmn-toggle" class="btn btn--vad btn--active"
-                            aria-pressed="true">FSMN</button>
+                    <button id="fsmn-toggle" class="btn btn--vad"
+                            aria-pressed="false">FSMN</button>
                     <strong id="fsmn-threshold-val">0.50</strong>
                 </label>
                 <input type="range" id="fsmn-threshold" class="vad-threshold-slider"
@@ -105,8 +105,8 @@
             </div>
             <div class="vad-threshold-control">
                 <label for="ten-threshold" class="vad-threshold-label">
-                    <button id="ten-toggle" class="btn btn--vad btn--active"
-                            aria-pressed="true">TEN</button>
+                    <button id="ten-toggle" class="btn btn--vad"
+                            aria-pressed="false">TEN</button>
                     <strong id="ten-threshold-val">0.50</strong>
                 </label>
                 <input type="range" id="ten-threshold" class="vad-threshold-slider"
@@ -116,6 +116,67 @@
             <div class="level-bar-wrap">
                 <div class="level-bar level-bar--ten" id="ten-prob-bar"></div>
             </div>
+            <div class="vad-source-control">
+                <label class="vad-threshold-label">
+                    VAD → Speaker:
+                </label>
+                <select id="vad-source-select" class="vad-source-select">
+                    <option value="any">Any (OR)</option>
+                    <option value="silero" selected>Silero</option>
+                    <option value="fsmn">FSMN</option>
+                    <option value="ten">TEN</option>
+                </select>
+            </div>
+        </section>
+
+        <section class="panel speaker-panel" aria-label="Speaker Identification">
+            <h2 class="panel__title">Speaker ID</h2>
+            <div class="spk-controls">
+                <button id="spk-en-campp" class="btn btn--vad"
+                        data-prefix="speaker" data-cmd="speaker_enable"
+                        aria-pressed="false">CAM++</button>
+                <button id="spk-en-wavlm" class="btn btn--vad"
+                        data-prefix="wavlm" data-cmd="wavlm_enable"
+                        aria-pressed="false">WavLM</button>
+                <button id="spk-en-ecapa" class="btn btn--vad"
+                        data-prefix="unispeech" data-cmd="unispeech_enable"
+                        aria-pressed="false">ECAPA</button>
+                <button id="spk-en-wlecapa" class="btn btn--vad btn--active"
+                        data-prefix="wlecapa" data-cmd="wlecapa_enable"
+                        aria-pressed="true">WL-ECAPA</button>
+                <button id="spk-clear-all" class="btn btn--vad">Clear All</button>
+                <button id="spk-settings-toggle" class="btn btn--vad">Settings</button>
+            </div>
+            <div class="spk-settings" id="spk-settings" hidden>
+                <div class="spk-thresh-row">
+                    <label class="spk-thresh-label">CAM++
+                        <strong id="speaker-threshold-val">0.75</strong></label>
+                    <input type="range" id="speaker-threshold" class="vad-threshold-slider"
+                           min="0.3" max="0.95" step="0.05" value="0.75">
+                </div>
+                <div class="spk-thresh-row">
+                    <label class="spk-thresh-label">WavLM
+                        <strong id="wavlm-threshold-val">0.92</strong></label>
+                    <input type="range" id="wavlm-threshold" class="vad-threshold-slider"
+                           min="0.70" max="0.99" step="0.01" value="0.92">
+                </div>
+                <div class="spk-thresh-row">
+                    <label class="spk-thresh-label">ECAPA
+                        <strong id="unispeech-threshold-val">0.55</strong></label>
+                    <input type="range" id="unispeech-threshold" class="vad-threshold-slider"
+                           min="0.30" max="0.80" step="0.01" value="0.55">
+                </div>
+                <div class="spk-thresh-row">
+                    <label class="spk-thresh-label">WL-ECAPA
+                        <strong id="wlecapa-threshold-val">0.55</strong></label>
+                    <input type="range" id="wlecapa-threshold" class="vad-threshold-slider"
+                           min="0.30" max="0.80" step="0.01" value="0.55">
+                </div>
+            </div>
+            <div id="speaker-roster" class="speaker-roster"></div>
+        </section>
+
+        <section class="panel speaker-debug-panel" aria-label="Speaker Debug" id="speaker-debug">
         </section>
 
         <section class="panel log-panel" aria-label="Server Log">

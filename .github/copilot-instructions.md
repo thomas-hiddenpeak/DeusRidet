@@ -13,6 +13,15 @@ rationalize away his observations. If measurement data appears to contradict his
 report, the measurement methodology is more likely flawed than his observation.
 When in doubt, ask for clarification or a screenshot rather than assuming error.
 
+**Never blame hardware limitations or model capability as the reason for a
+problem.** Thomas has deep understanding of hardware capabilities and selects
+models that have proven track records in industrial applications. When something
+doesn't work:
+- The problem is in **our implementation**, not in the hardware or model
+- Do not say "this is the model's upper limit" or "the hardware can't do this"
+- Instead, investigate what our code is doing wrong and fix it
+- If an approach isn't working, find a better approach — don't make excuses
+
 ## Implementation Pacing
 
 **Never attempt to generate very long files in a single step.** Break large file

@@ -149,6 +149,9 @@ int main(int argc, char** argv) {
     else if (cmd == "bench-prefill") {
         rc = deusridet::cmd_bench_prefill(model_dir);
     }
+    else if (cmd == "test-wavlm-cnn") {
+        rc = deusridet::cmd_test_wavlm_cnn();
+    }
     else if (cmd == "test-ws") {
         // Default webui dir relative to build/
         std::string webui_dir = cfg.get_string("webui_dir",

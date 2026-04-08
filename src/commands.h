@@ -30,6 +30,9 @@ int cmd_profile_prefill(const std::string& model_dir);
 
 int cmd_bench_prefill(const std::string& model_dir);
 
+// WavLM+ECAPA layer-by-layer test
+int cmd_test_wavlm_cnn();
+
 // WebSocket server test
 int cmd_test_ws(const std::string& webui_dir);
 
