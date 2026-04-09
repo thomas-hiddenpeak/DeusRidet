@@ -137,4 +137,49 @@ void MachinaConfig::print() const {
     fprintf(stderr, "  cache_dir      = %s\n", cache_dir.c_str());
 }
 
+// ============================================================================
+// PersonaConfig
+// ============================================================================
+
+// Split comma-separated string into trimmed tokens
+static std::vector<std::string> split_csv(const std::string& s) {
+    std::vector<std::string> result;
+    size_t start = 0;
+    while (start < s.size()) {
+        auto comma = s.find(',', start);
+        if (comma == std::string::npos) comma = s.size();
+        std::string tok = s.substr(start, comma - start);
+        // Trim
+        auto lt = tok.find_first_not_of(" \t");
+        auto rt = tok.find_last_not_of(" \t");
+        if (lt != std::string::npos)
+            result.push_back(tok.substr(lt, rt - lt + 1));
+        start = comma + 1;
+    }
+    return result;
+}
+
+PersonaConfig PersonaConfig::from_config(const Config& cfg) {
+    PersonaConfig pc;
+    pc.name = cfg.get_string("name", "Entity");
+    pc.aliases = split_csv(cfg.get_string("aliases", pc.name));
+
+    pc.speech_max_tokens   = cfg.get_int("speech_max_tokens",    80);
+    pc.thinking_max_tokens = cfg.get_int("thinking_max_tokens",  256);
+    pc.decode_interleave_tokens = cfg.get_int("decode_interleave_tokens", 4);
+
+    return pc;
+}
+
+void PersonaConfig::print() const {
+    fprintf(stderr, "[PersonaConfig]\n");
+    fprintf(stderr, "  name              = %s\n", name.c_str());
+    fprintf(stderr, "  aliases           =");
+    for (const auto& a : aliases) fprintf(stderr, " [%s]", a.c_str());
+    fprintf(stderr, "\n");
+    fprintf(stderr, "  speech_max_tokens = %d\n", speech_max_tokens);
+    fprintf(stderr, "  think_max_tokens  = %d\n", thinking_max_tokens);
+    fprintf(stderr, "  interleave_tokens = %d\n", decode_interleave_tokens);
+}
+
 } // namespace deusridet

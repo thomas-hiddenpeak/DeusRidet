@@ -152,7 +152,7 @@ __global__ void fp16_gemm_kernel(
     //   thread_m_blocks=1: 1 warp_m  × 8 warps_n, each warp = 16m × 8n
     //   thread_m_blocks=3: 3 warps_m × ... doesn't divide evenly
     //     → use 4 warps_m × 2 warps_n, warp 6-7 idle for m-overflow
-    static constexpr int WARPS_M = (thread_m_blocks >= 4) ? 4 :
+    static constexpr int WARPS_M = (thread_m_blocks >= 3) ? 4 :
                                    (thread_m_blocks >= 2) ? 2 : 1;
     static constexpr int WARPS_N = 8 / WARPS_M;
     static constexpr int N_PER_WARP = TILE_N / WARPS_N;  // n-cols per warp
@@ -473,9 +473,11 @@ void fp16_gemm(
     }
     int m_blocks = ceildiv(M, 16);
 
+    // NOTE: template<3> has a broken WARPS_M=2 (should be 4) causing OOB
+    // reads on rows [32..BLOCK_M-1]. Skip it and use template<4> which
+    // correctly sets WARPS_M=4 with warp_active guard for excess warps.
     if (m_blocks <= 1) FP16_LAUNCH(1);
     else if (m_blocks <= 2) FP16_LAUNCH(2);
-    else if (m_blocks <= 3) FP16_LAUNCH(3);
     else                    FP16_LAUNCH(4);
 }
 

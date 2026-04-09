@@ -1865,14 +1865,24 @@ void WavLMEcapaEncoder::forward_ecapa_block(float* d_x, int C, int T,
 
 std::vector<float> WavLMEcapaEncoder::extract(const float* pcm, int n_samples) {
     if (!initialized_) return {};
-    ensure_scratch(n_samples);
+    if (!ensure_scratch(n_samples)) {
+        LOG_WARN("WavLMEcapa", "scratch allocation failed for %d samples — skipping extraction", n_samples);
+        cudaGetLastError();  // clear sticky CUDA error
+        return {};
+    }
 
     // Grow pre-allocated PCM buffer if needed.
     size_t need = (size_t)n_samples;
     if (need > pcm_buf_size_) {
         if (d_pcm_buf_) cudaFree(d_pcm_buf_);
         pcm_buf_size_ = std::max(need, (size_t)(16000 * 10));  // min 10s @ 16kHz
-        cudaMalloc(&d_pcm_buf_, pcm_buf_size_ * sizeof(float));
+        if (cudaMalloc(&d_pcm_buf_, pcm_buf_size_ * sizeof(float)) != cudaSuccess) {
+            LOG_WARN("WavLMEcapa", "PCM buffer alloc failed (%zu bytes)", pcm_buf_size_ * sizeof(float));
+            d_pcm_buf_ = nullptr;
+            pcm_buf_size_ = 0;
+            cudaGetLastError();
+            return {};
+        }
     }
     cudaMemcpyAsync(d_pcm_buf_, pcm, n_samples * sizeof(float),
                     cudaMemcpyHostToDevice, stream_);
@@ -1882,14 +1892,26 @@ std::vector<float> WavLMEcapaEncoder::extract(const float* pcm, int n_samples) {
 
 std::vector<float> WavLMEcapaEncoder::extract_gpu(const float* d_pcm, int n_samples) {
     if (!initialized_) return {};
-    ensure_scratch(n_samples);
+    if (!ensure_scratch(n_samples)) {
+        LOG_WARN("WavLMEcapa", "scratch allocation failed (gpu path) for %d samples — skipping", n_samples);
+        cudaGetLastError();
+        return {};
+    }
 
     // Timing events for latency breakdown.
-    cudaEvent_t ev_start, ev_cnn, ev_enc, ev_done;
-    cudaEventCreate(&ev_start);
-    cudaEventCreate(&ev_cnn);
-    cudaEventCreate(&ev_enc);
-    cudaEventCreate(&ev_done);
+    cudaEvent_t ev_start = nullptr, ev_cnn = nullptr, ev_enc = nullptr, ev_done = nullptr;
+    if (cudaEventCreate(&ev_start) != cudaSuccess ||
+        cudaEventCreate(&ev_cnn)   != cudaSuccess ||
+        cudaEventCreate(&ev_enc)   != cudaSuccess ||
+        cudaEventCreate(&ev_done)  != cudaSuccess) {
+        LOG_WARN("WavLMEcapa", "cudaEventCreate failed — skipping extraction");
+        if (ev_start) cudaEventDestroy(ev_start);
+        if (ev_cnn)   cudaEventDestroy(ev_cnn);
+        if (ev_enc)   cudaEventDestroy(ev_enc);
+        if (ev_done)  cudaEventDestroy(ev_done);
+        cudaGetLastError();
+        return {};
+    }
     cudaEventRecord(ev_start, stream_);
 
     int D = WavLMConfig::embed_dim;

@@ -156,11 +156,13 @@ int main(int argc, char** argv) {
     else if (cmd == "test-ws") {
         // Default webui dir relative to executable location.
         std::string webui_dir = cfg.get_string("webui_dir", "");
+        std::string persona_conf = "configs/persona.conf";
         for (int i = 2; i < argc; i++) {
             std::string arg = argv[i];
             if (arg == "--webui" && i + 1 < argc) {
                 webui_dir = argv[++i];
-                break;
+            } else if (arg == "--persona" && i + 1 < argc) {
+                persona_conf = argv[++i];
             }
         }
         // If not set, resolve relative to executable's directory.
@@ -177,7 +179,7 @@ int main(int argc, char** argv) {
                 webui_dir = "../src/nexus/webui";  // fallback
             }
         }
-        rc = deusridet::cmd_test_ws(webui_dir);
+        rc = deusridet::cmd_test_ws(webui_dir, model_dir, persona_conf);
     }
     else if (cmd == "--help" || cmd == "-h" || cmd == "help") {
         deusridet::print_usage();

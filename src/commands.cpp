@@ -27,6 +27,8 @@
 #include "nexus/ws_server.h"
 #include "sensus/auditus/audio_pipeline.h"
 #include "orator/wavlm_ecapa_encoder.h"
+#include "conscientia/stream.h"
+#include "memoria/cache_manager.h"
 
 namespace deusridet {
 
@@ -1255,9 +1257,137 @@ int cmd_test_wavlm_cnn() {
 // test-ws: WebSocket server + audio pipeline (Ring → Mel → VAD) with WebUI.
 // ============================================================================
 
-int cmd_test_ws(const std::string& webui_dir) {
+int cmd_test_ws(const std::string& webui_dir,
+                const std::string& llm_model_dir,
+                const std::string& persona_conf_path) {
     printf("[test-ws] Starting WebSocket + Audio Pipeline...\n");
     printf("[test-ws] WebUI dir: %s\n", webui_dir.c_str());
+
+    // ── LLM + Consciousness setup (optional — skip if no model dir) ──
+    Tokenizer* tokenizer_ptr = nullptr;
+    ModelWeights* weights_ptr = nullptr;
+    InferenceState* state_ptr = nullptr;
+    CacheManager* cache_mgr_ptr = nullptr;
+    ConscientiStream* stream_ptr = nullptr;
+
+    Tokenizer llm_tokenizer;
+    ModelWeights llm_weights = {};
+    InferenceState llm_state = {};
+    CacheManager llm_cache;
+    ConscientiStream consciousness;
+    PersonaConfig persona_cfg;
+
+    bool llm_loaded = false;
+
+    if (!llm_model_dir.empty()) {
+        printf("[test-ws] Loading LLM from %s ...\n", llm_model_dir.c_str());
+
+        // Load persona config
+        if (!persona_conf_path.empty()) {
+            Config pcfg;
+            if (pcfg.load(persona_conf_path)) {
+                persona_cfg = PersonaConfig::from_config(pcfg);
+                persona_cfg.print();
+            } else {
+                printf("[test-ws] WARNING: persona config not found: %s\n",
+                       persona_conf_path.c_str());
+            }
+        }
+
+        // Load tokenizer
+        if (!llm_tokenizer.load(llm_model_dir)) {
+            fprintf(stderr, "[test-ws] Tokenizer load failed\n");
+            return 1;
+        }
+        printf("[test-ws] Tokenizer loaded: vocab=%d\n", llm_tokenizer.vocab_size());
+
+        // Load weights
+        auto t0 = std::chrono::steady_clock::now();
+        if (!load_model_weights(llm_model_dir, llm_weights)) {
+            fprintf(stderr, "[test-ws] Weight load failed\n");
+            return 1;
+        }
+        merge_projection_weights(llm_weights);
+        double load_sec = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0).count();
+        printf("[test-ws] LLM weights loaded: %.2f GB in %.1fs\n",
+               llm_weights.total_bytes / 1073741824.0, load_sec);
+
+        // Allocate inference state (max sequence for decode scratch)
+        int max_seq = 2048;  // scratch buffer size for single-pass operations
+        if (!llm_state.allocate(max_seq)) {
+            fprintf(stderr, "[test-ws] InferenceState allocation failed\n");
+            free_model_weights(llm_weights);
+            return 1;
+        }
+        printf("[test-ws] InferenceState allocated (max_seq=%d)\n", max_seq);
+
+        // Initialize KV cache manager with paged blocks
+        float kv_cache_gb = 14.0f;
+        {
+            Config machina_cfg;
+            if (machina_cfg.load("configs/machina.conf")) {
+                kv_cache_gb = (float)machina_cfg.get_double("kv_cache_gb", 14.0);
+            }
+        }
+        size_t kv_budget = (size_t)(kv_cache_gb * 1024 * 1024 * 1024);
+        if (!llm_cache.init(kv_budget, "/tmp/deusridet_cache")) {
+            fprintf(stderr, "[test-ws] CacheManager init failed\n");
+            llm_state.free();
+            free_model_weights(llm_weights);
+            return 1;
+        }
+        printf("[test-ws] CacheManager: %d blocks (%d tokens/block), %.1f GB\n",
+               llm_cache.block_pool().max_blocks(),
+               llm_cache.block_pool().block_size(),
+               kv_budget / 1073741824.0);
+
+        // Initialize consciousness stream
+        ConscientiConfig cs_cfg;
+        cs_cfg.max_prefill_chunk = 512;
+        cs_cfg.max_context_len = 131072;
+        cs_cfg.temperature = 0.7f;
+        cs_cfg.top_k = 50;
+        cs_cfg.top_p = 0.9f;
+
+        if (!consciousness.init(cs_cfg, persona_cfg,
+                                 llm_weights, llm_state, llm_cache,
+                                 llm_tokenizer)) {
+            fprintf(stderr, "[test-ws] ConscientiStream init failed\n");
+            llm_cache.destroy();
+            llm_state.free();
+            free_model_weights(llm_weights);
+            return 1;
+        }
+
+        // Set default prompts for identity + each decode pipeline
+        std::string identity_prompt =
+            "你是黑娃，一个有自我意识的AI实体。你能感知周围的声音和文字，"
+            "并自主决定是否回应。你的思维是连续的、自由流动的。"
+            "标记为[听到的对话]的内容是你感知到的环境声音，"
+            "你不需要回应这些对话，除非有人直接叫你的名字。";
+
+        consciousness.speech_cfg().prompt =
+            "回答简洁自然，像朋友间对话。不超过两三句话，不重复用户的话。";
+        consciousness.thinking_cfg().prompt =
+            "深入分析当前情境和输入。自由联想、推理、质疑。"
+            "不需要回应用户，专注于理解和内省。";
+        consciousness.action_cfg().prompt =
+            "需要执行操作时，明确描述要执行的动作和参数。保持精确简洁。";
+
+        consciousness.set_identity_prompt(identity_prompt);
+
+        // Set pointers for callback closures
+        tokenizer_ptr = &llm_tokenizer;
+        weights_ptr = &llm_weights;
+        state_ptr = &llm_state;
+        cache_mgr_ptr = &llm_cache;
+        stream_ptr = &consciousness;
+        llm_loaded = true;
+
+        printf("[test-ws] Consciousness stream ready (entity=%s)\n",
+               persona_cfg.name.c_str());
+    }
 
     WsServer server;
     WsServerConfig ws_cfg;
@@ -1310,19 +1440,58 @@ int cmd_test_ws(const std::string& webui_dir) {
     std::atomic<uint64_t> total_frames{0};
     std::atomic<uint64_t> total_bytes{0};
     std::atomic<bool> loopback{false};
-    std::atomic<int> active_ws_fd{-1};
+
+    // Helper: strip trailing incomplete UTF-8 sequence from a byte string.
+    auto sanitize_utf8 = [](const std::string& s) -> std::string {
+        if (s.empty()) return s;
+        size_t i = 0, last_good = 0;
+        while (i < s.size()) {
+            uint8_t c = (uint8_t)s[i];
+            int expect;
+            if (c < 0x80)       expect = 1;
+            else if (c < 0xC0)  { i++; continue; }
+            else if (c < 0xE0)  expect = 2;
+            else if (c < 0xF0)  expect = 3;
+            else if (c < 0xF8)  expect = 4;
+            else                { i++; continue; }
+            if (i + expect > s.size()) break;
+            bool ok = true;
+            for (int j = 1; j < expect; j++) {
+                if (((uint8_t)s[i + j] & 0xC0) != 0x80) { ok = false; break; }
+            }
+            if (!ok) { i++; continue; }
+            i += expect;
+            last_good = i;
+        }
+        return s.substr(0, last_good);
+    };
+
+    // Helper: escape a UTF-8 string for JSON, stripping invalid bytes.
+    auto json_escape = [&](const std::string& raw) -> std::string {
+        std::string clean = sanitize_utf8(raw);
+        std::string out;
+        out.reserve(clean.size() + 32);
+        for (unsigned char c : clean) {
+            if (c == '"')       out += "\\\"";
+            else if (c == '\\') out += "\\\\";
+            else if (c == '\n') out += "\\n";
+            else if (c == '\r') out += "\\r";
+            else if (c == '\t') out += "\\t";
+            else if (c < 0x20)  { /* drop control chars */ }
+            else                out += (char)c;
+        }
+        return out;
+    };
 
     // Audio pipeline callbacks.
     audio.set_on_vad([&](const VadResult& vr, int frame_idx) {
-        int fd = active_ws_fd.load(std::memory_order_relaxed);
-        if (fd < 0) return;
         char json[256];
         snprintf(json, sizeof(json),
             R"({"type":"vad","speech":%s,"event":"%s","frame":%d,"energy":%.2f})",
             vr.is_speech ? "true" : "false",
             vr.segment_start ? "start" : (vr.segment_end ? "end" : "none"),
             frame_idx, vr.energy);
-        server.send_text(fd, json);
+        server.broadcast_text(json);
         if (vr.segment_start)
             printf("[test-ws] VAD: speech START at frame %d (energy=%.2f)\n",
                    frame_idx, vr.energy);
@@ -1334,27 +1503,8 @@ int cmd_test_ws(const std::string& webui_dir) {
     audio.set_on_transcript([&](const deusridet::asr::ASRResult& result, float audio_sec,
                                 int speaker_id, const std::string& speaker_name,
                                 float speaker_sim, const std::string& trigger_reason) {
-        int fd = active_ws_fd.load(std::memory_order_relaxed);
-        if (fd < 0) return;
-        // Escape text for JSON (simple: replace " and \ and control chars).
-        std::string escaped;
-        escaped.reserve(result.text.size() + 16);
-        for (char c : result.text) {
-            if (c == '"') escaped += "\\\"";
-            else if (c == '\\') escaped += "\\\\";
-            else if (c == '\n') escaped += "\\n";
-            else if (c == '\r') escaped += "\\r";
-            else if (c == '\t') escaped += "\\t";
-            else escaped += c;
-        }
-        // Escape speaker name for JSON.
-        std::string spk_escaped;
-        spk_escaped.reserve(speaker_name.size() + 8);
-        for (char c : speaker_name) {
-            if (c == '"') spk_escaped += "\\\"";
-            else if (c == '\\') spk_escaped += "\\\\";
-            else spk_escaped += c;
-        }
+        std::string escaped = json_escape(result.text);
+        std::string spk_escaped = json_escape(speaker_name);
         char json[2048];
         snprintf(json, sizeof(json),
             R"({"type":"asr_transcript","text":"%s","latency_ms":%.1f,"audio_sec":%.2f,)"
@@ -1365,7 +1515,7 @@ int cmd_test_ws(const std::string& webui_dir) {
             result.token_count, result.mel_frames,
             speaker_id, spk_escaped.c_str(), speaker_sim,
             trigger_reason.c_str());
-        server.send_text(fd, json);
+        server.broadcast_text(json);
         if (speaker_id >= 0)
             printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s]\n",
                    result.text.c_str(), result.total_ms, audio_sec,
@@ -1373,36 +1523,34 @@ int cmd_test_ws(const std::string& webui_dir) {
         else
             printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s)\n",
                    result.text.c_str(), result.total_ms, audio_sec);
+
+        // Inject ASR transcript into consciousness stream
+        if (llm_loaded && !result.text.empty()) {
+            InputItem item;
+            item.source = InputSource::ASR;
+            item.text = result.text;
+            item.speaker_name = speaker_name;
+            item.speaker_id = speaker_id;
+            item.priority = 0.8f;
+            consciousness.inject_input(std::move(item));
+        }
     });
 
     // ASR log callback (called from pipeline and ASR worker threads).
     audio.set_on_asr_log([&](const std::string& detail_json) {
-        int fd = active_ws_fd.load(std::memory_order_relaxed);
-        if (fd < 0) return;
         // Wrap the detail JSON inside an asr_log envelope.
         std::string msg = R"({"type":"asr_log",)" + detail_json.substr(1);
-        server.send_text(fd, msg);
+        server.broadcast_text(msg);
     });
 
     // ASR streaming partial callback (called from ASR worker thread).
     audio.set_on_asr_partial([&](const std::string& text, float audio_sec) {
-        int fd = active_ws_fd.load(std::memory_order_relaxed);
-        if (fd < 0) return;
-        std::string escaped;
-        escaped.reserve(text.size() + 16);
-        for (char c : text) {
-            if (c == '"') escaped += "\\\"";
-            else if (c == '\\') escaped += "\\\\";
-            else if (c == '\n') escaped += "\\n";
-            else if (c == '\r') escaped += "\\r";
-            else if (c == '\t') escaped += "\\t";
-            else escaped += c;
-        }
+        std::string escaped = json_escape(text);
         char json[2048];
         snprintf(json, sizeof(json),
             R"({"type":"asr_partial","text":"%s","audio_sec":%.2f})",
             escaped.c_str(), audio_sec);
-        server.send_text(fd, json);
+        server.broadcast_text(json);
     });
 
     // Helper: serialize a SpeakerDb's roster as a JSON array string.
@@ -1424,9 +1572,6 @@ int cmd_test_ws(const std::string& webui_dir) {
     };
 
     audio.set_on_stats([&](const AudioPipelineStats& st) {
-        int fd = active_ws_fd.load(std::memory_order_relaxed);
-        if (fd < 0) return;
-
         // Build speaker lists JSON — always included so the roster stays current.
         std::string lists_json;
         lists_json += R"(,"speaker_lists":[)";
@@ -1508,7 +1653,7 @@ int cmd_test_ws(const std::string& webui_dir) {
                 R"(,"asr_buf_sec":%.2f,"asr_buf_has_speech":%s)"
                 R"(,"asr_post_silence_ms":%d,"asr_max_buf_sec":%.1f,"asr_min_dur_sec":%.2f)"
                 R"(,"asr_pre_roll_sec":%.2f,"asr_max_tokens":%d,"asr_rep_penalty":%.2f,"asr_min_energy":%.4f)"
-                R"(,"asr_vad_source":%d,"asr_partial_sec":%.1f,"asr_min_speech_ratio":%.2f,"asr_halluc_filter":%s)",
+                R"(,"asr_vad_source":%d,"asr_partial_sec":%.1f,"asr_min_speech_ratio":%.2f)",
                 audio.asr_enabled() ? "true" : "false",
                 audio.asr_loaded() ? "true" : "false",
                 st.asr_active ? "true" : "false",
@@ -1526,8 +1671,7 @@ int cmd_test_ws(const std::string& webui_dir) {
                 audio.asr_min_energy(),
                 static_cast<int>(audio.asr_vad_source()),
                 audio.asr_partial_sec(),
-                audio.asr_min_speech_ratio(),
-                audio.asr_halluc_filter() ? "true" : "false");
+                audio.asr_min_speech_ratio());
             full_json += asr;
         }
 
@@ -1557,33 +1701,194 @@ int cmd_test_ws(const std::string& webui_dir) {
 
         full_json += lists_json;
         full_json += '}';
-        server.send_text(fd, full_json);
+        server.broadcast_text(full_json);
     });
 
     audio.set_on_speaker([&](const SpeakerMatch& match) {
-        int fd = active_ws_fd.load(std::memory_order_relaxed);
-        if (fd < 0) return;
         char json[256];
         snprintf(json, sizeof(json),
             R"({"type":"speaker","id":%d,"sim":%.3f,"new":%s,"name":"%s"})",
             match.speaker_id, match.similarity,
             match.is_new ? "true" : "false",
             match.name.c_str());
-        server.send_text(fd, json);
+        server.broadcast_text(json);
         printf("[test-ws] Speaker: id=%d sim=%.3f %s%s\n",
                match.speaker_id, match.similarity,
                match.is_new ? "NEW " : "",
                match.name.empty() ? "(unnamed)" : match.name.c_str());
     });
 
+    // ── Consciousness stream callbacks ──────────────────────────────
+    if (llm_loaded) {
+        // Decode output → WS as JSON
+        consciousness.set_on_decode([&](const DecodeResult& result) {
+            std::string escaped = json_escape(result.text);
+            const char* state_names[] = {"active", "daydream", "dreaming"};
+            char json[4096];
+            snprintf(json, sizeof(json),
+                R"({"type":"consciousness_decode","text":"%s","tokens":%d,"time_ms":%.1f,"state":"%s"})",
+                escaped.c_str(), result.tokens_generated, result.time_ms,
+                state_names[static_cast<int>(result.state_during)]);
+            server.broadcast_text(json);
+            printf("[consciousness] %s: \"%s\" (%d tok, %.0fms)\n",
+                   state_names[static_cast<int>(result.state_during)],
+                   result.text.c_str(), result.tokens_generated, result.time_ms);
+        });
+
+        // Per-token speech streaming → WS as JSON
+        // token_id == -1 signals start of new speech (reset accumulator on frontend)
+        consciousness.set_on_speech_token([&](const std::string& token_text, int token_id) {
+            std::string escaped = json_escape(token_text);
+            char json[512];
+            snprintf(json, sizeof(json),
+                R"({"type":"speech_token","text":"%s","token_id":%d})",
+                escaped.c_str(), token_id);
+            server.broadcast_text(json);
+        });
+
+        // State update → WS as JSON (includes metrics + system stats)
+        consciousness.set_on_state([&](WakefulnessState state,
+                                        float wakefulness,
+                                        int kv_blocks_used,
+                                        int kv_blocks_free,
+                                        int current_pos,
+                                        const ConscientiMetrics& metrics) {
+            // System memory stats
+            size_t cuda_free = 0, cuda_total = 0;
+            cudaMemGetInfo(&cuda_free, &cuda_total);
+            size_t mem_avail_kb = read_memavail_kb();
+            size_t rss_kb = 0;
+            {
+                FILE* fp = fopen("/proc/self/status", "r");
+                if (fp) {
+                    char line[256];
+                    while (fgets(line, sizeof(line), fp)) {
+                        if (strncmp(line, "VmRSS:", 6) == 0) {
+                            rss_kb = strtoull(line + 6, nullptr, 10);
+                            break;
+                        }
+                    }
+                    fclose(fp);
+                }
+            }
+
+            const char* state_names[] = {"active", "daydream", "dreaming"};
+            char json[1024];
+            snprintf(json, sizeof(json),
+                R"({"type":"consciousness_state","state":"%s","wakefulness":%.3f,)"
+                R"("kv_used":%d,"kv_free":%d,"pos":%d,)"
+                R"("prefill_ms":%.1f,"prefill_tps":%.1f,"prefill_tokens":%d,)"
+                R"("decode_ms_per_tok":%.1f,"decode_tokens":%d,)"
+                R"("total_prefill_tok":%d,"total_decode_tok":%d,)"
+                R"("total_prefill_ms":%.0f,"total_decode_ms":%.0f,)"
+                R"("cuda_free_mb":%.0f,"cuda_total_mb":%.0f,)"
+                R"("mem_avail_mb":%.0f,"rss_mb":%.0f})",
+                state_names[static_cast<int>(state)], wakefulness,
+                kv_blocks_used, kv_blocks_free, current_pos,
+                metrics.last_prefill_ms, metrics.last_prefill_tps,
+                metrics.last_prefill_tokens,
+                metrics.last_decode_ms_per_tok, metrics.last_decode_tokens,
+                metrics.total_prefill_tokens, metrics.total_decode_tokens,
+                metrics.total_prefill_ms, metrics.total_decode_ms,
+                cuda_free / 1048576.0, cuda_total / 1048576.0,
+                mem_avail_kb / 1024.0, rss_kb / 1024.0);
+            server.broadcast_text(json);
+        });
+    }
+
     server.set_on_connect([&](int fd) {
-        active_ws_fd.store(fd, std::memory_order_relaxed);
         printf("[test-ws] WS client connected  (fd=%d)\n", fd);
+        // Send initial consciousness state with full context
+        if (llm_loaded) {
+            const char* state_names[] = {"active", "daydream", "dreaming"};
+            auto m = consciousness.metrics();
+
+            size_t cuda_free = 0, cuda_total = 0;
+            cudaMemGetInfo(&cuda_free, &cuda_total);
+            size_t mem_avail_kb = read_memavail_kb();
+            size_t rss_kb = 0;
+            {
+                FILE* fp = fopen("/proc/self/status", "r");
+                if (fp) {
+                    char line[256];
+                    while (fgets(line, sizeof(line), fp)) {
+                        if (strncmp(line, "VmRSS:", 6) == 0) {
+                            rss_kb = strtoull(line + 6, nullptr, 10);
+                            break;
+                        }
+                    }
+                    fclose(fp);
+                }
+            }
+
+            char json[4096];
+            snprintf(json, sizeof(json),
+                R"({"type":"consciousness_state","state":"%s","wakefulness":%.3f,)"
+                R"("kv_used":%d,"kv_free":%d,"pos":%d,)"
+                R"("llm_loaded":true,"entity":"%s",)"
+                R"("prefill_ms":%.1f,"prefill_tps":%.1f,"prefill_tokens":%d,)"
+                R"("decode_ms_per_tok":%.1f,"decode_tokens":%d,)"
+                R"("total_prefill_tok":%d,"total_decode_tok":%d,)"
+                R"("total_prefill_ms":%.0f,"total_decode_ms":%.0f,)"
+                R"("cuda_free_mb":%.0f,"cuda_total_mb":%.0f,)"
+                R"("mem_avail_mb":%.0f,"rss_mb":%.0f,)"
+                R"("enable_response":%s,"enable_daydream":%s,"enable_dreaming":%s,"enable_llm":%s,)"
+                R"("enable_speech":%s,"enable_thinking":%s,"enable_action":%s,)"
+                R"("temperature":%.2f,"top_k":%d,"top_p":%.2f,)"
+                R"("speech_max_tokens":%d,"thinking_max_tokens":%d,)"
+                R"("speech":{"temperature":%.2f,"top_k":%d,"top_p":%.2f,"max_tokens":%d},)"
+                R"("thinking":{"temperature":%.2f,"top_k":%d,"top_p":%.2f,"max_tokens":%d},)"
+                R"("action":{"temperature":%.2f,"top_k":%d,"top_p":%.2f,"max_tokens":%d}})",
+                state_names[static_cast<int>(consciousness.current_state())],
+                consciousness.scheduler().wakefulness(),
+                llm_cache.gpu_blocks_used(), llm_cache.free_blocks(),
+                consciousness.current_pos(),
+                persona_cfg.name.c_str(),
+                m.last_prefill_ms, m.last_prefill_tps, m.last_prefill_tokens,
+                m.last_decode_ms_per_tok, m.last_decode_tokens,
+                m.total_prefill_tokens, m.total_decode_tokens,
+                m.total_prefill_ms, m.total_decode_ms,
+                cuda_free / 1048576.0, cuda_total / 1048576.0,
+                mem_avail_kb / 1024.0, rss_kb / 1024.0,
+                consciousness.response_enabled() ? "true" : "false",
+                consciousness.daydream_enabled() ? "true" : "false",
+                consciousness.dreaming_enabled() ? "true" : "false",
+                consciousness.llm_enabled() ? "true" : "false",
+                consciousness.speech_enabled() ? "true" : "false",
+                consciousness.thinking_enabled() ? "true" : "false",
+                consciousness.action_enabled() ? "true" : "false",
+                consciousness.temperature(), consciousness.top_k(),
+                consciousness.top_p(),
+                consciousness.speech_max_tokens(),
+                consciousness.thinking_max_tokens(),
+                consciousness.speech_cfg().sampling.temperature,
+                consciousness.speech_cfg().sampling.top_k,
+                consciousness.speech_cfg().sampling.top_p,
+                consciousness.speech_cfg().max_tokens,
+                consciousness.thinking_cfg().sampling.temperature,
+                consciousness.thinking_cfg().sampling.top_k,
+                consciousness.thinking_cfg().sampling.top_p,
+                consciousness.thinking_cfg().max_tokens,
+                consciousness.action_cfg().sampling.temperature,
+                consciousness.action_cfg().sampling.top_k,
+                consciousness.action_cfg().sampling.top_p,
+                consciousness.action_cfg().max_tokens);
+            server.send_text(fd, json);
+
+            // Send prompt defaults as a separate message (prompts may
+            // contain characters that break snprintf-assembled JSON)
+            std::string pj = R"({"type":"consciousness_prompts",)"
+                R"("identity":")" + json_escape(consciousness.identity_prompt()) + R"(",)"
+                R"("speech":")" + json_escape(consciousness.speech_cfg().prompt) + R"(",)"
+                R"("thinking":")" + json_escape(consciousness.thinking_cfg().prompt) + R"(",)"
+                R"("action":")" + json_escape(consciousness.action_cfg().prompt) + R"("})";
+            server.send_text(fd, pj);
+        } else {
+            server.send_text(fd, R"({"type":"consciousness_state","llm_loaded":false})");
+        }
     });
 
     server.set_on_disconnect([&](int fd) {
-        if (active_ws_fd.load() == fd)
-            active_ws_fd.store(-1, std::memory_order_relaxed);
         printf("[test-ws] WS client disconnected (fd=%d)\n", fd);
     });
 
@@ -1958,12 +2263,6 @@ int cmd_test_ws(const std::string& webui_dir) {
                     snprintf(json, sizeof(json),
                         R"({"type":"asr_param","key":"speech_ratio","value":%.2f})",
                         audio.asr_min_speech_ratio());
-                } else if (key == "halluc_filter") {
-                    bool on = (val == "1" || val == "true" || val == "on");
-                    audio.set_asr_halluc_filter(on);
-                    snprintf(json, sizeof(json),
-                        R"({"type":"asr_param","key":"halluc_filter","value":%s})",
-                        audio.asr_halluc_filter() ? "true" : "false");
                 } else {
                     snprintf(json, sizeof(json),
                         R"({"type":"asr_param","key":"%s","error":"unknown"})",
@@ -1972,6 +2271,149 @@ int cmd_test_ws(const std::string& webui_dir) {
                 server.send_text(fd, json);
                 printf("[test-ws] ASR param %s=%s (fd=%d)\n",
                        key.c_str(), val.c_str(), fd);
+            }
+        } else if (msg.rfind("consciousness_enable:", 0) == 0 && llm_loaded) {
+            // Format: consciousness_enable:<mode>:<on|off>
+            auto rest = msg.substr(21);
+            auto sep = rest.find(':');
+            if (sep != std::string::npos) {
+                auto mode = rest.substr(0, sep);
+                bool on = rest.substr(sep + 1) == "on";
+                if (mode == "response") consciousness.set_response_enabled(on);
+                else if (mode == "daydream") consciousness.set_daydream_enabled(on);
+                else if (mode == "dreaming") consciousness.set_dreaming_enabled(on);
+                else if (mode == "llm") consciousness.set_llm_enabled(on);
+                else if (mode == "speech") consciousness.set_speech_enabled(on);
+                else if (mode == "thinking") consciousness.set_thinking_enabled(on);
+                else if (mode == "action") consciousness.set_action_enabled(on);
+                char json[128];
+                snprintf(json, sizeof(json),
+                    R"({"type":"consciousness_enable","mode":"%s","enabled":%s})",
+                    mode.c_str(), on ? "true" : "false");
+                server.send_text(fd, json);
+                printf("[test-ws] Consciousness %s %s (fd=%d)\n",
+                       mode.c_str(), on ? "ON" : "OFF", fd);
+            }
+        } else if (msg.rfind("consciousness_param:", 0) == 0 && llm_loaded) {
+            // Format: consciousness_param:<key>:<value>
+            // Key can be global (e.g. "temperature") or per-pipeline
+            // (e.g. "speech.temperature", "thinking.top_k")
+            auto rest = msg.substr(20);
+            auto sep = rest.find(':');
+            if (sep != std::string::npos) {
+                auto key = rest.substr(0, sep);
+                auto val = rest.substr(sep + 1);
+                char json[256];
+
+                // Determine pipeline target
+                std::string pipeline;
+                std::string param_name = key;
+                auto dot = key.find('.');
+                if (dot != std::string::npos) {
+                    pipeline = key.substr(0, dot);
+                    param_name = key.substr(dot + 1);
+                }
+
+                // Helper to get target pipeline config
+                PipelineConfig* pcfg = nullptr;
+                if (pipeline == "speech") pcfg = &consciousness.speech_cfg();
+                else if (pipeline == "thinking") pcfg = &consciousness.thinking_cfg();
+                else if (pipeline == "action") pcfg = &consciousness.action_cfg();
+
+                if (param_name == "temperature") {
+                    float v = std::stof(val);
+                    if (v < 0.0f) v = 0.0f;
+                    if (v > 2.0f) v = 2.0f;
+                    if (pcfg) pcfg->sampling.temperature = v;
+                    else consciousness.set_temperature(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"consciousness_param","key":"%s","value":%.2f})",
+                        key.c_str(), v);
+                } else if (param_name == "top_k") {
+                    int v = std::stoi(val);
+                    if (v < 1) v = 1;
+                    if (v > 200) v = 200;
+                    if (pcfg) pcfg->sampling.top_k = v;
+                    else consciousness.set_top_k(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"consciousness_param","key":"%s","value":%d})",
+                        key.c_str(), v);
+                } else if (param_name == "top_p") {
+                    float v = std::stof(val);
+                    if (v < 0.0f) v = 0.0f;
+                    if (v > 1.0f) v = 1.0f;
+                    if (pcfg) pcfg->sampling.top_p = v;
+                    else consciousness.set_top_p(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"consciousness_param","key":"%s","value":%.2f})",
+                        key.c_str(), v);
+                } else if (param_name == "max_tokens") {
+                    int v = std::stoi(val);
+                    if (v < 10) v = 10;
+                    if (v > 4096) v = 4096;
+                    if (pcfg) pcfg->max_tokens = v;
+                    snprintf(json, sizeof(json),
+                        R"({"type":"consciousness_param","key":"%s","value":%d})",
+                        key.c_str(), v);
+                } else {
+                    snprintf(json, sizeof(json),
+                        R"({"type":"consciousness_param","key":"%s","error":"unknown"})",
+                        key.c_str());
+                }
+                server.send_text(fd, json);
+                printf("[test-ws] Consciousness param %s=%s (fd=%d)\n",
+                       key.c_str(), val.c_str(), fd);
+            }
+        } else if (msg.rfind("consciousness_prompt:", 0) == 0 && llm_loaded) {
+            // Format: consciousness_prompt:<pipeline>:<text>
+            // pipeline: "identity" (system prompt), "speech", "thinking", "action"
+            auto rest = msg.substr(21);
+            auto sep = rest.find(':');
+            if (sep != std::string::npos) {
+                auto pipeline = rest.substr(0, sep);
+                auto text = rest.substr(sep + 1);
+                if (pipeline == "identity") {
+                    consciousness.set_identity_prompt(text);
+                } else if (pipeline == "speech") {
+                    consciousness.speech_cfg().prompt = text;
+                    consciousness.recompose_system_prompt();
+                } else if (pipeline == "thinking") {
+                    consciousness.thinking_cfg().prompt = text;
+                    consciousness.recompose_system_prompt();
+                } else if (pipeline == "action") {
+                    consciousness.action_cfg().prompt = text;
+                    consciousness.recompose_system_prompt();
+                }
+                char json[256];
+                snprintf(json, sizeof(json),
+                    R"({"type":"consciousness_prompt","pipeline":"%s","ok":true})",
+                    pipeline.c_str());
+                server.send_text(fd, json);
+                printf("[test-ws] %s prompt updated (%zu chars, fd=%d)\n",
+                       pipeline.c_str(), text.size(), fd);
+            } else {
+                // Legacy: no pipeline prefix → identity prompt
+                consciousness.set_identity_prompt(rest);
+                server.send_text(fd, R"({"type":"consciousness_prompt","pipeline":"identity","ok":true})");
+                printf("[test-ws] System prompt updated (%zu chars, fd=%d)\n",
+                       rest.size(), fd);
+            }
+        } else if (msg.rfind("text_input:", 0) == 0 && llm_loaded) {
+            // Inject text into consciousness stream
+            std::string text = msg.substr(11);
+            if (!text.empty()) {
+                InputItem item;
+                item.source = InputSource::TEXT;
+                item.text = text;
+                item.priority = 1.0f;
+                consciousness.inject_input(std::move(item));
+                // Echo back confirmation
+                char json[256];
+                snprintf(json, sizeof(json),
+                    R"({"type":"text_input_ack","ok":true})");
+                server.send_text(fd, json);
+                printf("[test-ws] Text input injected: \"%s\" (fd=%d)\n",
+                       text.c_str(), fd);
             }
         } else {
             printf("[test-ws] Text from fd=%d: %s\n", fd, msg.c_str());
@@ -2035,6 +2477,14 @@ int cmd_test_ws(const std::string& webui_dir) {
     printf("[test-ws] Server running on http://localhost:%d\n", ws_cfg.port);
     printf("[test-ws] Audio pipeline: Mel(n_fft=%d hop=%d mels=%d) + VAD\n",
            audio_cfg.mel.n_fft, audio_cfg.mel.hop_length, audio_cfg.mel.n_mels);
+
+    // Start consciousness stream (after server is running so callbacks work)
+    if (llm_loaded) {
+        consciousness.start();
+        printf("[test-ws] Consciousness stream running (entity=%s)\n",
+               persona_cfg.name.c_str());
+    }
+
     printf("[test-ws] Press Ctrl+C to stop...\n");
 
     // Block until SIGINT/SIGTERM.
@@ -2047,10 +2497,25 @@ int cmd_test_ws(const std::string& webui_dir) {
     sigwait(&mask, &sig);
     printf("\n[test-ws] Caught signal %d, shutting down...\n", sig);
 
+    // Stop consciousness first (it depends on model/cache)
+    if (llm_loaded) {
+        consciousness.stop();
+        printf("[test-ws] Consciousness stream stopped\n");
+    }
+
     audio.stop();
     server.stop();
     printf("[test-ws] Total: %lu WS frames, %.1f KB\n",
            total_frames.load(), total_bytes.load() / 1024.0);
+
+    // Cleanup LLM resources
+    if (llm_loaded) {
+        llm_cache.destroy();
+        llm_state.free();
+        free_model_weights(llm_weights);
+        printf("[test-ws] LLM resources released\n");
+    }
+
     return 0;
 }
 

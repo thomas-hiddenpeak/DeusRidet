@@ -38,10 +38,6 @@ export class AsrPanel {
                     <option value="any">Any (OR)</option>
                     <option value="direct">Direct (no VAD)</option>
                 </select>
-                <label class="asr-halluc-toggle" title="Filter Whisper subtitle artifacts (谢谢观看, 字幕由 etc.)">
-                    <input type="checkbox" id="asr-halluc-filter" checked>
-                    Artifact filter
-                </label>
             </div>
             <div class="asr-stats-grid" id="asr-stats">
                 <div class="asr-stat">
@@ -130,7 +126,6 @@ export class AsrPanel {
         this.bufLabel = this.el.querySelector('#asr-buf-label');
         this.asrVadSelect = this.el.querySelector('#asr-vad-select');
         this.partialTextEl = this.el.querySelector('#asr-partial-text');
-        this.hallucFilterCb = this.el.querySelector('#asr-halluc-filter');
         this._partialClearTimer = null;
 
         // Parameter sliders.
@@ -163,13 +158,6 @@ export class AsrPanel {
         if (this.asrVadSelect) {
             this.asrVadSelect.addEventListener('change', () => {
                 this.ws.sendText(`asr_vad_source:${this.asrVadSelect.value}`);
-            });
-        }
-
-        // Hallucination (artifact) filter toggle.
-        if (this.hallucFilterCb) {
-            this.hallucFilterCb.addEventListener('change', () => {
-                this.ws.sendText(`asr_param:halluc_filter:${this.hallucFilterCb.checked ? 'true' : 'false'}`);
             });
         }
 
@@ -266,12 +254,6 @@ export class AsrPanel {
             const map = {0:'silero', 1:'fsmn', 2:'ten', 3:'any', 4:'direct'};
             this.asrVadSelect.value = map[obj.asr_vad_source] || 'silero';
         }
-
-        // Sync halluc filter toggle.
-        if (obj.asr_halluc_filter !== undefined && this.hallucFilterCb &&
-            document.activeElement !== this.hallucFilterCb) {
-            this.hallucFilterCb.checked = obj.asr_halluc_filter;
-        }
     }
 
     _syncParam(key, value) {
@@ -298,11 +280,7 @@ export class AsrPanel {
     // Called when backend confirms asr_param set.
     onAsrParam(obj) {
         if (obj.key && obj.value !== undefined) {
-            if (obj.key === 'halluc_filter') {
-                if (this.hallucFilterCb) this.hallucFilterCb.checked = obj.value === true || obj.value === 'true';
-            } else {
-                this._syncParam(obj.key, obj.value);
-            }
+            this._syncParam(obj.key, obj.value);
         }
     }
 

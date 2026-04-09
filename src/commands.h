@@ -33,7 +33,9 @@ int cmd_bench_prefill(const std::string& model_dir);
 // WavLM+ECAPA layer-by-layer test
 int cmd_test_wavlm_cnn();
 
-// WebSocket server test
-int cmd_test_ws(const std::string& webui_dir);
+// WebSocket server test (with optional LLM consciousness stream)
+int cmd_test_ws(const std::string& webui_dir,
+                const std::string& llm_model_dir = "",
+                const std::string& persona_conf_path = "");
 
 } // namespace deusridet

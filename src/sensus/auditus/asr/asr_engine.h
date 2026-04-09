@@ -35,7 +35,6 @@ namespace asr {
 struct ASRResult {
     std::string text;           // final post-processed text
     std::string raw_text;       // text before collapse_repeats / ITN
-    bool hallucinated = false;  // true if output was filtered as hallucination
     float mel_ms = 0;           // mel spectrogram computation time
     float encoder_ms = 0;       // Whisper encoder forward time
     float decode_ms = 0;        // autoregressive decode loop time

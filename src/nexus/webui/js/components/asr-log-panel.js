@@ -89,8 +89,7 @@ export class AsrLogPanel {
         if (entry.stage === 'trigger') return this.showTrigger.checked;
         if (entry.stage === 'skipped') return this.showEmpty.checked;
         if (entry.stage === 'partial') return this.showPartial.checked;
-        if (entry.stage === 'result' && !entry.text && !entry.hallucinated) return this.showEmpty.checked;
-        if (entry.stage === 'result' && entry.hallucinated) return this.showResult.checked;
+        if (entry.stage === 'result' && !entry.text) return this.showEmpty.checked;
         if (entry.stage === 'result' || entry.stage === 'transcript') return this.showResult.checked;
         return true;
     }
@@ -147,12 +146,10 @@ export class AsrLogPanel {
             `;
         } else if (entry.stage === 'result') {
             const hasText = entry.text && entry.text.length > 0;
-            const isHallucination = entry.hallucinated;
             const textChanged = entry.raw_text && entry.text && entry.raw_text !== entry.text;
-            if (isHallucination) row.className += ' asr-log-row--hallucination';
             row.innerHTML = `
                 <span class="asr-log-ts">${entry.ts}</span>
-                <span class="asr-log-badge asr-log-badge--result">${isHallucination ? 'HALLUC' : hasText ? 'RESULT' : 'EMPTY'}</span>
+                <span class="asr-log-badge asr-log-badge--result">${hasText ? 'RESULT' : 'EMPTY'}</span>
                 <span class="asr-log-detail">
                     <span class="asr-log-timing">
                         mel=${this._fmtMs(entry.mel_ms)} ·
@@ -168,8 +165,7 @@ export class AsrLogPanel {
                         trigger=${this._esc(entry.trigger || '?')}
                     </span>
                     ${hasText ? `<span class="asr-log-text">${this._esc(entry.text)}</span>` : ''}
-                    ${isHallucination ? `<span class="asr-log-raw">hallucination: "${this._esc(entry.raw_text)}"</span>` :
-                      textChanged ? `<span class="asr-log-raw">raw: ${this._esc(entry.raw_text)}</span>` : ''}
+                    ${textChanged ? `<span class="asr-log-raw">raw: ${this._esc(entry.raw_text)}</span>` : ''}
                 </span>
             `;
         } else if (entry.stage === 'transcript') {

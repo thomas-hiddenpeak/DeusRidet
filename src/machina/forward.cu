@@ -1,4 +1,4 @@
-// forward.cu — Qwen3.5-27B forward pass implementation
+// forward.cu — Qwen3.5 forward pass implementation
 //
 // Single-token decode path. Each function assumes M=1.
 // Target: SM87 (Jetson AGX Orin)
@@ -16,16 +16,17 @@
 #include <cfloat>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace deusridet {
 
 // ============================================================================
 // SwiGLU MLP forward (M=1)
 //
-// gate_out = gate_proj(x)   — GPTQ Int4
-// up_out   = up_proj(x)     — GPTQ Int4
+// gate_out = gate_proj(x)   — GPTQ Int4 or FP16
+// up_out   = up_proj(x)     — GPTQ Int4 or FP16
 // gate_out = silu(gate_out) * up_out
-// mlp_out  = down_proj(gate_out) — GPTQ Int4
+// mlp_out  = down_proj(gate_out) — GPTQ Int4 or FP16
 // ============================================================================
 
 void mlp_forward(const __half* x, const MLPWeights& mlp,
@@ -33,23 +34,42 @@ void mlp_forward(const __half* x, const MLPWeights& mlp,
                  InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // Gate + Up projections via GPTQ v2 (non-persistent, no workspace)
-    gptq_gemm_v2(x, mlp.gate_proj.qweight, state.mlp_gate, mlp.gate_proj.scales,
-                 1, mlp.gate_proj.K, mlp.gate_proj.N, stream);
-    gptq_gemm_v2(x, mlp.up_proj.qweight, state.mlp_up, mlp.up_proj.scales,
-                 1, mlp.up_proj.K, mlp.up_proj.N, stream);
+    if (MC::MLP_IS_GPTQ) {
+        // GPTQ-Int4 path
+        gptq_gemm_v2(x, mlp.gate_proj.qweight, state.mlp_gate, mlp.gate_proj.scales,
+                     1, mlp.gate_proj.K, mlp.gate_proj.N, stream);
+        gptq_gemm_v2(x, mlp.up_proj.qweight, state.mlp_up, mlp.up_proj.scales,
+                     1, mlp.up_proj.K, mlp.up_proj.N, stream);
 
-    // SiLU activation: mlp_gate = silu(mlp_gate) * mlp_up
-    silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
-             MC::INTERMEDIATE_SIZE, stream);
+        silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
+                 MC::INTERMEDIATE_SIZE, stream);
 
-    // Down projection + fused residual add
-    if (residual) {
-        gptq_gemm_v2_add(state.mlp_gate, mlp.down_proj.qweight, residual,
+        if (residual) {
+            gptq_gemm_v2_add(state.mlp_gate, mlp.down_proj.qweight, residual,
+                             mlp.down_proj.scales, 1, mlp.down_proj.K, mlp.down_proj.N, stream);
+        } else {
+            gptq_gemm_v2(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down,
                          mlp.down_proj.scales, 1, mlp.down_proj.K, mlp.down_proj.N, stream);
+        }
     } else {
-        gptq_gemm_v2(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down,
-                     mlp.down_proj.scales, 1, mlp.down_proj.K, mlp.down_proj.N, stream);
+        // FP16 path (unquantized models)
+        fp16_gemv(x, mlp.fp16_gate_proj.weight, state.mlp_gate,
+                  mlp.fp16_gate_proj.in_features, mlp.fp16_gate_proj.out_features, stream);
+        fp16_gemv(x, mlp.fp16_up_proj.weight, state.mlp_up,
+                  mlp.fp16_up_proj.in_features, mlp.fp16_up_proj.out_features, stream);
+
+        silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
+                 MC::INTERMEDIATE_SIZE, stream);
+
+        if (residual) {
+            fp16_gemv(state.mlp_gate, mlp.fp16_down_proj.weight, state.mlp_down,
+                      mlp.fp16_down_proj.in_features, mlp.fp16_down_proj.out_features, stream);
+            elementwise_add(residual, state.mlp_down, residual,
+                            MC::HIDDEN_SIZE, stream);
+        } else {
+            fp16_gemv(state.mlp_gate, mlp.fp16_down_proj.weight, state.mlp_down,
+                      mlp.fp16_down_proj.in_features, mlp.fp16_down_proj.out_features, stream);
+        }
     }
 }
 
@@ -989,29 +1009,55 @@ int forward_one_token_sampled(const ModelWeights& model,
 // Residual add done separately via elementwise_add.
 // ============================================================================
 
-static void mlp_forward_prefill(const __half* x, const MLPWeights& mlp,
-                                __half* residual, int M,
-                                InferenceState& state, cudaStream_t stream) {
+void mlp_forward_prefill(const __half* x, const MLPWeights& mlp,
+                        __half* residual, int M,
+                        InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
     int N_inter = MC::INTERMEDIATE_SIZE;
 
-    // gate_proj + up_proj via GPTQ v2 (non-persistent, no workspace)
-    gptq_gemm_v2(x, mlp.gate_proj.qweight, state.mlp_gate, mlp.gate_proj.scales,
-                 M, mlp.gate_proj.K, mlp.gate_proj.N, stream);
-    gptq_gemm_v2(x, mlp.up_proj.qweight, state.mlp_up, mlp.up_proj.scales,
-                 M, mlp.up_proj.K, mlp.up_proj.N, stream);
+    if (MC::MLP_IS_GPTQ) {
+        // GPTQ-Int4 path
+        gptq_gemm_v2(x, mlp.gate_proj.qweight, state.mlp_gate, mlp.gate_proj.scales,
+                     M, mlp.gate_proj.K, mlp.gate_proj.N, stream);
+        gptq_gemm_v2(x, mlp.up_proj.qweight, state.mlp_up, mlp.up_proj.scales,
+                     M, mlp.up_proj.K, mlp.up_proj.N, stream);
 
-    // SiLU: mlp_gate = silu(mlp_gate) * mlp_up
-    silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
-             M * N_inter, stream);
+        silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
+                 M * N_inter, stream);
 
-    // Down projection + fused residual add (one kernel, no separate add)
-    if (residual) {
-        gptq_gemm_v2_add(state.mlp_gate, mlp.down_proj.qweight, residual,
+        if (residual) {
+            gptq_gemm_v2_add(state.mlp_gate, mlp.down_proj.qweight, residual,
+                             mlp.down_proj.scales, M, mlp.down_proj.K, mlp.down_proj.N, stream);
+        } else {
+            gptq_gemm_v2(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down,
                          mlp.down_proj.scales, M, mlp.down_proj.K, mlp.down_proj.N, stream);
+        }
     } else {
-        gptq_gemm_v2(state.mlp_gate, mlp.down_proj.qweight, state.mlp_down,
-                     mlp.down_proj.scales, M, mlp.down_proj.K, mlp.down_proj.N, stream);
+        // FP16 path (repacked weights for prefill GEMM)
+        if (mlp.repacked_gate) {
+            fp16_gemm(x, mlp.repacked_gate, state.mlp_gate,
+                      M, MC::HIDDEN_SIZE, N_inter, stream);
+            fp16_gemm(x, mlp.repacked_up, state.mlp_up,
+                      M, MC::HIDDEN_SIZE, N_inter, stream);
+        } else {
+            linear_forward(x, mlp.fp16_gate_proj, state.mlp_gate, M, stream);
+            linear_forward(x, mlp.fp16_up_proj, state.mlp_up, M, stream);
+        }
+
+        silu_mul(state.mlp_gate, state.mlp_up, state.mlp_gate,
+                 M * N_inter, stream);
+
+        if (mlp.repacked_down) {
+            fp16_gemm(state.mlp_gate, mlp.repacked_down, state.mlp_down,
+                      M, N_inter, MC::HIDDEN_SIZE, stream);
+        } else {
+            linear_forward(state.mlp_gate, mlp.fp16_down_proj, state.mlp_down, M, stream);
+        }
+
+        if (residual) {
+            elementwise_add(residual, state.mlp_down, residual,
+                            M * MC::HIDDEN_SIZE, stream);
+        }
     }
 }
 
@@ -1190,10 +1236,10 @@ __global__ void prefill_attention_kernel(
 // batch causal self-attention, batch output projection.
 // ============================================================================
 
-static void full_attention_prefill(const __half* x, const FullAttentionWeights& attn,
-                                   __half* kv_cache, int layer_idx,
-                                   int pos_start, int M, int max_kv_len,
-                                   InferenceState& state, cudaStream_t stream) {
+void full_attention_prefill(const __half* x, const FullAttentionWeights& attn,
+                           __half* kv_cache, int layer_idx,
+                           int pos_start, int M, int max_kv_len,
+                           InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
     // 1. Batched Q, K, V projections (FP16 GEMM with repacked weights)
@@ -1283,9 +1329,9 @@ static void full_attention_prefill(const __half* x, const FullAttentionWeights& 
 // sequentially per token, batch output (rms_norm_gated + out_proj).
 // ============================================================================
 
-static void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
-                             int dn_layer_idx, int M,
-                             InferenceState& state, cudaStream_t stream) {
+void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
+                      int dn_layer_idx, int M,
+                      InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
     // 1. Merged qkv+a+b projection: x[M, 5120] → dn_qkv[M, 10496] (FP16 GEMM)
@@ -1622,10 +1668,10 @@ void profile_forward_prefill(const ModelWeights& model,
     using MC = ModelConfig;
     cudaStream_t s = state.compute_stream ? state.compute_stream : stream;
 
-    // 4 events per layer + 1 final = 257
+    // 4 events per layer + 1 final
     constexpr int EPL = 4;
-    constexpr int N_EV = MC::NUM_LAYERS * EPL + 1;
-    cudaEvent_t ev[N_EV];
+    const int N_EV = MC::NUM_LAYERS * EPL + 1;
+    std::vector<cudaEvent_t> ev(N_EV);
     for (int i = 0; i < N_EV; i++)
         cudaEventCreateWithFlags(&ev[i], cudaEventDefault);
 

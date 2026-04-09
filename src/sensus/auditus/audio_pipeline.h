@@ -221,6 +221,19 @@ public:
     void set_min_speech_sec(float s) { min_speech_samples_.store(std::max(1, (int)(s * 16000)), std::memory_order_relaxed); }
     float min_speech_sec() const { return min_speech_samples_.load(std::memory_order_relaxed) / 16000.0f; }
 
+    // Intra-segment speaker change detection: re-check speaker identity
+    // within long segments to detect speaker transitions missed by VAD.
+    void set_spk_recheck_sec(float s) { spk_recheck_samples_.store(std::max(16000, (int)(s * 16000)), std::memory_order_relaxed); }
+    float spk_recheck_sec() const { return spk_recheck_samples_.load(std::memory_order_relaxed) / 16000.0f; }
+    void set_spk_recheck_enabled(bool e) { enable_spk_recheck_.store(e, std::memory_order_relaxed); }
+    bool spk_recheck_enabled() const { return enable_spk_recheck_.load(std::memory_order_relaxed); }
+    // Cosine similarity threshold below which we declare a speaker change.
+    void set_spk_change_threshold(float t) { spk_change_threshold_.store(t, std::memory_order_relaxed); }
+    float spk_change_threshold() const { return spk_change_threshold_.load(std::memory_order_relaxed); }
+    // Window size (seconds) for the re-check embedding extraction.
+    void set_spk_recheck_window_sec(float s) { spk_recheck_window_samples_.store(std::max(8000, (int)(s * 16000)), std::memory_order_relaxed); }
+    float spk_recheck_window_sec() const { return spk_recheck_window_samples_.load(std::memory_order_relaxed) / 16000.0f; }
+
     // ASR (Qwen3-ASR) enable/disable and tunable parameters.
     void set_asr_enabled(bool e) { enable_asr_.store(e, std::memory_order_relaxed); }
     bool asr_enabled() const { return enable_asr_.load(std::memory_order_relaxed); }
@@ -264,11 +277,6 @@ public:
     // below this ratio are skipped (when buffer > 2s). Default 0.15 (15%).
     void set_asr_min_speech_ratio(float r) { asr_min_speech_ratio_.store(std::max(0.0f, std::min(1.0f, r)), std::memory_order_relaxed); }
     float asr_min_speech_ratio() const { return asr_min_speech_ratio_.load(std::memory_order_relaxed); }
-
-    // Hallucination filter toggle. When ON, Whisper subtitle artifacts are
-    // suppressed. When OFF, all ASR output passes through (rely on VAD pre-filtering).
-    void set_asr_halluc_filter(bool e) { asr_halluc_filter_.store(e, std::memory_order_relaxed); }
-    bool asr_halluc_filter() const { return asr_halluc_filter_.load(std::memory_order_relaxed); }
 
     // Per-backend speaker database access.
     SpeakerDb& speaker_db() { return speaker_db_; }
@@ -363,10 +371,15 @@ private:
     std::atomic<float> speaker_threshold_{0.50f};
     std::atomic<float> wavlm_threshold_{0.80f};
     std::atomic<float> unispeech_threshold_{0.55f};
-    std::atomic<float> wlecapa_threshold_{0.55f};
+    std::atomic<float> wlecapa_threshold_{0.60f};
     std::atomic<int>   early_trigger_samples_{27200};  // 1.7s default
     std::atomic<bool>  enable_early_{true};              // early trigger on/off
     std::atomic<int>   min_speech_samples_{16000};       // 1.0s default for full-segment ID
+    // Intra-segment speaker change detection.
+    std::atomic<int>   spk_recheck_samples_{48000};      // re-check every 3.0s of speech
+    std::atomic<bool>  enable_spk_recheck_{true};         // on by default
+    std::atomic<float> spk_change_threshold_{0.35f};      // cosine sim below this = different speaker
+    std::atomic<int>   spk_recheck_window_samples_{24000}; // 1.5s window for re-check embedding
     std::atomic<bool>  enable_asr_{true};                // ASR on/off
     std::atomic<int>   asr_post_silence_ms_{300};         // post-silence trigger (ms)
     std::atomic<int>   asr_max_buf_samples_{480000};      // max buffer (30s @ 16kHz)
@@ -377,7 +390,6 @@ private:
     std::atomic<float> asr_min_energy_{0.008f};           // min avg energy for ASR segment
     std::atomic<int>   asr_partial_samples_{32000};       // streaming partial interval (2s default)
     std::atomic<float> asr_min_speech_ratio_{0.15f};      // min speech / buffer ratio for trigger
-    std::atomic<bool>  asr_halluc_filter_{true};           // hallucination filter on/off
 
     // ASR engine (Qwen3-ASR).
     std::unique_ptr<asr::ASREngine> asr_engine_;
@@ -386,6 +398,10 @@ private:
     std::vector<int16_t> speech_pcm_buf_;
     bool in_speech_segment_ = false;
     bool early_extracted_   = false;   // true after early extraction during speech
+    // Intra-segment speaker change detection state.
+    std::vector<float> seg_ref_emb_;     // reference embedding for current segment's speaker
+    int seg_last_recheck_at_ = 0;        // sample position of last re-check
+    bool seg_has_ref_ = false;           // true after initial speaker identified
 
     // ASR audio accumulation: ALL audio is accumulated (Whisper handles silence
     // naturally). VAD is used only to decide WHEN to trigger transcription and

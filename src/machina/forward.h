@@ -43,6 +43,26 @@ void deltanet_forward(const __half* x, const DeltaNetWeights& dn,
                       InferenceState& state, cudaStream_t stream = 0);
 
 // ============================================================================
+// Batched prefill per-layer functions (M>1 tokens)
+// ============================================================================
+
+// Batched SwiGLU MLP (M>1): GPTQ GEMM for gate/up/down.
+void mlp_forward_prefill(const __half* x, const MLPWeights& mlp,
+                         __half* residual, int M,
+                         InferenceState& state, cudaStream_t stream = 0);
+
+// Batched Full Attention prefill: merged projections, causal self-attention, KV write.
+void full_attention_prefill(const __half* x, const FullAttentionWeights& attn,
+                            __half* kv_cache, int layer_idx,
+                            int pos_start, int M, int max_kv_len,
+                            InferenceState& state, cudaStream_t stream = 0);
+
+// Batched DeltaNet prefill: M tokens processed sequentially through recurrent state.
+void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
+                      int dn_layer_idx, int M,
+                      InferenceState& state, cudaStream_t stream = 0);
+
+// ============================================================================
 // Complete forward pass
 // ============================================================================
 

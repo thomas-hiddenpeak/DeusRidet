@@ -108,13 +108,34 @@ add_library(orator STATIC ${ORATOR_SOURCES})
 target_link_libraries(orator PRIVATE communis CUDA::cudart CUDA::cublas cudnn onnxruntime)
 
 # ============================================================================
+# Memory management static library (memoria — KV cache, block pool, SSD swap)
+# ============================================================================
+file(GLOB_RECURSE MEMORIA_SOURCES
+    "src/memoria/*.cpp"
+    "src/memoria/*.cu"
+)
+
+add_library(memoria STATIC ${MEMORIA_SOURCES})
+target_link_libraries(memoria PRIVATE machina communis CUDA::cudart)
+
+# ============================================================================
+# Consciousness stream static library (conscientia — continuous Prefill engine)
+# ============================================================================
+file(GLOB_RECURSE CONSCIENTIA_SOURCES
+    "src/conscientia/*.cpp"
+)
+
+add_library(conscientia STATIC ${CONSCIENTIA_SOURCES})
+target_link_libraries(conscientia PRIVATE machina memoria communis CUDA::cudart)
+
+# ============================================================================
 # Main executable
 # ============================================================================
 add_executable(deusridet
     src/main.cpp
     src/commands.cpp
 )
-target_link_libraries(deusridet PRIVATE machina communis nexus sensus orator stdc++fs rt dl)
+target_link_libraries(deusridet PRIVATE machina memoria conscientia communis nexus sensus orator stdc++fs rt dl)
 
 # Embed RPATH (not RUNPATH) so the binary finds CUDA 12.9 libs.
 # DT_RPATH takes precedence over ldconfig cache, unlike DT_RUNPATH.

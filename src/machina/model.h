@@ -1,10 +1,11 @@
-// model.h — Qwen3.5-27B model weight structures and forward pass
+// model.h — Qwen3.5 model weight structures and forward pass
 //
+// Supports multiple Qwen3.5 variants (9B BF16, 27B GPTQ-Int4, etc.)
 // Hybrid DeltaNet SSM + GQA architecture:
-//   64 layers: 48 DeltaNet (linear_attention) + 16 Full Attention (every 4th)
-//   GPTQ-Int4 quantized MLP, BF16 attention weights converted to FP16 at load
+//   GPTQ-Int4 or FP16 MLP, BF16 attention weights converted to FP16 at load
 //   SwiGLU MLP, partial RoPE (25%), attention output gate, (1+w) RMSNorm
 //
+// ModelConfig is runtime-initialized from config.json via ModelConfig::init().
 // Weight loading converts BF16→FP16 at load time for uniform FP16 compute.
 // Regular RMSNorm weights are precomputed as (1+w) at load time.
 
@@ -18,48 +19,62 @@
 namespace deusridet {
 
 // ============================================================================
-// Model configuration (from Qwen3.5-27B config.json)
+// Model configuration — runtime-initialized from config.json
 // ============================================================================
 
 struct ModelConfig {
-    static constexpr int NUM_LAYERS         = 64;
-    static constexpr int HIDDEN_SIZE        = 5120;
-    static constexpr int INTERMEDIATE_SIZE  = 17408;
-    static constexpr int VOCAB_SIZE         = 248320;
-    static constexpr float RMS_EPS          = 1e-6f;
+    // Core dimensions (set by init())
+    static int NUM_LAYERS;
+    static int HIDDEN_SIZE;
+    static int INTERMEDIATE_SIZE;
+    static int VOCAB_SIZE;
+    static float RMS_EPS;
 
     // Full Attention (GQA)
-    static constexpr int NUM_ATTN_HEADS     = 24;
-    static constexpr int NUM_KV_HEADS       = 4;
-    static constexpr int HEAD_DIM           = 256;
-    static constexpr int NUM_KV_GROUPS      = 6;   // ATTN_HEADS / KV_HEADS
-    static constexpr int Q_PROJ_DIM         = 12288; // ATTN_HEADS * HEAD_DIM * 2 (gate)
-    static constexpr int KV_PROJ_DIM        = 1024;  // KV_HEADS * HEAD_DIM
-    static constexpr int ATTN_OUT_DIM       = 6144;  // ATTN_HEADS * HEAD_DIM
-    static constexpr int FULL_ATTN_INTERVAL = 4;
+    static int NUM_ATTN_HEADS;
+    static int NUM_KV_HEADS;
+    static int HEAD_DIM;
+    static int NUM_KV_GROUPS;         // ATTN_HEADS / KV_HEADS
+    static int Q_PROJ_DIM;            // ATTN_HEADS * HEAD_DIM * 2 (gate)
+    static int KV_PROJ_DIM;           // KV_HEADS * HEAD_DIM
+    static int ATTN_OUT_DIM;          // ATTN_HEADS * HEAD_DIM
+    static int FULL_ATTN_INTERVAL;
 
     // RoPE (partial rotary, interleaved M-RoPE)
-    static constexpr float ROPE_THETA       = 10000000.0f;
-    static constexpr float PARTIAL_ROTARY   = 0.25f;
-    static constexpr int ROTARY_DIM         = 64;  // HEAD_DIM * 0.25
+    static float ROPE_THETA;
+    static float PARTIAL_ROTARY;
+    static int ROTARY_DIM;            // HEAD_DIM * PARTIAL_ROTARY
 
     // DeltaNet SSM
-    static constexpr int LIN_NUM_K_HEADS    = 16;
-    static constexpr int LIN_NUM_V_HEADS    = 48;
-    static constexpr int LIN_K_HEAD_DIM     = 128;
-    static constexpr int LIN_V_HEAD_DIM     = 128;
-    static constexpr int LIN_KEY_DIM        = 2048;  // 16 * 128
-    static constexpr int LIN_VALUE_DIM      = 6144;  // 48 * 128
-    static constexpr int LIN_CONV_DIM       = 10240; // KEY_DIM*2 + VALUE_DIM
-    static constexpr int CONV_KERNEL        = 4;
+    static int LIN_NUM_K_HEADS;
+    static int LIN_NUM_V_HEADS;
+    static int LIN_K_HEAD_DIM;
+    static int LIN_V_HEAD_DIM;
+    static int LIN_KEY_DIM;           // K_HEADS * K_HEAD_DIM
+    static int LIN_VALUE_DIM;         // V_HEADS * V_HEAD_DIM
+    static int LIN_CONV_DIM;          // KEY_DIM*2 + VALUE_DIM
+    static int CONV_KERNEL;
 
-    // Merged projection dimensions (padded to Marlin tile boundary, 256)
-    static constexpr int LIN_QKV_AB_DIM     = 10496; // 10240+48+48=10336, padded→10496 (41×256)
-    static constexpr int FA_KV_DIM          = 2048;  // 1024+1024 (already aligned)
+    // Merged projection dimensions (padded to tile boundary, 256)
+    static int LIN_QKV_AB_DIM;        // LIN_CONV_DIM+V_HEADS+V_HEADS, padded to 256
+    static int FA_KV_DIM;             // KV_PROJ_DIM + KV_PROJ_DIM
 
-    static constexpr bool is_full_attention(int layer_idx) {
+    // Quantization mode
+    static bool MLP_IS_GPTQ;          // true if MLP uses GPTQ-Int4, false if FP16
+
+    // Number of Full Attention layers (derived)
+    static int NUM_FA_LAYERS;
+
+    static bool is_full_attention(int layer_idx) {
         return (layer_idx % FULL_ATTN_INTERVAL) == (FULL_ATTN_INTERVAL - 1);
     }
+
+    // Initialize from model directory's config.json.
+    // Must be called before loading weights or allocating inference state.
+    static bool init(const std::string& model_dir);
+
+    // Check if already initialized
+    static bool initialized();
 };
 
 // ============================================================================
@@ -126,14 +141,25 @@ struct FullAttentionWeights {
 };
 
 struct MLPWeights {
-    GptqWeight gate_proj;  // 5120 → 17408
+    // GPTQ-Int4 weights (for quantized models, e.g. 27B-GPTQ)
+    GptqWeight gate_proj;  // 5120 → 17408 (27B)
     GptqWeight up_proj;    // 5120 → 17408
     GptqWeight down_proj;  // 17408 → 5120
+
+    // FP16 Linear weights (for unquantized models, e.g. 9B-BF16)
+    Linear fp16_gate_proj;
+    Linear fp16_up_proj;
+    Linear fp16_down_proj;
+
+    // Repacked FP16 weights for prefill fp16_gemm (unquantized models only)
+    __half* repacked_gate = nullptr;
+    __half* repacked_up   = nullptr;
+    __half* repacked_down = nullptr;
 };
 
 struct LayerWeights {
-    __half* input_layernorm  = nullptr;  // [5120] precomputed (1+w)
-    __half* post_attn_layernorm = nullptr;  // [5120] precomputed (1+w)
+    __half* input_layernorm  = nullptr;  // [hidden_size] precomputed (1+w)
+    __half* post_attn_layernorm = nullptr;  // [hidden_size] precomputed (1+w)
 
     bool is_full_attention = false;
 
@@ -152,7 +178,7 @@ struct ModelWeights {
     __half* lm_head      = nullptr;  // [vocab_size, hidden_size] FP16 (for prefill)
     Int8Linear lm_head_int8;         // INT8 quantized lm_head for decode GEMV
 
-    LayerWeights layers[ModelConfig::NUM_LAYERS];
+    std::vector<LayerWeights> layers;  // [NUM_LAYERS] — sized by load_model_weights
 
     size_t total_bytes = 0;  // total device memory
 
@@ -166,6 +192,7 @@ struct ModelWeights {
 // ============================================================================
 
 // Load all model weights from safetensors shards into device memory.
+// Calls ModelConfig::init() first to read config.json and set parameters.
 // BF16 weights are converted to FP16. RMSNorm weights are precomputed as (1+w).
 // If repack_marlin=false, GPTQ weights are left in original format (for custom GPTQ kernel).
 bool load_model_weights(const std::string& model_dir, ModelWeights& weights,

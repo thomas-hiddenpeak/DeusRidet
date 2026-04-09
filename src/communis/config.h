@@ -7,6 +7,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include <unordered_map>
 
 namespace deusridet {
@@ -62,6 +63,19 @@ struct MachinaConfig {
     // Construct from Config
     static MachinaConfig from_config(const Config& cfg);
 
+    void print() const;
+};
+
+// Structured config for persona and response behavior
+struct PersonaConfig {
+    std::string name;                    // entity name (e.g. "黑娃")
+    std::vector<std::string> aliases;    // name variants / wake words
+
+    int  speech_max_tokens   = 80;       // short, concise speech output
+    int  thinking_max_tokens = 256;      // internal analysis budget
+    int  decode_interleave_tokens = 4;   // check input every N decode tokens
+
+    static PersonaConfig from_config(const Config& cfg);
     void print() const;
 };
 

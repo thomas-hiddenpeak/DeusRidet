@@ -8,6 +8,9 @@ import { SpeakerDebugPanel } from './components/speaker-debug-panel.js';
 import { AsrPanel } from './components/asr-panel.js';
 import { AsrTranscriptPanel } from './components/asr-transcript-panel.js';
 import { AsrLogPanel } from './components/asr-log-panel.js';
+import { ConsciousnessPanel } from './components/consciousness-panel.js';
+import { TextOutputPanel } from './components/text-output-panel.js';
+import { ConfigPanel } from './components/config-panel.js';
 import { spkColor } from './utils/speaker-colors.js';
 
 // --- Log utility ---
@@ -71,6 +74,7 @@ ws.onText = (msg) => {
             asrPanel.onTranscript(obj);
             asrTranscriptPanel.onTranscript(obj);
             asrLogPanel.onTranscript(obj);
+            textOutputPanel.onAsrTranscript(obj);
             log(`ASR: "${obj.text}" (${obj.latency_ms.toFixed(0)}ms, ${obj.audio_sec.toFixed(1)}s)`);
             return;
         }
@@ -91,6 +95,42 @@ ws.onText = (msg) => {
             asrPanel.onAsrParam(obj);
             log(`ASR param ${obj.key}=${obj.value}`);
             return;
+        }
+        if (obj.type === 'consciousness_state') {
+            consciousnessPanel.onConsciousnessState(obj);
+            configPanel.onConsciousnessState(obj);
+            return;
+        }
+        if (obj.type === 'consciousness_enable') {
+            consciousnessPanel.onConsciousnessEnable(obj);
+            configPanel.onConsciousnessEnable(obj);
+            log(`Consciousness ${obj.mode} ${obj.enabled ? 'ON' : 'OFF'}`);
+            return;
+        }
+        if (obj.type === 'consciousness_param') {
+            configPanel.onConsciousnessParam(obj);
+            log(`Consciousness ${obj.key}=${obj.value}`);
+            return;
+        }
+        if (obj.type === 'consciousness_prompt') {
+            log(`${obj.pipeline || 'system'} prompt ${obj.ok ? 'updated' : 'failed'}`);
+            return;
+        }
+        if (obj.type === 'consciousness_prompts') {
+            configPanel.onConsciousnessPrompts(obj);
+            return;
+        }
+        if (obj.type === 'consciousness_decode') {
+            textOutputPanel.onDecode(obj);
+            log(`[${obj.state}] ${obj.text} (${obj.tokens}tok ${obj.time_ms?.toFixed(0)}ms)`);
+            return;
+        }
+        if (obj.type === 'speech_token') {
+            textOutputPanel.onSpeechToken(obj);
+            return;
+        }
+        if (obj.type === 'text_input_ack') {
+            return;  // silently acknowledge
         }
         if (obj.type === 'asr_vad_source') {
             const map = {0:'silero', 1:'fsmn', 2:'ten', 3:'any', 4:'direct'};
@@ -127,6 +167,9 @@ const speakerDebug = new SpeakerDebugPanel(ws);
 const asrPanel = new AsrPanel(ws);
 const asrTranscriptPanel = new AsrTranscriptPanel();
 const asrLogPanel = new AsrLogPanel(ws);
+const consciousnessPanel = new ConsciousnessPanel(ws);
+const textOutputPanel = new TextOutputPanel(ws);
+const configPanel = new ConfigPanel(ws);
 
 // --- VAD source selector ---
 const vadSourceSelect = document.getElementById('vad-source-select');
