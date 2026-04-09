@@ -94,7 +94,7 @@ file(GLOB_RECURSE SENSUS_SOURCES
 )
 
 add_library(sensus STATIC ${SENSUS_SOURCES})
-target_link_libraries(sensus PRIVATE communis CUDA::cudart onnxruntime ten_vad)
+target_link_libraries(sensus PRIVATE communis machina CUDA::cudart CUDA::cublas CUDA::cufft onnxruntime ten_vad)
 
 # ============================================================================
 # Speaker identification static library (orator — CAM++ speaker encoder)

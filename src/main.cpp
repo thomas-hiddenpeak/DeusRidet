@@ -14,6 +14,7 @@
 #include <cstring>
 #include <csignal>
 #include <string>
+#include <climits>
 #include <execinfo.h>
 #include <unistd.h>
 
@@ -153,14 +154,27 @@ int main(int argc, char** argv) {
         rc = deusridet::cmd_test_wavlm_cnn();
     }
     else if (cmd == "test-ws") {
-        // Default webui dir relative to build/
-        std::string webui_dir = cfg.get_string("webui_dir",
-            "../src/nexus/webui");
+        // Default webui dir relative to executable location.
+        std::string webui_dir = cfg.get_string("webui_dir", "");
         for (int i = 2; i < argc; i++) {
             std::string arg = argv[i];
             if (arg == "--webui" && i + 1 < argc) {
                 webui_dir = argv[++i];
                 break;
+            }
+        }
+        // If not set, resolve relative to executable's directory.
+        if (webui_dir.empty()) {
+            char exe_path[PATH_MAX] = {};
+            ssize_t n = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+            if (n > 0) {
+                exe_path[n] = '\0';
+                // Strip executable name to get directory.
+                char* last_slash = strrchr(exe_path, '/');
+                if (last_slash) *(last_slash + 1) = '\0';
+                webui_dir = std::string(exe_path) + "../src/nexus/webui";
+            } else {
+                webui_dir = "../src/nexus/webui";  // fallback
             }
         }
         rc = deusridet::cmd_test_ws(webui_dir);

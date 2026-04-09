@@ -1303,6 +1303,9 @@ int cmd_test_ws(const std::string& webui_dir) {
     audio_cfg.wavlm_ecapa_model = home + "/models/dev/speaker/espnet_wavlm_ecapa/wavlm_ecapa.safetensors";
     audio_cfg.wavlm_ecapa_threshold = 0.55f;
 
+    // Configure Qwen3-ASR engine.
+    audio_cfg.asr_model_path = home + "/models/dev/asr/Qwen/Qwen3-ASR-1.7B";
+
     // Track WS-level stats.
     std::atomic<uint64_t> total_frames{0};
     std::atomic<uint64_t> total_bytes{0};
@@ -1325,6 +1328,81 @@ int cmd_test_ws(const std::string& webui_dir) {
                    frame_idx, vr.energy);
         if (vr.segment_end)
             printf("[test-ws] VAD: speech END at frame %d\n", frame_idx);
+    });
+
+    // ASR transcript callback (called from ASR worker thread).
+    audio.set_on_transcript([&](const deusridet::asr::ASRResult& result, float audio_sec,
+                                int speaker_id, const std::string& speaker_name,
+                                float speaker_sim, const std::string& trigger_reason) {
+        int fd = active_ws_fd.load(std::memory_order_relaxed);
+        if (fd < 0) return;
+        // Escape text for JSON (simple: replace " and \ and control chars).
+        std::string escaped;
+        escaped.reserve(result.text.size() + 16);
+        for (char c : result.text) {
+            if (c == '"') escaped += "\\\"";
+            else if (c == '\\') escaped += "\\\\";
+            else if (c == '\n') escaped += "\\n";
+            else if (c == '\r') escaped += "\\r";
+            else if (c == '\t') escaped += "\\t";
+            else escaped += c;
+        }
+        // Escape speaker name for JSON.
+        std::string spk_escaped;
+        spk_escaped.reserve(speaker_name.size() + 8);
+        for (char c : speaker_name) {
+            if (c == '"') spk_escaped += "\\\"";
+            else if (c == '\\') spk_escaped += "\\\\";
+            else spk_escaped += c;
+        }
+        char json[2048];
+        snprintf(json, sizeof(json),
+            R"({"type":"asr_transcript","text":"%s","latency_ms":%.1f,"audio_sec":%.2f,)"
+            R"("mel_ms":%.1f,"encoder_ms":%.1f,"decode_ms":%.1f,"tokens":%d,"mel_frames":%d,)"
+            R"("speaker_id":%d,"speaker_name":"%s","speaker_sim":%.3f,"trigger":"%s"})",
+            escaped.c_str(), result.total_ms, audio_sec,
+            result.mel_ms, result.encoder_ms, result.decode_ms,
+            result.token_count, result.mel_frames,
+            speaker_id, spk_escaped.c_str(), speaker_sim,
+            trigger_reason.c_str());
+        server.send_text(fd, json);
+        if (speaker_id >= 0)
+            printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s]\n",
+                   result.text.c_str(), result.total_ms, audio_sec,
+                   speaker_id, speaker_name.c_str());
+        else
+            printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s)\n",
+                   result.text.c_str(), result.total_ms, audio_sec);
+    });
+
+    // ASR log callback (called from pipeline and ASR worker threads).
+    audio.set_on_asr_log([&](const std::string& detail_json) {
+        int fd = active_ws_fd.load(std::memory_order_relaxed);
+        if (fd < 0) return;
+        // Wrap the detail JSON inside an asr_log envelope.
+        std::string msg = R"({"type":"asr_log",)" + detail_json.substr(1);
+        server.send_text(fd, msg);
+    });
+
+    // ASR streaming partial callback (called from ASR worker thread).
+    audio.set_on_asr_partial([&](const std::string& text, float audio_sec) {
+        int fd = active_ws_fd.load(std::memory_order_relaxed);
+        if (fd < 0) return;
+        std::string escaped;
+        escaped.reserve(text.size() + 16);
+        for (char c : text) {
+            if (c == '"') escaped += "\\\"";
+            else if (c == '\\') escaped += "\\\\";
+            else if (c == '\n') escaped += "\\n";
+            else if (c == '\r') escaped += "\\r";
+            else if (c == '\t') escaped += "\\t";
+            else escaped += c;
+        }
+        char json[2048];
+        snprintf(json, sizeof(json),
+            R"({"type":"asr_partial","text":"%s","audio_sec":%.2f})",
+            escaped.c_str(), audio_sec);
+        server.send_text(fd, json);
     });
 
     // Helper: serialize a SpeakerDb's roster as a JSON array string.
@@ -1422,15 +1500,48 @@ int cmd_test_ws(const std::string& webui_dir) {
         // Append speaker lists (if changed) and closing brace.
         std::string full_json(json);
 
+        // ASR stats + tunable parameters.
+        {
+            char asr[512];
+            snprintf(asr, sizeof(asr),
+                R"(,"asr_enabled":%s,"asr_loaded":%s,"asr_active":%s,"asr_busy":%s,"asr_latency_ms":%.1f,"asr_audio_sec":%.2f)"
+                R"(,"asr_buf_sec":%.2f,"asr_buf_has_speech":%s)"
+                R"(,"asr_post_silence_ms":%d,"asr_max_buf_sec":%.1f,"asr_min_dur_sec":%.2f)"
+                R"(,"asr_pre_roll_sec":%.2f,"asr_max_tokens":%d,"asr_rep_penalty":%.2f,"asr_min_energy":%.4f)"
+                R"(,"asr_vad_source":%d,"asr_partial_sec":%.1f,"asr_min_speech_ratio":%.2f,"asr_halluc_filter":%s)",
+                audio.asr_enabled() ? "true" : "false",
+                audio.asr_loaded() ? "true" : "false",
+                st.asr_active ? "true" : "false",
+                st.asr_busy ? "true" : "false",
+                st.asr_latency_ms,
+                st.asr_audio_duration_s,
+                st.asr_buf_sec,
+                st.asr_buf_has_speech ? "true" : "false",
+                audio.asr_post_silence_ms(),
+                audio.asr_max_buf_sec(),
+                audio.asr_min_dur_sec(),
+                audio.asr_pre_roll_sec(),
+                audio.asr_max_tokens(),
+                audio.asr_rep_penalty(),
+                audio.asr_min_energy(),
+                static_cast<int>(audio.asr_vad_source()),
+                audio.asr_partial_sec(),
+                audio.asr_min_speech_ratio(),
+                audio.asr_halluc_filter() ? "true" : "false");
+            full_json += asr;
+        }
+
         // WL-ECAPA latency breakdown (when extraction happened this tick).
         if (st.wlecapa_active) {
             char lat[384];
             snprintf(lat, sizeof(lat),
-                R"(,"lat_cnn_ms":%.1f,"lat_encoder_ms":%.1f,"lat_ecapa_ms":%.1f,"lat_total_ms":%.1f,"wlecapa_is_early":%s,"early_trigger_sec":%.2f)",
+                R"(,"lat_cnn_ms":%.1f,"lat_encoder_ms":%.1f,"lat_ecapa_ms":%.1f,"lat_total_ms":%.1f,"wlecapa_is_early":%s,"early_trigger_sec":%.2f,"early_enabled":%s,"min_speech_sec":%.2f)",
                 st.wlecapa_lat_cnn_ms, st.wlecapa_lat_encoder_ms,
                 st.wlecapa_lat_ecapa_ms, st.wlecapa_lat_total_ms,
                 st.wlecapa_is_early ? "true" : "false",
-                audio.early_trigger_sec());
+                audio.early_trigger_sec(),
+                audio.early_trigger_enabled() ? "true" : "false",
+                audio.min_speech_sec());
             full_json += lat;
 
             // Change detection data.
@@ -1704,6 +1815,24 @@ int cmd_test_ws(const std::string& webui_dir) {
                 R"({"type":"early_trigger","value":%.2f})", s);
             server.send_text(fd, json);
             printf("[test-ws] Early trigger = %.2fs (fd=%d)\n", s, fd);
+        } else if (msg == "early_enable:on" || msg == "early_enable:off") {
+            bool en = (msg == "early_enable:on");
+            audio.set_early_trigger_enabled(en);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"early_enable","value":%s})", en ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] Early trigger %s (fd=%d)\n", en ? "enabled" : "disabled", fd);
+        } else if (msg.rfind("min_speech:", 0) == 0) {
+            float s = std::strtof(msg.c_str() + 11, nullptr);
+            if (s < 0.5f) s = 0.5f;
+            if (s > 10.0f) s = 10.0f;
+            audio.set_min_speech_sec(s);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"min_speech","value":%.2f})", s);
+            server.send_text(fd, json);
+            printf("[test-ws] Min speech = %.2fs (fd=%d)\n", s, fd);
         } else if (msg == "wlecapa_clear") {
             audio.clear_wlecapa_db();
             server.send_text(fd, R"({"type":"wlecapa_clear"})");
@@ -1744,6 +1873,105 @@ int cmd_test_ws(const std::string& webui_dir) {
                     dst, src, ok ? "true" : "false");
                 server.send_text(fd, json);
                 printf("[test-ws] WL-ECAPA merge #%d←#%d %s (fd=%d)\n", dst, src, ok ? "OK" : "FAIL", fd);
+            }
+        } else if (msg == "asr_enable:on" || msg == "asr_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.set_asr_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"asr_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] ASR %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg.rfind("asr_vad_source:", 0) == 0) {
+            auto val = msg.substr(15);
+            VadSource src = VadSource::ANY;
+            if (val == "silero") src = VadSource::SILERO;
+            else if (val == "fsmn") src = VadSource::FSMN;
+            else if (val == "ten") src = VadSource::TEN;
+            else if (val == "direct") src = VadSource::DIRECT;
+            else src = VadSource::ANY;
+            audio.set_asr_vad_source(src);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"asr_vad_source","value":%d})", static_cast<int>(src));
+            server.send_text(fd, json);
+            printf("[test-ws] ASR VAD source = %s (%d) (fd=%d)\n", val.c_str(), static_cast<int>(src), fd);
+        } else if (msg.rfind("asr_param:", 0) == 0) {
+            // Generic ASR parameter setter: "asr_param:<key>:<value>"
+            auto rest = msg.substr(10);
+            auto sep = rest.find(':');
+            if (sep != std::string::npos) {
+                auto key = rest.substr(0, sep);
+                auto val = rest.substr(sep + 1);
+                char json[256];
+                if (key == "post_silence_ms") {
+                    int v = std::stoi(val);
+                    audio.set_asr_post_silence_ms(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"post_silence_ms","value":%d})",
+                        audio.asr_post_silence_ms());
+                } else if (key == "max_buf_sec") {
+                    float v = std::stof(val);
+                    audio.set_asr_max_buf_sec(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"max_buf_sec","value":%.1f})",
+                        audio.asr_max_buf_sec());
+                } else if (key == "min_dur_sec") {
+                    float v = std::stof(val);
+                    audio.set_asr_min_dur_sec(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"min_dur_sec","value":%.2f})",
+                        audio.asr_min_dur_sec());
+                } else if (key == "pre_roll_sec") {
+                    float v = std::stof(val);
+                    audio.set_asr_pre_roll_sec(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"pre_roll_sec","value":%.2f})",
+                        audio.asr_pre_roll_sec());
+                } else if (key == "max_tokens") {
+                    int v = std::stoi(val);
+                    audio.set_asr_max_tokens(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"max_tokens","value":%d})",
+                        audio.asr_max_tokens());
+                } else if (key == "rep_penalty") {
+                    float v = std::stof(val);
+                    audio.set_asr_rep_penalty(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"rep_penalty","value":%.2f})",
+                        audio.asr_rep_penalty());
+                } else if (key == "min_energy") {
+                    float v = std::stof(val);
+                    audio.set_asr_min_energy(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"min_energy","value":%.4f})",
+                        audio.asr_min_energy());
+                } else if (key == "partial_sec") {
+                    float v = std::stof(val);
+                    audio.set_asr_partial_sec(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"partial_sec","value":%.1f})",
+                        audio.asr_partial_sec());
+                } else if (key == "speech_ratio") {
+                    float v = std::stof(val);
+                    audio.set_asr_min_speech_ratio(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"speech_ratio","value":%.2f})",
+                        audio.asr_min_speech_ratio());
+                } else if (key == "halluc_filter") {
+                    bool on = (val == "1" || val == "true" || val == "on");
+                    audio.set_asr_halluc_filter(on);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"halluc_filter","value":%s})",
+                        audio.asr_halluc_filter() ? "true" : "false");
+                } else {
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"%s","error":"unknown"})",
+                        key.c_str());
+                }
+                server.send_text(fd, json);
+                printf("[test-ws] ASR param %s=%s (fd=%d)\n",
+                       key.c_str(), val.c_str(), fd);
             }
         } else {
             printf("[test-ws] Text from fd=%d: %s\n", fd, msg.c_str());

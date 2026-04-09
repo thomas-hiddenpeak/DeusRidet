@@ -93,11 +93,6 @@ export class SpeakerDebugPanel {
                     this._simHistory.shift();
                 this._renderChangePlot();
             }
-
-            // Auto-merge notification.
-            if (stats.auto_merged_src !== undefined && stats.auto_merged_src >= 0) {
-                this._logAutoMerge(stats.auto_merged_src, stats.auto_merged_dst);
-            }
         }
 
         // Update early trigger value for display.
@@ -168,16 +163,8 @@ export class SpeakerDebugPanel {
             <div id="dbg-diversity" class="dbg-diversity"></div>
         </div>
         <div class="dbg-card">
-            <h4 class="dbg-card__title">Early Trigger</h4>
-            <div class="dbg-early-row">
-                <label class="dbg-early-label">
-                    Trigger at: <strong id="dbg-early-val">${this._earlyTriggerSec.toFixed(1)}</strong>s
-                </label>
-                <input type="range" id="dbg-early-slider" class="vad-threshold-slider"
-                       min="0.5" max="5.0" step="0.1" value="${this._earlyTriggerSec}"
-                       aria-label="Early trigger threshold in seconds">
-            </div>
-            <div id="dbg-merge-log" class="dbg-merge-log"></div>
+            <h4 class="dbg-card__title">Diversity</h4>
+            <div id="dbg-diversity" class="dbg-diversity"></div>
         </div>`;
 
         this._gaugeCanvas = document.getElementById('dbg-gauge-canvas');
@@ -189,22 +176,6 @@ export class SpeakerDebugPanel {
         this._simEl = document.getElementById('dbg-gauge-sim');
         this._threshEl = document.getElementById('dbg-gauge-thresh');
         this._diversityEl = document.getElementById('dbg-diversity');
-        this._mergeLogEl = document.getElementById('dbg-merge-log');
-
-        // Wire early trigger slider.
-        const earlySlider = document.getElementById('dbg-early-slider');
-        const earlyVal = document.getElementById('dbg-early-val');
-        if (earlySlider) {
-            earlySlider.addEventListener('input', () => {
-                const v = parseFloat(earlySlider.value);
-                earlyVal.textContent = v.toFixed(1);
-            });
-            earlySlider.addEventListener('change', () => {
-                const v = parseFloat(earlySlider.value);
-                this._earlyTriggerSec = v;
-                if (this._ws) this._ws.sendText(`early_trigger:${v.toFixed(2)}`);
-            });
-        }
     }
 
     _resizeCanvas() {
@@ -414,17 +385,5 @@ export class SpeakerDebugPanel {
 
     _esc(s) {
         return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    }
-
-    _logAutoMerge(src, dst) {
-        if (!this._mergeLogEl) return;
-        const ts = new Date().toLocaleTimeString();
-        const line = document.createElement('div');
-        line.className = 'dbg-merge-entry';
-        line.textContent = `${ts} — auto-merged #${src} → #${dst}`;
-        this._mergeLogEl.prepend(line);
-        // Keep max 10 entries.
-        while (this._mergeLogEl.children.length > 10)
-            this._mergeLogEl.removeChild(this._mergeLogEl.lastChild);
     }
 }

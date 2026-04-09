@@ -42,6 +42,22 @@ at minimum has no syntax errors).
 No exceptions. Skipping these steps produces polluted baselines and meaningless
 measurements. This applies to every single invocation — not just the first one.
 
+## Post-Change Verification
+
+**After every code change that affects the build**, the following steps are
+mandatory:
+
+1. Build: `cd build && make -j$(nproc)`
+2. Kill previous processes + free port: `sudo kill -9 $(pgrep -f deusridet) 2>/dev/null; sudo fuser -k 8080/tcp 2>/dev/null`
+3. Drop page caches: `echo 3 | sudo tee /proc/sys/vm/drop_caches`
+4. Start service: `cd /home/rm01/DeusRidet && ./build/deusridet test-ws`
+5. Verify WebUI is accessible: `curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/` — must return **200**
+6. Verify key assets load: check at least `app.js` and any newly added component JS/CSS return 200
+7. Verify WebSocket connectivity: `curl -s -o /dev/null -w "%{http_code}" --max-time 2 -H "Upgrade: websocket" -H "Connection: Upgrade" -H "Sec-WebSocket-Key: dGVzdA==" -H "Sec-WebSocket-Version: 13" http://localhost:8080/ws` — must return **101**
+
+Do not consider a task complete until step 5 confirms HTTP 200 and step 7
+confirms WebSocket 101. If any check fails, diagnose and fix before proceeding.
+
 ## Project Overview
 
 DeusRidet is a self-contained multimodal LLM application built on a Disaggregated

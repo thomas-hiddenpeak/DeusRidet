@@ -5,6 +5,9 @@
 import { WsClient } from './ws-client.js';
 import { AudioPanel } from './components/audio-panel.js';
 import { SpeakerDebugPanel } from './components/speaker-debug-panel.js';
+import { AsrPanel } from './components/asr-panel.js';
+import { AsrTranscriptPanel } from './components/asr-transcript-panel.js';
+import { AsrLogPanel } from './components/asr-log-panel.js';
 import { spkColor } from './utils/speaker-colors.js';
 
 // --- Log utility ---
@@ -46,6 +49,7 @@ ws.onText = (msg) => {
             audioPanel.updatePipelineStats(obj);
             updateSpeakerPanel(obj);
             speakerDebug.onPipelineStats(obj);
+            asrPanel.onPipelineStats(obj);
             return;
         }
         if (obj.type === 'vad') {
@@ -61,6 +65,36 @@ ws.onText = (msg) => {
         }
         if (obj.type === 'speaker_debug') {
             speakerDebug.onDebugData(obj);
+            return;
+        }
+        if (obj.type === 'asr_transcript') {
+            asrPanel.onTranscript(obj);
+            asrTranscriptPanel.onTranscript(obj);
+            asrLogPanel.onTranscript(obj);
+            log(`ASR: "${obj.text}" (${obj.latency_ms.toFixed(0)}ms, ${obj.audio_sec.toFixed(1)}s)`);
+            return;
+        }
+        if (obj.type === 'asr_partial') {
+            asrPanel.onPartial(obj);
+            return;
+        }
+        if (obj.type === 'asr_log') {
+            asrLogPanel.onAsrLog(obj);
+            return;
+        }
+        if (obj.type === 'asr_enable') {
+            asrPanel.onAsrEnable(obj);
+            log(`ASR ${obj.enabled ? 'ON' : 'OFF'}`);
+            return;
+        }
+        if (obj.type === 'asr_param') {
+            asrPanel.onAsrParam(obj);
+            log(`ASR param ${obj.key}=${obj.value}`);
+            return;
+        }
+        if (obj.type === 'asr_vad_source') {
+            const map = {0:'silero', 1:'fsmn', 2:'ten', 3:'any', 4:'direct'};
+            log(`ASR VAD source → ${map[obj.value] || obj.value}`);
             return;
         }
         if (obj.type === 'loopback') {
@@ -90,6 +124,9 @@ ws.onBinary = (buf) => {
 // --- Components ---
 const audioPanel = new AudioPanel(ws);
 const speakerDebug = new SpeakerDebugPanel(ws);
+const asrPanel = new AsrPanel(ws);
+const asrTranscriptPanel = new AsrTranscriptPanel();
+const asrLogPanel = new AsrLogPanel(ws);
 
 // --- VAD source selector ---
 const vadSourceSelect = document.getElementById('vad-source-select');
@@ -156,6 +193,64 @@ MODELS.forEach(m => {
     });
 });
 
+// Early trigger controls.
+{
+    const earlyToggle = document.getElementById('spk-early-toggle');
+    const earlySlider = document.getElementById('spk-early-slider');
+    const earlyVal = document.getElementById('spk-early-val');
+    let earlyEnabled = true;
+    if (earlyToggle) {
+        earlyToggle.addEventListener('click', () => {
+            earlyEnabled = !earlyEnabled;
+            earlyToggle.classList.toggle('btn--active', earlyEnabled);
+            earlyToggle.setAttribute('aria-pressed', earlyEnabled);
+            earlySlider.disabled = !earlyEnabled;
+            ws.sendText(`early_enable:${earlyEnabled ? 'on' : 'off'}`);
+        });
+    }
+    if (earlySlider && earlyVal) {
+        earlySlider.addEventListener('input', () => {
+            earlyVal.textContent = parseFloat(earlySlider.value).toFixed(1);
+        });
+        earlySlider.addEventListener('change', () => {
+            ws.sendText(`early_trigger:${parseFloat(earlySlider.value).toFixed(2)}`);
+        });
+    }
+    // Sync from server in updateSpeakerPanel.
+    window._syncEarly = (stats) => {
+        if (stats.early_trigger_sec !== undefined && earlySlider && !earlySlider.matches(':active')) {
+            earlySlider.value = stats.early_trigger_sec;
+            earlyVal.textContent = stats.early_trigger_sec.toFixed(1);
+        }
+        if (stats.early_enabled !== undefined && earlyToggle) {
+            earlyEnabled = stats.early_enabled;
+            earlyToggle.classList.toggle('btn--active', earlyEnabled);
+            earlyToggle.setAttribute('aria-pressed', earlyEnabled);
+            earlySlider.disabled = !earlyEnabled;
+        }
+    };
+}
+
+// Min speech duration control.
+{
+    const minSlider = document.getElementById('spk-minspeech-slider');
+    const minVal = document.getElementById('spk-minspeech-val');
+    if (minSlider && minVal) {
+        minSlider.addEventListener('input', () => {
+            minVal.textContent = parseFloat(minSlider.value).toFixed(1);
+        });
+        minSlider.addEventListener('change', () => {
+            ws.sendText(`min_speech:${parseFloat(minSlider.value).toFixed(2)}`);
+        });
+    }
+    window._syncMinSpeech = (stats) => {
+        if (stats.min_speech_sec !== undefined && minSlider && !minSlider.matches(':active')) {
+            minSlider.value = stats.min_speech_sec;
+            minVal.textContent = stats.min_speech_sec.toFixed(1);
+        }
+    };
+}
+
 // --- Roster rendering ---
 const rosterEl = document.getElementById('speaker-roster');
 let lastRosterKey = '';   // serialized speaker_lists for change detection
@@ -188,6 +283,10 @@ function updateSpeakerPanel(stats) {
         const map = {0:'silero', 1:'fsmn', 2:'ten', 3:'any'};
         vadSourceSelect.value = map[stats.vad_source] || 'any';
     }
+
+    // Sync early trigger and min speech from server.
+    if (window._syncEarly) window._syncEarly(stats);
+    if (window._syncMinSpeech) window._syncMinSpeech(stats);
 
     if (!rosterEl || !stats.speaker_lists) return;
 

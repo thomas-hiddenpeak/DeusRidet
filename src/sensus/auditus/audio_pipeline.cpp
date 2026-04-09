@@ -109,11 +109,28 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
     unispeech_threshold_.store(cfg_.unispeech_threshold, std::memory_order_relaxed);
     wlecapa_threshold_.store(cfg_.wavlm_ecapa_threshold, std::memory_order_relaxed);
 
+    // Initialize ASR engine (optional — non-fatal, but heavy: ~4.7 GB weights).
+    if (!cfg_.asr_model_path.empty()) {
+        asr_engine_ = std::make_unique<asr::ASREngine>();
+        asr_engine_->load_model(cfg_.asr_model_path);
+        if (asr_engine_->is_loaded()) {
+            LOG_INFO("AudioPipe", "Qwen3-ASR engine loaded from %s", cfg_.asr_model_path.c_str());
+        } else {
+            LOG_WARN("AudioPipe", "Qwen3-ASR engine failed to load — ASR disabled");
+            asr_engine_.reset();
+        }
+    }
+
     // Reset stats.
     memset(&stats_, 0, sizeof(stats_));
 
     running_.store(true, std::memory_order_release);
     thread_ = std::thread(&AudioPipeline::process_loop, this);
+
+    // Start ASR worker thread if engine loaded.
+    if (asr_engine_ && asr_engine_->is_loaded()) {
+        asr_thread_ = std::thread(&AudioPipeline::asr_loop, this);
+    }
 
     LOG_INFO("AudioPipe", "Started (ring=%zu KB, chunk=%d ms)",
              cfg_.ring_buffer_bytes / 1024, cfg_.process_chunk_ms);
@@ -123,9 +140,134 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
 void AudioPipeline::stop() {
     if (!running_.load()) return;
     running_.store(false, std::memory_order_release);
+    // Wake ASR thread so it can exit.
+    asr_cv_.notify_all();
+    if (asr_thread_.joinable()) asr_thread_.join();
     if (thread_.joinable()) thread_.join();
     LOG_INFO("AudioPipe", "Stopped (total: %lu samples, %lu mel frames, %lu speech)",
              stats_.pcm_samples_in, stats_.mel_frames, stats_.speech_frames);
+}
+
+void AudioPipeline::set_asr_rep_penalty(float p) {
+    asr_rep_penalty_.store(p, std::memory_order_relaxed);
+    if (asr_engine_) asr_engine_->set_repetition_penalty(p);
+}
+
+// ASR worker thread — picks up jobs from queue, runs transcription off-main-loop.
+void AudioPipeline::asr_loop() {
+    LOG_INFO("AudioPipe", "ASR worker thread started");
+    while (true) {
+        ASRJob job;
+        {
+            std::unique_lock<std::mutex> lock(asr_mutex_);
+            asr_cv_.wait(lock, [this] {
+                return !asr_queue_.empty() || !running_.load(std::memory_order_relaxed);
+            });
+            if (!running_.load(std::memory_order_relaxed) && asr_queue_.empty())
+                break;
+            if (asr_queue_.empty()) continue;
+            job = std::move(asr_queue_.front());
+            asr_queue_.pop();
+        }
+
+        asr_busy_.store(true, std::memory_order_relaxed);
+
+        // Dynamic max_tokens: scale with audio duration (~8 tokens/sec).
+        // Adapted from qwen35-thor (voice_session.cpp): min(configured, max(40, dur*8))
+        int max_tok_cfg = asr_max_tokens_.load(std::memory_order_relaxed);
+        int dynamic_tok = std::max(40, (int)(job.audio_duration_sec * 8.0f));
+        int max_tok = std::min(max_tok_cfg, dynamic_tok);
+        auto result = asr_engine_->transcribe(
+            job.pcm_f32.data(), (int)job.pcm_f32.size(), 16000, max_tok);
+
+        asr_busy_.store(false, std::memory_order_relaxed);
+
+        // Handle streaming partial vs final transcript differently.
+        if (job.is_partial) {
+            if (!result.text.empty()) {
+                LOG_INFO("AudioPipe", "ASR(partial): \"%s\" (%.1fms, %.2fs audio)",
+                         result.text.c_str(), result.total_ms, job.audio_duration_sec);
+                if (on_asr_partial_) on_asr_partial_(result.text, job.audio_duration_sec);
+            }
+            // Log partial to ASR log panel for observability.
+            if (on_asr_log_) {
+                auto esc = [](const std::string& s) -> std::string {
+                    std::string out;
+                    out.reserve(s.size() + 16);
+                    for (char c : s) {
+                        if (c == '"') out += "\\\"";
+                        else if (c == '\\') out += "\\\\";
+                        else if (c == '\n') out += "\\n";
+                        else out += c;
+                    }
+                    return out;
+                };
+                char json[1024];
+                snprintf(json, sizeof(json),
+                    R"({"stage":"partial","audio_sec":%.2f,"total_ms":%.1f,"tokens":%d,"text":"%s"})",
+                    job.audio_duration_sec, result.total_ms, result.token_count,
+                    esc(result.text).c_str());
+                on_asr_log_(json);
+            }
+            continue;
+        }
+
+        stats_.asr_active = true;
+        stats_.asr_latency_ms = result.total_ms;
+        stats_.asr_audio_duration_s = job.audio_duration_sec;
+
+        if (!result.text.empty()) {
+            // Check hallucination filter toggle — when OFF, pass all results through.
+            bool suppress = result.hallucinated &&
+                            asr_halluc_filter_.load(std::memory_order_relaxed);
+            if (!suppress) {
+                LOG_INFO("AudioPipe", "ASR: \"%s\" (%.1fms, %.2fs audio, mel=%.0fms enc=%.0fms dec=%.0fms %dtok%s)",
+                         result.text.c_str(), result.total_ms, job.audio_duration_sec,
+                         result.mel_ms, result.encoder_ms, result.decode_ms, result.token_count,
+                         result.hallucinated ? " [artifact]" : "");
+                if (on_transcript_) on_transcript_(result, job.audio_duration_sec,
+                                                     job.speaker_id, job.speaker_name,
+                                                     job.speaker_sim, job.trigger_reason);
+            } else {
+                LOG_INFO("AudioPipe", "ASR: artifact filtered \"%s\" (%.1fms, %.2fs audio)",
+                         result.text.c_str(), result.total_ms, job.audio_duration_sec);
+            }
+        } else {
+            LOG_INFO("AudioPipe", "ASR: (empty) (%.1fms, %.2fs audio)",
+                     result.total_ms, job.audio_duration_sec);
+        }
+
+        // Send detailed ASR log for WebUI debug panel.
+        if (on_asr_log_) {
+            // Escape raw_text and text for JSON.
+            auto esc = [](const std::string& s) -> std::string {
+                std::string out;
+                out.reserve(s.size() + 16);
+                for (char c : s) {
+                    if (c == '"') out += "\\\"";
+                    else if (c == '\\') out += "\\\\";
+                    else if (c == '\n') out += "\\n";
+                    else if (c == '\r') out += "\\r";
+                    else if (c == '\t') out += "\\t";
+                    else out += c;
+                }
+                return out;
+            };
+            char json[2048];
+            snprintf(json, sizeof(json),
+                R"({"stage":"result","trigger":"%s","audio_sec":%.2f,)"
+                R"("mel_ms":%.1f,"mel_frames":%d,"encoder_ms":%.1f,"encoder_out":%d,)"
+                R"("decode_ms":%.1f,"tokens":%d,"postprocess_ms":%.1f,"total_ms":%.1f,)"
+                R"("hallucinated":%s,"raw_text":"%s","text":"%s"})",
+                job.trigger_reason.c_str(), job.audio_duration_sec,
+                result.mel_ms, result.mel_frames, result.encoder_ms, result.encoder_out_len,
+                result.decode_ms, result.token_count, result.postprocess_ms, result.total_ms,
+                result.hallucinated ? "true" : "false",
+                esc(result.raw_text).c_str(), esc(result.text).c_str());
+            on_asr_log_(json);
+        }
+    }
+    LOG_INFO("AudioPipe", "ASR worker thread exited");
 }
 
 void AudioPipeline::push_pcm(const int16_t* data, int n_samples) {
@@ -261,12 +403,13 @@ void AudioPipeline::process_loop() {
             }
         }
 
-        // Buffer PCM for speaker identification during speech.
+        // Buffer PCM for speaker identification during speech (VAD-gated).
         bool any_speaker_enabled =
             (speaker_enc_.initialized() && enable_speaker_.load(std::memory_order_relaxed)) ||
             (wavlm_enc_.initialized() && enable_wavlm_.load(std::memory_order_relaxed)) ||
             (unispeech_enc_.initialized() && enable_unispeech_.load(std::memory_order_relaxed)) ||
             (wlecapa_enc_.initialized() && enable_wlecapa_.load(std::memory_order_relaxed));
+        bool need_segment_pcm = any_speaker_enabled;
 
         // Clear active flags each tick — only set true when extraction happens.
         stats_.speaker_active = false;
@@ -274,8 +417,9 @@ void AudioPipeline::process_loop() {
         stats_.unispeech_active = false;
         stats_.wlecapa_active = false;
         stats_.wlecapa_change_valid = false;
+        stats_.asr_active = false;
 
-        if (any_speaker_enabled) {
+        if (need_segment_pcm) {
             // Determine speech state from selected VAD source.
             VadSource src = static_cast<VadSource>(vad_source_.load(std::memory_order_relaxed));
             bool vad_speech = false;
@@ -294,6 +438,13 @@ void AudioPipeline::process_loop() {
                 early_extracted_   = false;
                 speech_pcm_buf_.clear();
                 speaker_fbank_.reset();
+                // Reset speaker ID for new segment — prevents stale ID from
+                // previous speaker being captured by ASR trigger if this segment
+                // is too short for WL-ECAPA extraction (< 1.0s full, < 1.7s early).
+                stats_.wlecapa_id = -1;
+                stats_.wlecapa_sim = 0.0f;
+                stats_.wlecapa_new = false;
+                strncpy(stats_.wlecapa_name, "", sizeof(stats_.wlecapa_name));
             }
             if (in_speech_segment_) {
                 speech_pcm_buf_.insert(speech_pcm_buf_.end(),
@@ -316,6 +467,7 @@ void AudioPipeline::process_loop() {
                 // short early clips. If no match, report "identifying" state.
                 int early_thresh = early_trigger_samples_.load(std::memory_order_relaxed);
                 if (!early_extracted_ &&
+                    enable_early_.load(std::memory_order_relaxed) &&
                     wlecapa_enc_.initialized() &&
                     enable_wlecapa_.load(std::memory_order_relaxed) &&
                     (int)speech_pcm_buf_.size() >= early_thresh) {
@@ -528,9 +680,10 @@ void AudioPipeline::process_loop() {
                 }
 
                 // WavLM-Large + ECAPA-TDNN native GPU speaker encoder (uses raw PCM).
+                int min_spk_samples = min_speech_samples_.load(std::memory_order_relaxed);
                 if (wlecapa_enc_.initialized() &&
                     enable_wlecapa_.load(std::memory_order_relaxed) &&
-                    speech_samples >= 16000) {  // minimum ~1.0s
+                    speech_samples >= min_spk_samples) {
                     // Convert int16 PCM to float32 [-1, 1].
                     std::vector<float> pcm_f32(speech_samples);
                     for (int i = 0; i < speech_samples; i++)
@@ -586,6 +739,217 @@ void AudioPipeline::process_loop() {
                 speech_pcm_buf_.clear();
             }
         }
+
+        // ASR: accumulate ALL audio continuously. Whisper encoder naturally handles
+        // silence and mixed audio. VAD is used only as a trigger hint (WHEN to fire
+        // transcription) and to track speech content ratio for filtering.
+        if (asr_engine_ && asr_engine_->is_loaded() &&
+            enable_asr_.load(std::memory_order_relaxed)) {
+
+            // Always accumulate ALL audio (speech + silence).
+            asr_pcm_buf_.insert(asr_pcm_buf_.end(),
+                                pcm_buf.data(), pcm_buf.data() + n_samples);
+
+            // Determine speech state from ASR-specific VAD source (independent from speaker pipeline).
+            VadSource asr_src = static_cast<VadSource>(asr_vad_source_.load(std::memory_order_relaxed));
+            bool asr_vad_speech = false;
+            switch (asr_src) {
+                case VadSource::SILERO: asr_vad_speech = stats_.silero_speech; break;
+                case VadSource::FSMN:   asr_vad_speech = stats_.fsmn_speech; break;
+                case VadSource::TEN:    asr_vad_speech = stats_.ten_speech; break;
+                case VadSource::DIRECT: asr_vad_speech = true; break;  // always "speech" — trigger on buffer duration
+                case VadSource::ANY:
+                default:
+                    asr_vad_speech = stats_.is_speech || stats_.silero_speech ||
+                                     stats_.fsmn_speech || stats_.ten_speech;
+                    break;
+            }
+
+            if (asr_vad_speech) {
+                asr_saw_speech_ = true;
+                asr_post_silence_ = 0;
+                asr_speech_samples_ += n_samples;
+            } else if (asr_saw_speech_) {
+                asr_post_silence_++;
+            }
+
+            // Streaming ASR partial: during active speech, submit partial transcription
+            // every N seconds for real-time display.
+            // Adapted from qwen35-thor: STREAMING_ASR_CHUNK_S periodic partial.
+            int partial_interval = asr_partial_samples_.load(std::memory_order_relaxed);
+            if (partial_interval > 0 && asr_saw_speech_ && asr_post_silence_ == 0 &&
+                !asr_busy_.load(std::memory_order_relaxed)) {
+                int buf_samples = (int)asr_pcm_buf_.size();
+                if (buf_samples - asr_partial_sent_at_ >= partial_interval &&
+                    buf_samples >= partial_interval) {
+                    // Copy current buffer for partial transcription.
+                    std::vector<float> pcm_f32(buf_samples);
+                    for (int i = 0; i < buf_samples; i++)
+                        pcm_f32[i] = asr_pcm_buf_[i] / 32768.0f;
+                    float dur = buf_samples / 16000.0f;
+                    {
+                        std::lock_guard<std::mutex> lock(asr_mutex_);
+                        asr_queue_.push(ASRJob{std::move(pcm_f32), dur, "streaming_partial", true});
+                    }
+                    asr_cv_.notify_one();
+                    asr_partial_sent_at_ = buf_samples;
+                }
+            }
+
+            // Trigger transcription when:
+            // (a) Post-speech silence reaches configured threshold, or
+            // (b) Buffer exceeds max size during continuous speech.
+            int asr_post_silence_chunks = asr_post_silence_ms_.load(std::memory_order_relaxed)
+                                          / cfg_.process_chunk_ms;
+            if (asr_post_silence_chunks < 1) asr_post_silence_chunks = 1;
+            int ASR_MAX_BUF_SAMPLES = asr_max_buf_samples_.load(std::memory_order_relaxed);
+            int ASR_MIN_SAMPLES = asr_min_samples_.load(std::memory_order_relaxed);
+            int ASR_PRE_ROLL_SAMPLES = asr_pre_roll_samples_.load(std::memory_order_relaxed);
+
+            bool asr_trigger = false;
+            std::string trigger_reason;
+            if (asr_saw_speech_ && asr_post_silence_ >= asr_post_silence_chunks) {
+                asr_trigger = true;
+                trigger_reason = "post_silence";
+            } else if ((int)asr_pcm_buf_.size() >= ASR_MAX_BUF_SAMPLES) {
+                asr_trigger = true;
+                trigger_reason = "buffer_full";
+            }
+
+            if (asr_trigger && (int)asr_pcm_buf_.size() >= ASR_MIN_SAMPLES) {
+                int asr_samples = (int)asr_pcm_buf_.size();
+                float asr_duration = asr_samples / 16000.0f;
+                float speech_sec = asr_speech_samples_ / 16000.0f;
+                float speech_ratio = asr_duration > 0 ? speech_sec / asr_duration : 0;
+
+                // Speech content filter: skip segments with too little detected speech.
+                // Only applies to buffer_full triggers — post_silence triggers are already
+                // VAD-confirmed (asr_saw_speech_=true), so short affirmative responses
+                // like "好", "嗯", "ok" pass through correctly.
+                bool has_enough_speech = true;
+                if (trigger_reason == "buffer_full") {
+                    has_enough_speech = (speech_sec >= 0.3f);
+
+                    // Speech ratio filter: reject long buffers where speech is a tiny fraction.
+                    float min_speech_ratio = asr_min_speech_ratio_.load(std::memory_order_relaxed);
+                    if (has_enough_speech && asr_duration > 5.0f && min_speech_ratio > 0 &&
+                        speech_ratio < min_speech_ratio) {
+                        has_enough_speech = false;
+                    }
+                }
+
+                // Energy filter: compute average RMS energy and reject low-energy segments.
+                // Adapted from qwen35-thor (voice_session.cpp): min_avg_energy rejection.
+                float min_energy = asr_min_energy_.load(std::memory_order_relaxed);
+                bool has_enough_energy = true;
+                float avg_energy = 0.0f;
+                if (min_energy > 0.0f && asr_samples > 0) {
+                    double energy_sum = 0;
+                    for (int i = 0; i < asr_samples; i++) {
+                        float s = asr_pcm_buf_[i] / 32768.0f;
+                        energy_sum += s * s;
+                    }
+                    avg_energy = (float)std::sqrt(energy_sum / asr_samples);
+                    has_enough_energy = (avg_energy >= min_energy);
+                }
+
+                if (has_enough_speech && has_enough_energy) {
+                    // Trim trailing silence: scan backwards to find last
+                    // energetic region, keep a small tail margin (100ms).
+                    // This prevents feeding long silence tails to the model
+                    // which can cause hallucinated filler outputs.
+                    int trim_samples = asr_samples;
+                    {
+                        const int window = 1600; // 100ms windows
+                        const float silence_rms = 0.005f;
+                        const int tail_margin = 1600; // keep 100ms after last energy
+                        int last_energy_pos = trim_samples;
+                        for (int pos = trim_samples - window; pos >= 0; pos -= window) {
+                            double w_sum = 0;
+                            int w_end = std::min(pos + window, trim_samples);
+                            for (int j = pos; j < w_end; j++) {
+                                float s = asr_pcm_buf_[j] / 32768.0f;
+                                w_sum += s * s;
+                            }
+                            float w_rms = (float)std::sqrt(w_sum / (w_end - pos));
+                            if (w_rms > silence_rms) {
+                                last_energy_pos = w_end;
+                                break;
+                            }
+                        }
+                        int trimmed = std::min(trim_samples, last_energy_pos + tail_margin);
+                        // Don't trim too aggressively — keep at least 80% of original
+                        if (trimmed >= asr_samples * 4 / 5) {
+                            trim_samples = trimmed;
+                        }
+                    }
+                    float trimmed_duration = trim_samples / 16000.0f;
+
+                    // Convert int16 → float32 for ASR engine.
+                    std::vector<float> pcm_f32(trim_samples);
+                    for (int i = 0; i < trim_samples; i++)
+                        pcm_f32[i] = asr_pcm_buf_[i] / 32768.0f;
+
+                    // Send ASR log: trigger event.
+                    if (on_asr_log_) {
+                        char json[512];
+                        snprintf(json, sizeof(json),
+                            R"({"stage":"trigger","reason":"%s","buf_sec":%.2f,"trimmed_sec":%.2f,"speech_sec":%.2f,"speech_ratio":%.2f,"samples":%d})",
+                            trigger_reason.c_str(), asr_duration, trimmed_duration, speech_sec, speech_ratio, asr_samples);
+                        on_asr_log_(json);
+                    }
+
+                    // Push job to async ASR thread (non-blocking).
+                    // Capture current speaker identification for transcript annotation.
+                    int spk_id = stats_.wlecapa_id;
+                    float spk_sim = stats_.wlecapa_sim;
+                    std::string spk_name(stats_.wlecapa_name);
+                    {
+                        std::lock_guard<std::mutex> lock(asr_mutex_);
+                        ASRJob job{std::move(pcm_f32), trimmed_duration, trigger_reason,
+                                   /*is_partial=*/false, spk_id, std::move(spk_name), spk_sim};
+                        asr_queue_.push(std::move(job));
+                    }
+                    asr_cv_.notify_one();
+                } else {
+                    // Not enough speech or energy — skip ASR, log for debug.
+                    std::string skip_reason = !has_enough_energy ? "low_energy" :
+                        (speech_sec < 0.3f ? "low_speech" : "low_speech_ratio");
+                    if (on_asr_log_) {
+                        char json[512];
+                        snprintf(json, sizeof(json),
+                            R"({"stage":"skipped","reason":"%s","buf_sec":%.2f,"speech_sec":%.2f,"speech_ratio":%.2f,"avg_energy":%.5f})",
+                            skip_reason.c_str(), asr_duration, speech_sec, speech_ratio, avg_energy);
+                        on_asr_log_(json);
+                    }
+                    LOG_INFO("AudioPipe", "ASR: skipped (%s, speech=%.2fs/%.2fs ratio=%.0f%% energy=%.5f)",
+                             skip_reason.c_str(), speech_sec, asr_duration, speech_ratio * 100, avg_energy);
+                }
+
+                // Keep last pre_roll as context for next segment.
+                if (asr_samples > ASR_PRE_ROLL_SAMPLES) {
+                    asr_pcm_buf_.erase(asr_pcm_buf_.begin(),
+                                       asr_pcm_buf_.end() - ASR_PRE_ROLL_SAMPLES);
+                }
+                asr_saw_speech_ = false;
+                asr_post_silence_ = 0;
+                asr_speech_samples_ = 0;
+                asr_partial_sent_at_ = 0;
+            }
+
+            // When idle (no speech seen), trim buffer to ~2x pre-roll to avoid
+            // unbounded growth during long silence periods.
+            if (!asr_saw_speech_ && (int)asr_pcm_buf_.size() > ASR_PRE_ROLL_SAMPLES * 2) {
+                asr_pcm_buf_.erase(asr_pcm_buf_.begin(),
+                                   asr_pcm_buf_.end() - ASR_PRE_ROLL_SAMPLES);
+                asr_speech_samples_ = 0;
+            }
+        }
+
+        // Update ASR buffer stats.
+        stats_.asr_buf_sec = asr_pcm_buf_.size() / 16000.0f;
+        stats_.asr_buf_has_speech = asr_saw_speech_;
+        stats_.asr_busy = asr_busy_.load(std::memory_order_relaxed);
 
         // Push to Mel spectrogram (GPU).
         int new_frames = mel_.push_pcm(pcm_buf.data(), n_samples);
