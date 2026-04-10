@@ -4,3 +4,4 @@ build/
 hub/
 *.mp3
 *.wav
+logs/
