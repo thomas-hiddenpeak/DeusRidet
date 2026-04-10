@@ -1,44 +1,24 @@
 #!/usr/bin/env python3
 """
-timeline_logger.py — Persistent timeline data recorder for DeusRidet.
+timeline_analyze.py — Summary & analysis tool for DeusRidet timeline logs.
 
-Connects to the WebSocket, records ALL timeline-relevant events (VAD, ASR, SAAS,
-Tracker) as JSONL (one JSON object per line). Each run creates a new timestamped
-log file in logs/timeline/.
-
-Output file: logs/timeline/tl_YYYYMMDD_HHMMSS.jsonl
-
-Each line is one of:
-  {"t":"stats", "s":<stream_sec>, ...}   — pipeline_stats snapshot
-  {"t":"asr",   "s":<stream_start>, ...} — ASR transcript
-  {"t":"vad",   ...}                     — VAD event
+The main C++ program writes JSONL timeline logs to logs/timeline/ automatically.
+This tool reads those logs and prints structured summaries for analysis.
 
 Usage:
-  python3 tools/timeline_logger.py                  # run until Ctrl+C
-  python3 tools/timeline_logger.py --duration 300   # run for 5 minutes
-  python3 tools/timeline_logger.py --summary         # print summary of latest log
-  python3 tools/timeline_logger.py --summary <file>  # print summary of specific log
+  python3 tools/timeline_logger.py --summary         # analyze latest log
+  python3 tools/timeline_logger.py --summary <file>  # analyze specific log
+  python3 tools/timeline_logger.py --list             # list available logs
 """
 
-import asyncio
 import json
 import os
-import signal
 import sys
-import time
-from datetime import datetime
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 LOG_DIR = PROJECT_DIR / "logs" / "timeline"
-WS_URI = "ws://localhost:8080/ws"
-
-
-def new_log_path():
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return LOG_DIR / f"tl_{ts}.jsonl"
 
 
 def latest_log():
@@ -46,185 +26,6 @@ def latest_log():
         return None
     files = sorted(LOG_DIR.glob("tl_*.jsonl"))
     return files[-1] if files else None
-
-
-# ─── Recording ───
-
-async def record(duration=None):
-    try:
-        import websockets
-    except ImportError:
-        print("ERROR: pip install websockets")
-        sys.exit(1)
-
-    log_path = new_log_path()
-    print(f"Recording to: {log_path}")
-    print(f"WebSocket:    {WS_URI}")
-    if duration:
-        print(f"Duration:     {duration}s")
-    print("Press Ctrl+C to stop.\n")
-
-    counts = {"stats": 0, "asr": 0, "vad": 0, "other": 0}
-    wall_t0 = time.time()
-    stop = asyncio.Event()
-
-    # Handle Ctrl+C gracefully
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
-
-    with open(log_path, "w") as f:
-        # Write header comment
-        f.write(json.dumps({
-            "t": "header",
-            "version": 1,
-            "started": datetime.now().isoformat(),
-            "ws_uri": WS_URI,
-        }) + "\n")
-
-        try:
-            async with websockets.connect(WS_URI, max_size=4 * 1024 * 1024) as ws:
-                print("Connected.")
-
-                while not stop.is_set():
-                    if duration and (time.time() - wall_t0) >= duration:
-                        break
-
-                    try:
-                        msg = await asyncio.wait_for(ws.recv(), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        continue
-
-                    if not isinstance(msg, str):
-                        continue
-
-                    try:
-                        obj = json.loads(msg)
-                    except json.JSONDecodeError:
-                        continue
-
-                    wall = round(time.time() - wall_t0, 4)
-                    msg_type = obj.get("type", "")
-
-                    if msg_type == "pipeline_stats":
-                        pcm = obj.get("pcm_samples", 0)
-                        rec = {
-                            "t": "stats",
-                            "w": wall,
-                            "s": round(pcm / 16000.0, 4),
-                            # VAD
-                            "speech": obj.get("is_speech", False),
-                            "energy": obj.get("energy"),
-                            "rms": obj.get("rms"),
-                            "silero_p": obj.get("silero_prob"),
-                            "silero_sp": obj.get("silero_speech"),
-                            "fsmn_p": obj.get("fsmn_prob"),
-                            "fsmn_sp": obj.get("fsmn_speech"),
-                            # WL-ECAPA (SAAS)
-                            "wle_active": obj.get("wlecapa_active"),
-                            "wle_id": obj.get("wlecapa_id"),
-                            "wle_name": obj.get("wlecapa_name"),
-                            "wle_sim": obj.get("wlecapa_sim"),
-                            "wle_early": obj.get("wlecapa_is_early"),
-                            "wle_margin": obj.get("wlecapa_margin"),
-                            "change_sim": obj.get("change_similarity"),
-                            # Tracker
-                            "trk_state": obj.get("tracker_state"),
-                            "trk_id": obj.get("tracker_spk_id"),
-                            "trk_name": obj.get("tracker_spk_name"),
-                            "trk_sim": obj.get("tracker_sim_to_ref"),
-                            "trk_avg": obj.get("tracker_sim_avg"),
-                            "trk_conf": obj.get("tracker_confidence"),
-                            "trk_check": obj.get("tracker_check_active"),
-                            "trk_switches": obj.get("tracker_switches"),
-                            "trk_f0": obj.get("tracker_f0_hz"),
-                            "trk_jitter": obj.get("tracker_f0_jitter"),
-                            "trk_reg": obj.get("tracker_reg_event"),
-                            "trk_reg_id": obj.get("tracker_reg_id"),
-                            "trk_reg_name": obj.get("tracker_reg_name"),
-                            # ASR buffer state
-                            "asr_buf": obj.get("asr_buf_sec"),
-                            "asr_buf_sp": obj.get("asr_buf_has_speech"),
-                            "asr_busy": obj.get("asr_busy"),
-                            "asr_sil_ms": obj.get("asr_current_silence_ms"),
-                            "asr_eff_sil": obj.get("asr_effective_silence_ms"),
-                        }
-                        # Strip None values
-                        rec = {k: v for k, v in rec.items() if v is not None}
-                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                        counts["stats"] += 1
-
-                    elif msg_type == "asr_transcript":
-                        rec = {
-                            "t": "asr",
-                            "w": wall,
-                            "s": obj.get("stream_start_sec", 0),
-                            "e": obj.get("stream_end_sec", 0),
-                            "text": obj.get("text", ""),
-                            "trigger": obj.get("trigger", ""),
-                            "latency": obj.get("latency_ms"),
-                            "audio": obj.get("audio_sec"),
-                            "mel_ms": obj.get("mel_ms"),
-                            "enc_ms": obj.get("encoder_ms"),
-                            "dec_ms": obj.get("decode_ms"),
-                            "tokens": obj.get("tokens"),
-                            # SAAS
-                            "spk_id": obj.get("speaker_id"),
-                            "spk_name": obj.get("speaker_name"),
-                            "spk_sim": obj.get("speaker_sim"),
-                            "spk_conf": obj.get("speaker_confidence"),
-                            "spk_src": obj.get("speaker_source"),
-                            # Tracker
-                            "trk_id": obj.get("tracker_id"),
-                            "trk_name": obj.get("tracker_name"),
-                            "trk_sim": obj.get("tracker_sim"),
-                        }
-                        rec = {k: v for k, v in rec.items() if v is not None}
-                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                        counts["asr"] += 1
-
-                    elif msg_type == "vad":
-                        rec = {
-                            "t": "vad",
-                            "w": wall,
-                            "event": obj.get("event"),
-                            "speech": obj.get("speech"),
-                            "frame": obj.get("frame"),
-                            "energy": obj.get("energy"),
-                        }
-                        rec = {k: v for k, v in rec.items() if v is not None}
-                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                        counts["vad"] += 1
-
-                    elif msg_type in ("speaker", "speaker_debug"):
-                        rec = {"t": msg_type, "w": wall}
-                        rec.update({k: v for k, v in obj.items() if k != "type"})
-                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                        counts["other"] += 1
-
-                    # Periodic status
-                    total = sum(counts.values())
-                    if total % 100 == 0 and total > 0:
-                        elapsed = time.time() - wall_t0
-                        print(f"  {elapsed:.0f}s | stats={counts['stats']} asr={counts['asr']} vad={counts['vad']} | {os.path.getsize(log_path) / 1024:.0f} KB")
-
-        except Exception as e:
-            print(f"\nConnection error: {e}")
-
-        # Write footer
-        f.write(json.dumps({
-            "t": "footer",
-            "ended": datetime.now().isoformat(),
-            "duration_sec": round(time.time() - wall_t0, 1),
-            "counts": counts,
-        }) + "\n")
-
-    elapsed = round(time.time() - wall_t0, 1)
-    size_kb = os.path.getsize(log_path) / 1024
-    print(f"\nDone. {elapsed}s, {sum(counts.values())} events, {size_kb:.0f} KB")
-    print(f"  stats={counts['stats']}  asr={counts['asr']}  vad={counts['vad']}  other={counts['other']}")
-    print(f"  Saved: {log_path}")
-    return log_path
 
 
 # ─── Summary / Analysis ───
@@ -369,8 +170,7 @@ def print_summary(log_path):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="DeusRidet Timeline Logger")
-    parser.add_argument("--duration", type=int, help="Recording duration in seconds")
+    parser = argparse.ArgumentParser(description="DeusRidet Timeline Log Analyzer")
     parser.add_argument("--summary", nargs="?", const="__latest__", help="Print summary (latest or specific file)")
     parser.add_argument("--list", action="store_true", help="List available log files")
     args = parser.parse_args()
@@ -401,4 +201,10 @@ if __name__ == "__main__":
             print_summary(str(p))
         sys.exit(0)
 
-    asyncio.run(record(duration=args.duration))
+    # Default: show summary of latest log.
+    lf = latest_log()
+    if lf:
+        print_summary(str(lf))
+    else:
+        parser.print_help()
+        print("\nNo timeline logs found. Logs are created automatically by the main program.")

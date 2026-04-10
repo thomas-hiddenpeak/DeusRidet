@@ -29,6 +29,7 @@
 #include "orator/wavlm_ecapa_encoder.h"
 #include "conscientia/stream.h"
 #include "memoria/cache_manager.h"
+#include "communis/timeline_logger.h"
 
 namespace deusridet {
 
@@ -1441,6 +1442,14 @@ int cmd_test_ws(const std::string& webui_dir,
     std::atomic<uint64_t> total_bytes{0};
     std::atomic<bool> loopback{false};
 
+    // Persistent timeline data logger (JSONL).
+    TimelineLogger timeline;
+    if (timeline.open()) {
+        printf("[test-ws] Timeline log: %s\n", timeline.path().c_str());
+    } else {
+        fprintf(stderr, "[test-ws] WARNING: failed to open timeline log\n");
+    }
+
     // Helper: strip trailing incomplete UTF-8 sequence from a byte string.
     auto sanitize_utf8 = [](const std::string& s) -> std::string {
         if (s.empty()) return s;
@@ -1492,6 +1501,8 @@ int cmd_test_ws(const std::string& webui_dir,
             vr.segment_start ? "start" : (vr.segment_end ? "end" : "none"),
             frame_idx, vr.energy);
         server.broadcast_text(json);
+        timeline.log_vad(vr.is_speech, vr.segment_start, vr.segment_end,
+                         frame_idx, vr.energy);
         if (vr.segment_start)
             printf("[test-ws] VAD: speech START at frame %d (energy=%.2f)\n",
                    frame_idx, vr.energy);
@@ -1528,6 +1539,11 @@ int cmd_test_ws(const std::string& webui_dir,
             trigger_reason.c_str(),
             tracker_id, trk_escaped.c_str(), tracker_sim);
         server.broadcast_text(json);
+        timeline.log_asr(result.text.c_str(), stream_start_sec, stream_end_sec,
+                         result.total_ms, audio_sec, trigger_reason.c_str(),
+                         speaker_id, speaker_name.c_str(), speaker_sim,
+                         speaker_confidence, speaker_source.c_str(),
+                         tracker_id, tracker_name.c_str(), tracker_sim);
         if (speaker_id >= 0)
             printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s conf=%.2f src=%s | trk=%d %s]\n",
                    result.text.c_str(), result.total_ms, audio_sec,
@@ -1770,6 +1786,12 @@ int cmd_test_ws(const std::string& webui_dir,
         full_json += lists_json;
         full_json += '}';
         server.broadcast_text(full_json);
+
+        // Timeline log: compact stats.
+        timeline.log_stats(st, audio.tracker().stats(),
+                           audio.wlecapa_db().min_margin(),
+                           st.wlecapa_change_sim,
+                           st.wlecapa_change_valid && !st.wlecapa_is_early);
     });
 
     audio.set_on_speaker([&](const SpeakerMatch& match) {
@@ -2673,6 +2695,8 @@ int cmd_test_ws(const std::string& webui_dir,
 
     audio.stop();
     server.stop();
+    timeline.close();
+    printf("[test-ws] Timeline log closed: %s\n", timeline.path().c_str());
     printf("[test-ws] Total: %lu WS frames, %.1f KB\n",
            total_frames.load(), total_bytes.load() / 1024.0);
 

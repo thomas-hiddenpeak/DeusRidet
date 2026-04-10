@@ -57,6 +57,8 @@ target_link_libraries(machina PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt)
 file(GLOB_RECURSE COMMUNIS_SOURCES
     "src/communis/*.cpp"
 )
+# timeline_logger.cpp depends on sensus — built in main exe, not here.
+list(FILTER COMMUNIS_SOURCES EXCLUDE REGEX "timeline_logger\\.cpp$")
 
 add_library(communis STATIC ${COMMUNIS_SOURCES})
 target_link_libraries(communis PRIVATE CUDA::cudart nvinfer nvonnxparser)
@@ -134,6 +136,7 @@ target_link_libraries(conscientia PRIVATE machina memoria communis CUDA::cudart)
 add_executable(deusridet
     src/main.cpp
     src/commands.cpp
+    src/communis/timeline_logger.cpp
 )
 target_link_libraries(deusridet PRIVATE machina memoria conscientia communis nexus sensus orator stdc++fs rt dl)
 
