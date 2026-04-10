@@ -1624,16 +1624,17 @@ body {
     margin-bottom: var(--sp-sm);
 }
 
-.tl-range,
-.tl-count {
+.tl-info {
     font-family: var(--font-mono);
     font-size: 11px;
     color: var(--clr-text-dim);
 }
 
-.tl-canvas-wrap {
+.tl-scroll {
     width: 100%;
-    overflow: hidden;
+    max-height: 520px;
+    overflow-y: auto;
+    overflow-x: hidden;
     border-radius: var(--radius);
     background: var(--clr-bg);
     border: 1px solid var(--clr-border);
@@ -1642,11 +1643,6 @@ body {
 .tl-canvas {
     display: block;
     width: 100%;
-    cursor: grab;
-}
-
-.tl-canvas:active {
-    cursor: grabbing;
 }
 
 .tl-tooltip {

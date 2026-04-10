@@ -1,9 +1,7 @@
-// timeline-panel.js — Time-aligned visualization of ASR segments + speaker identification.
-// X-axis = stream time (seconds). Two swim lanes:
-//   1. ASR lane: colored blocks per transcript segment (color = SAAS speaker)
-//   2. Speaker lane: colored blocks from pipeline_stats speaker events
-// Hovering a block shows details. The view auto-scrolls to follow live data,
-// but can be paused by clicking/dragging (manual pan).
+// timeline-panel.js — Wrapping time-aligned visualization.
+// 4 independent lanes per time row: VAD, ASR, SAAS, Tracker.
+// Time wraps to next row at panel edge — no horizontal scrolling.
+// Container scrolls vertically, auto-follows latest data.
 
 const SPEAKER_COLORS = [
     '#5caaef', '#ef6c5c', '#5cef8a', '#efcf5c', '#c77dff',
@@ -13,9 +11,8 @@ const TRACKER_COLORS = [
     '#3d8abf', '#bf4d3d', '#3dbf6a', '#bf9f3d', '#9d5ddf',
     '#df6f8f', '#2eada4', '#df861f', '#7d45a9', '#00b2df',
 ];
-const UNKNOWN_COLOR = '#555';
+const UNKNOWN_COLOR = '#444';
 
-// Source badge colors for the speaker lane
 const SOURCE_COLORS = {
     SAAS_FULL:    '#3fb950',
     SAAS_EARLY:   '#58a6ff',
@@ -25,27 +22,42 @@ const SOURCE_COLORS = {
     SNAPSHOT:     '#555',
 };
 
+// Lane heights (px)
+const LH = {
+    time:    14,
+    vad:     12,
+    asr:     24,
+    saas:    16,
+    tracker: 16,
+    gap:      4,
+};
+const ROW_H = LH.time + LH.vad + LH.asr + LH.saas + LH.tracker + LH.gap;
+const LABEL_W = 30;            // left margin for lane labels
+const DEFAULT_PX_SEC = 40;     // pixels per second
+
 export class TimelinePanel {
     constructor() {
         this.el = document.getElementById('timeline-panel');
-        // Data stores
-        this.asrSegments = [];      // {start, end, text, spkId, spkName, spkSim, spkConf, spkSrc, trkId, trkName}
-        this.spkEvents = [];        // {time, spkId, spkName, sim, source} from pipeline_stats
-        this.maxSegments = 500;
-        // View state
-        this.viewStart = 0;         // visible start (seconds)
-        this.viewEnd = 60;          // visible end (seconds)
-        this.autoScroll = true;     // follow live data
-        this.pixelsPerSec = 0;      // computed from canvas width
-        this.dragState = null;
-        this.hoverInfo = null;
-        // Speaker name map (updated from pipeline_stats speaker_lists)
-        this.speakerNames = {};     // id → name
+        // Data
+        this.vadIntervals  = [];  // {start, end}
+        this.asrSegments   = [];  // {start, end, text, trigger, latency, ...}
+        this.saasSegments  = [];  // {start, end, spkId, spkName, spkSim, spkConf, spkSrc}
+        this.trackerSegs   = [];  // {start, end, trkId, trkName, trkSim}
+        this.maxEntries    = 800;
+        // VAD state tracking from pipeline_stats
+        this._vadSpeech    = false;
+        this._vadStart     = 0;
+        this._lastStreamSec = 0;
+        // View
+        this.pxPerSec      = DEFAULT_PX_SEC;
+        this.autoScroll    = true;
+        this._dirty        = true;
         this._build();
         this._bindEvents();
-        this._raf = null;
         this._scheduleRender();
     }
+
+    // ─── DOM ───
 
     _build() {
         this.el.innerHTML = `
@@ -54,30 +66,29 @@ export class TimelinePanel {
                 <button id="tl-follow" class="btn btn--vad btn--active btn--sm" aria-pressed="true">Follow</button>
                 <button id="tl-zoom-in" class="btn btn--vad btn--sm">+</button>
                 <button id="tl-zoom-out" class="btn btn--vad btn--sm">−</button>
-                <span class="tl-range" id="tl-range">0 – 60 s</span>
-                <span class="tl-count" id="tl-count">0 segments</span>
+                <span class="tl-info" id="tl-info">0 seg | 40 px/s</span>
             </div>
-            <div class="tl-canvas-wrap">
+            <div class="tl-scroll" id="tl-scroll">
                 <canvas id="tl-canvas" class="tl-canvas"></canvas>
             </div>
             <div class="tl-tooltip" id="tl-tooltip" hidden></div>
             <div class="tl-legend">
-                <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#3fb950"></span>SAAS Full</span>
-                <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#58a6ff"></span>SAAS Early</span>
-                <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#d29922"></span>SPK Change</span>
+                <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#e5534b"></span>VAD Speech</span>
+                <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#3fb950"></span>Full</span>
+                <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#58a6ff"></span>Early</span>
+                <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#d29922"></span>Change</span>
                 <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#8b949e"></span>Inherit</span>
                 <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#b48ead"></span>Tracker</span>
-                <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#555"></span>Snapshot/?</span>
             </div>
         `;
-        this.canvas = this.el.querySelector('#tl-canvas');
-        this.ctx = this.canvas.getContext('2d');
+        this.scrollEl  = this.el.querySelector('#tl-scroll');
+        this.canvas    = this.el.querySelector('#tl-canvas');
+        this.ctx       = this.canvas.getContext('2d');
         this.tooltipEl = this.el.querySelector('#tl-tooltip');
-        this.rangeEl = this.el.querySelector('#tl-range');
-        this.countEl = this.el.querySelector('#tl-count');
+        this.infoEl    = this.el.querySelector('#tl-info');
         this.followBtn = this.el.querySelector('#tl-follow');
         this.zoomInBtn = this.el.querySelector('#tl-zoom-in');
-        this.zoomOutBtn = this.el.querySelector('#tl-zoom-out');
+        this.zoomOutBtn= this.el.querySelector('#tl-zoom-out');
     }
 
     _bindEvents() {
@@ -86,368 +97,440 @@ export class TimelinePanel {
             this.followBtn.classList.toggle('btn--active', this.autoScroll);
             this.followBtn.setAttribute('aria-pressed', this.autoScroll);
         });
-        this.zoomInBtn.addEventListener('click', () => this._zoom(0.5));
-        this.zoomOutBtn.addEventListener('click', () => this._zoom(2.0));
-
-        // Drag to pan
-        this.canvas.addEventListener('mousedown', (e) => {
-            this.dragState = { startX: e.offsetX, viewStart: this.viewStart, viewEnd: this.viewEnd };
-            this.autoScroll = false;
-            this.followBtn.classList.remove('btn--active');
-            this.followBtn.setAttribute('aria-pressed', false);
+        this.zoomInBtn.addEventListener('click', () => {
+            this.pxPerSec = Math.min(this.pxPerSec * 1.5, 200);
+            this._dirty = true;
         });
-        this.canvas.addEventListener('mousemove', (e) => {
-            if (this.dragState) {
-                const dx = e.offsetX - this.dragState.startX;
-                const dtSec = -dx / this.pixelsPerSec;
-                const span = this.dragState.viewEnd - this.dragState.viewStart;
-                this.viewStart = this.dragState.viewStart + dtSec;
-                this.viewEnd = this.viewStart + span;
-                if (this.viewStart < 0) { this.viewStart = 0; this.viewEnd = span; }
-            } else {
-                this._updateHover(e.offsetX, e.offsetY);
+        this.zoomOutBtn.addEventListener('click', () => {
+            this.pxPerSec = Math.max(this.pxPerSec / 1.5, 8);
+            this._dirty = true;
+        });
+
+        // Scroll → disable auto-follow on manual scroll up
+        this.scrollEl.addEventListener('scroll', () => {
+            const el = this.scrollEl;
+            const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+            if (!atBottom && this.autoScroll) {
+                this.autoScroll = false;
+                this.followBtn.classList.remove('btn--active');
+                this.followBtn.setAttribute('aria-pressed', false);
             }
         });
-        this.canvas.addEventListener('mouseup', () => { this.dragState = null; });
-        this.canvas.addEventListener('mouseleave', () => {
-            this.dragState = null;
-            this.hoverInfo = null;
-            this.tooltipEl.hidden = true;
-        });
 
-        // Wheel to zoom
-        this.canvas.addEventListener('wheel', (e) => {
-            e.preventDefault();
-            const factor = e.deltaY > 0 ? 1.3 : 0.77;
-            const rect = this.canvas.getBoundingClientRect();
-            const frac = (e.clientX - rect.left) / rect.width;
-            this._zoomAt(factor, frac);
-        }, { passive: false });
+        // Hover for tooltip
+        this.canvas.addEventListener('mousemove', (e) => this._onHover(e));
+        this.canvas.addEventListener('mouseleave', () => { this.tooltipEl.hidden = true; });
 
-        // Resize observer
-        this._resizeObs = new ResizeObserver(() => this._resizeCanvas());
+        // Resize
+        this._resizeObs = new ResizeObserver(() => { this._dirty = true; });
         this._resizeObs.observe(this.el);
-        setTimeout(() => this._resizeCanvas(), 50);
     }
 
-    _resizeCanvas() {
-        const wrap = this.canvas.parentElement;
-        const dpr = window.devicePixelRatio || 1;
-        const w = wrap.clientWidth;
-        const h = 120;  // fixed height: 3 lanes (time axis + ASR + speaker)
-        this.canvas.width = w * dpr;
-        this.canvas.height = h * dpr;
-        this.canvas.style.width = w + 'px';
-        this.canvas.style.height = h + 'px';
-        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // ─── Data Input ───
+
+    onVad(obj) {
+        // From 'vad' WS messages — no absolute time, so we use _lastStreamSec
+        // as approximate time. This is supplementary to pipeline_stats tracking.
     }
 
-    _zoom(factor) {
-        this._zoomAt(factor, 0.5);
-    }
+    onPipelineStats(obj) {
+        const streamSec = (obj.pcm_samples || 0) / 16000;
+        if (streamSec <= 0) return;
+        this._lastStreamSec = streamSec;
 
-    _zoomAt(factor, frac) {
-        const span = this.viewEnd - this.viewStart;
-        const newSpan = Math.min(Math.max(span * factor, 5), 3600);
-        const pivot = this.viewStart + span * frac;
-        this.viewStart = pivot - newSpan * frac;
-        this.viewEnd = this.viewStart + newSpan;
-        if (this.viewStart < 0) { this.viewStart = 0; this.viewEnd = newSpan; }
-        this.autoScroll = false;
-        this.followBtn.classList.remove('btn--active');
-        this.followBtn.setAttribute('aria-pressed', false);
+        // Track VAD speech intervals from is_speech transitions
+        const speech = !!obj.is_speech;
+        if (speech && !this._vadSpeech) {
+            // Speech start
+            this._vadStart = streamSec;
+            this._vadSpeech = true;
+        } else if (!speech && this._vadSpeech) {
+            // Speech end
+            this.vadIntervals.push({ start: this._vadStart, end: streamSec });
+            if (this.vadIntervals.length > this.maxEntries) this.vadIntervals.shift();
+            this._vadSpeech = false;
+            this._dirty = true;
+        }
+        // Extend current speech interval visually
+        if (this._vadSpeech) this._dirty = true;
     }
-
-    // --- Data input ---
 
     onTranscript(obj) {
+        const start = obj.stream_start_sec || 0;
+        const end   = obj.stream_end_sec || 0;
+        if (end <= 0) return;
+
+        // ASR segment
         const seg = {
-            start: obj.stream_start_sec || 0,
-            end: obj.stream_end_sec || 0,
-            text: obj.text || '',
-            spkId: obj.speaker_id ?? -1,
-            spkName: obj.speaker_name || '',
-            spkSim: obj.speaker_sim || 0,
-            spkConf: obj.speaker_confidence || 0,
-            spkSrc: obj.speaker_source || '',
-            trkId: obj.tracker_id ?? -1,
-            trkName: obj.tracker_name || '',
+            start, end,
+            text:    obj.text || '',
             trigger: obj.trigger || '',
             latency: obj.latency_ms || 0,
+            audio:   obj.audio_sec || 0,
         };
         // Merge buffer_full continuations
         if (seg.trigger === 'buffer_full' && this.asrSegments.length > 0) {
             const prev = this.asrSegments[this.asrSegments.length - 1];
-            if (prev.spkId === seg.spkId && seg.start <= prev.end + 0.5) {
+            if (prev.end >= seg.start - 0.5) {
                 prev.end = seg.end;
                 prev.text += seg.text;
-                return;
+                this._dirty = true;
+                return; // don't duplicate SAAS/tracker for merged segs
             }
         }
         this.asrSegments.push(seg);
-        if (this.asrSegments.length > this.maxSegments) this.asrSegments.shift();
+        if (this.asrSegments.length > this.maxEntries) this.asrSegments.shift();
 
-        // Auto-scroll
-        if (this.autoScroll) {
-            const span = this.viewEnd - this.viewStart;
-            this.viewEnd = Math.max(seg.end + span * 0.1, this.viewEnd);
-            this.viewStart = this.viewEnd - span;
-            if (this.viewStart < 0) { this.viewStart = 0; this.viewEnd = span; }
-        }
-        this.countEl.textContent = `${this.asrSegments.length} segments`;
+        // SAAS segment
+        this.saasSegments.push({
+            start, end,
+            spkId:   obj.speaker_id ?? -1,
+            spkName: obj.speaker_name || '',
+            spkSim:  obj.speaker_sim || 0,
+            spkConf: obj.speaker_confidence || 0,
+            spkSrc:  obj.speaker_source || '',
+        });
+        if (this.saasSegments.length > this.maxEntries) this.saasSegments.shift();
+
+        // Tracker segment
+        this.trackerSegs.push({
+            start, end,
+            trkId:   obj.tracker_id ?? -1,
+            trkName: obj.tracker_name || '',
+            trkSim:  obj.tracker_sim || 0,
+        });
+        if (this.trackerSegs.length > this.maxEntries) this.trackerSegs.shift();
+
+        this._dirty = true;
     }
 
-    onPipelineStats(obj) {
-        // Record speaker identification events from the pipeline
-        const streamSec = (obj.pcm_samples || 0) / 16000;
-        if (streamSec <= 0) return;
-
-        // Update speaker names from speaker_lists
-        if (obj.speaker_lists) {
-            for (const group of obj.speaker_lists) {
-                for (const spk of group.speakers) {
-                    if (spk.name) this.speakerNames[spk.id] = spk.name;
-                }
-            }
-        }
-
-        // Only record WL-ECAPA events (the active system)
-        if (obj.wlecapa_active && obj.wlecapa_id >= 0) {
-            const last = this.spkEvents.length > 0 ? this.spkEvents[this.spkEvents.length - 1] : null;
-            // Deduplicate: skip if same speaker and very close in time
-            if (!last || last.spkId !== obj.wlecapa_id || streamSec - last.time > 0.3) {
-                this.spkEvents.push({
-                    time: streamSec,
-                    spkId: obj.wlecapa_id,
-                    spkName: obj.wlecapa_name || '',
-                    sim: obj.wlecapa_sim || 0,
-                    isEarly: obj.wlecapa_is_early || false,
-                });
-                if (this.spkEvents.length > 2000) this.spkEvents.shift();
-            }
-        }
-
-        // Also record tracker events
-        if (obj.tracker_check_active && obj.tracker_spk_id >= 0) {
-            const last = this.spkEvents.length > 0 ? this.spkEvents[this.spkEvents.length - 1] : null;
-            if (!last || last.trkId !== obj.tracker_spk_id || streamSec - last.time > 0.3) {
-                // Store tracker separately by tagging
-                // (We'll draw these in a different sub-lane)
-            }
-        }
-    }
-
-    // --- Rendering ---
+    // ─── Rendering ───
 
     _scheduleRender() {
-        this._raf = requestAnimationFrame(() => {
-            this._render();
+        requestAnimationFrame(() => {
+            if (this._dirty) this._render();
             this._scheduleRender();
         });
     }
 
     _render() {
-        const c = this.ctx;
-        const W = this.canvas.width / (window.devicePixelRatio || 1);
-        const H = this.canvas.height / (window.devicePixelRatio || 1);
-        if (W <= 0 || H <= 0) return;
+        this._dirty = false;
+        const dpr = window.devicePixelRatio || 1;
+        const containerW = this.scrollEl.clientWidth;
+        if (containerW <= 0) return;
 
-        const span = this.viewEnd - this.viewStart;
-        this.pixelsPerSec = W / span;
+        const W = containerW;                // logical width
+        const usableW = W - LABEL_W;         // width for time data
+        const secsPerRow = usableW / this.pxPerSec;
+
+        // Determine total time span
+        let maxT = this._lastStreamSec;
+        if (this.asrSegments.length) maxT = Math.max(maxT, this.asrSegments[this.asrSegments.length - 1].end);
+        if (this._vadSpeech) maxT = Math.max(maxT, this._lastStreamSec);
+        if (maxT <= 0) maxT = 1;
+
+        const numRows = Math.max(1, Math.ceil(maxT / secsPerRow));
+        const H = numRows * ROW_H;
+
+        // Resize canvas
+        this.canvas.width  = W * dpr;
+        this.canvas.height = H * dpr;
+        this.canvas.style.width  = W + 'px';
+        this.canvas.style.height = H + 'px';
+        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        const c = this.ctx;
+
+        // Store layout info for hover
+        this._layoutW = W;
+        this._secsPerRow = secsPerRow;
+        this._numRows = numRows;
 
         // Clear
         c.fillStyle = '#0d1117';
         c.fillRect(0, 0, W, H);
 
-        // Layout: 3 rows
-        const timeH = 18;        // time axis
-        const asrY = timeH;
-        const asrH = 40;         // ASR transcript lane
-        const spkY = asrY + asrH + 2;
-        const spkH = 30;         // Speaker identification lane
-        const trkY = spkY + spkH + 2;
-        const trkH = H - trkY;   // Tracker lane
+        // Draw each row
+        for (let r = 0; r < numRows; r++) {
+            const rowY  = r * ROW_H;
+            const tStart = r * secsPerRow;
+            const tEnd   = tStart + secsPerRow;
 
-        // Draw time axis
-        this._drawTimeAxis(c, W, timeH, span);
-
-        // Lane backgrounds
-        c.fillStyle = '#161b22';
-        c.fillRect(0, asrY, W, asrH);
-        c.fillRect(0, spkY, W, spkH);
-        c.fillRect(0, trkY, W, trkH);
-
-        // Lane labels
-        c.fillStyle = '#8b949e';
-        c.font = '10px monospace';
-        c.textBaseline = 'middle';
-        c.fillText('ASR', 2, asrY + asrH / 2);
-        c.fillText('SPK', 2, spkY + spkH / 2);
-        c.fillText('TRK', 2, trkY + trkH / 2);
-
-        const labelW = 28;  // offset for lane labels
-
-        // Draw ASR segments
-        for (const seg of this.asrSegments) {
-            if (seg.end < this.viewStart || seg.start > this.viewEnd) continue;
-            const x0 = Math.max(labelW, (seg.start - this.viewStart) * this.pixelsPerSec);
-            const x1 = Math.min(W, (seg.end - this.viewStart) * this.pixelsPerSec);
-            if (x1 - x0 < 1) continue;
-
-            // Color by SAAS speaker
-            const color = seg.spkId >= 0 ? SPEAKER_COLORS[seg.spkId % SPEAKER_COLORS.length] : UNKNOWN_COLOR;
-            c.fillStyle = color;
-            c.globalAlpha = 0.7;
-            c.fillRect(x0, asrY + 2, x1 - x0, asrH - 4);
-            c.globalAlpha = 1.0;
-
-            // Source indicator stripe at bottom of block
-            const srcColor = SOURCE_COLORS[seg.spkSrc] || '#555';
-            c.fillStyle = srcColor;
-            c.fillRect(x0, asrY + asrH - 6, x1 - x0, 4);
-
-            // Text label if wide enough
-            if (x1 - x0 > 40) {
-                c.fillStyle = '#fff';
-                c.font = '10px sans-serif';
-                c.textBaseline = 'middle';
-                const label = seg.spkName || (seg.spkId >= 0 ? `S${seg.spkId}` : '?');
-                c.save();
-                c.beginPath();
-                c.rect(x0 + 2, asrY, x1 - x0 - 4, asrH);
-                c.clip();
-                c.fillText(label, x0 + 3, asrY + 12);
-                // Truncated transcript text
-                if (x1 - x0 > 80) {
-                    c.font = '9px sans-serif';
-                    c.fillStyle = 'rgba(255,255,255,0.7)';
-                    const maxChars = Math.floor((x1 - x0 - 6) / 5.5);
-                    const txt = seg.text.length > maxChars ? seg.text.slice(0, maxChars) + '…' : seg.text;
-                    c.fillText(txt, x0 + 3, asrY + 26);
-                }
-                c.restore();
-            }
+            this._drawRow(c, W, rowY, tStart, tEnd, secsPerRow);
         }
 
-        // Draw speaker detection events as colored spans
-        // Group consecutive same-speaker events into blocks
-        this._drawSpkLane(c, labelW, W, spkY, spkH, false);
-        this._drawSpkLane(c, labelW, W, trkY, trkH, true);
+        // Info
+        this.infoEl.textContent = `${this.asrSegments.length} seg | ${this.pxPerSec.toFixed(0)} px/s | ${maxT.toFixed(0)}s`;
 
-        // Update range display
-        this.rangeEl.textContent = `${this.viewStart.toFixed(0)} – ${this.viewEnd.toFixed(0)} s`;
+        // Auto-scroll to bottom
+        if (this.autoScroll) {
+            this.scrollEl.scrollTop = this.scrollEl.scrollHeight;
+        }
     }
 
-    _drawTimeAxis(c, W, H, span) {
-        c.fillStyle = '#161b22';
-        c.fillRect(0, 0, W, H);
+    _drawRow(c, W, y, tStart, tEnd, secsPerRow) {
+        const usableW = W - LABEL_W;
+        const x0 = LABEL_W;
 
-        // Determine tick interval based on visible span
-        let tickInterval;
-        if (span <= 30) tickInterval = 1;
-        else if (span <= 60) tickInterval = 5;
-        else if (span <= 300) tickInterval = 10;
-        else if (span <= 600) tickInterval = 30;
-        else tickInterval = 60;
+        // Helper: time → x coordinate within this row
+        const tx = (t) => x0 + ((t - tStart) / secsPerRow) * usableW;
+        const tw = (dur) => (dur / secsPerRow) * usableW;
 
-        const firstTick = Math.ceil(this.viewStart / tickInterval) * tickInterval;
+        // ── Time axis ──
+        const tyTop = y;
+        c.fillStyle = '#111518';
+        c.fillRect(0, tyTop, W, LH.time);
+
+        // Tick marks
+        let tickInt = 1;
+        if (secsPerRow > 120) tickInt = 10;
+        else if (secsPerRow > 60) tickInt = 5;
+        else if (secsPerRow > 20) tickInt = 2;
+
+        const firstTick = Math.ceil(tStart / tickInt) * tickInt;
         c.strokeStyle = '#30363d';
         c.fillStyle = '#8b949e';
         c.font = '9px monospace';
         c.textBaseline = 'bottom';
         c.lineWidth = 1;
-
-        for (let t = firstTick; t <= this.viewEnd; t += tickInterval) {
-            const x = (t - this.viewStart) * this.pixelsPerSec;
-            // Tick line
+        for (let t = firstTick; t <= tEnd; t += tickInt) {
+            const px = tx(t);
             c.beginPath();
-            c.moveTo(x, H - 4);
-            c.lineTo(x, H);
+            c.moveTo(px, tyTop + LH.time - 3);
+            c.lineTo(px, tyTop + LH.time);
             c.stroke();
-            // Label
             const min = Math.floor(t / 60);
             const sec = Math.floor(t % 60);
             const label = min > 0 ? `${min}:${sec.toString().padStart(2, '0')}` : `${sec}s`;
-            c.fillText(label, x + 2, H - 1);
+            c.fillText(label, px + 1, tyTop + LH.time - 1);
         }
-    }
 
-    _drawSpkLane(c, labelW, W, y, h, isTracker) {
-        // For the SPK lane: use ASR segments to draw speaker identity blocks
-        // For the TRK lane: use tracker_id from ASR segments
-        for (const seg of this.asrSegments) {
-            if (seg.end < this.viewStart || seg.start > this.viewEnd) continue;
-            const x0 = Math.max(labelW, (seg.start - this.viewStart) * this.pixelsPerSec);
-            const x1 = Math.min(W, (seg.end - this.viewStart) * this.pixelsPerSec);
-            if (x1 - x0 < 1) continue;
+        // ── Lane backgrounds + labels ──
+        const lanes = [
+            { name: 'VAD', y: tyTop + LH.time,                       h: LH.vad },
+            { name: 'ASR', y: tyTop + LH.time + LH.vad,              h: LH.asr },
+            { name: 'SPK', y: tyTop + LH.time + LH.vad + LH.asr,    h: LH.saas },
+            { name: 'TRK', y: tyTop + LH.time + LH.vad + LH.asr + LH.saas, h: LH.tracker },
+        ];
+        for (const lane of lanes) {
+            c.fillStyle = '#161b22';
+            c.fillRect(x0, lane.y, usableW, lane.h);
+            c.fillStyle = '#484f58';
+            c.font = '8px monospace';
+            c.textBaseline = 'middle';
+            c.fillText(lane.name, 2, lane.y + lane.h / 2);
+        }
 
-            const id = isTracker ? seg.trkId : seg.spkId;
-            const name = isTracker
-                ? (seg.trkName || (id >= 0 ? `T${id}` : '?'))
-                : (seg.spkName || (id >= 0 ? `S${id}` : '?'));
-            const palette = isTracker ? TRACKER_COLORS : SPEAKER_COLORS;
-            const color = id >= 0 ? palette[id % palette.length] : UNKNOWN_COLOR;
+        // ── Row border ──
+        c.strokeStyle = '#21262d';
+        c.beginPath();
+        c.moveTo(0, y + ROW_H - 1);
+        c.lineTo(W, y + ROW_H - 1);
+        c.stroke();
 
-            c.fillStyle = color;
-            c.globalAlpha = isTracker ? 0.5 : 0.65;
-            c.fillRect(x0, y + 2, x1 - x0, h - 4);
-            c.globalAlpha = 1.0;
-
-            if (!isTracker) {
-                // Source color stripe at top
-                const srcColor = SOURCE_COLORS[seg.spkSrc] || '#555';
-                c.fillStyle = srcColor;
-                c.fillRect(x0, y + 2, x1 - x0, 3);
+        // ── VAD lane ──
+        const vadY = lanes[0].y;
+        const vadH = lanes[0].h;
+        // Completed intervals
+        for (const iv of this.vadIntervals) {
+            if (iv.end < tStart || iv.start > tEnd) continue;
+            const px1 = Math.max(x0, tx(Math.max(iv.start, tStart)));
+            const px2 = Math.min(W, tx(Math.min(iv.end, tEnd)));
+            if (px2 - px1 < 0.5) continue;
+            c.fillStyle = '#e5534b';
+            c.globalAlpha = 0.65;
+            c.fillRect(px1, vadY + 1, px2 - px1, vadH - 2);
+            c.globalAlpha = 1;
+        }
+        // In-progress speech
+        if (this._vadSpeech && this._lastStreamSec > tStart && this._vadStart < tEnd) {
+            const px1 = Math.max(x0, tx(Math.max(this._vadStart, tStart)));
+            const px2 = Math.min(W, tx(Math.min(this._lastStreamSec, tEnd)));
+            if (px2 - px1 >= 0.5) {
+                c.fillStyle = '#e5534b';
+                c.globalAlpha = 0.45;
+                c.fillRect(px1, vadY + 1, px2 - px1, vadH - 2);
+                c.globalAlpha = 1;
             }
+        }
 
-            // Label
-            if (x1 - x0 > 30) {
+        // ── ASR lane ──
+        const asrY = lanes[1].y;
+        const asrH = lanes[1].h;
+        for (const seg of this.asrSegments) {
+            if (seg.end < tStart || seg.start > tEnd) continue;
+            const px1 = Math.max(x0, tx(Math.max(seg.start, tStart)));
+            const px2 = Math.min(W, tx(Math.min(seg.end, tEnd)));
+            if (px2 - px1 < 1) continue;
+            c.fillStyle = '#3a7dd8';
+            c.globalAlpha = 0.6;
+            c.fillRect(px1, asrY + 1, px2 - px1, asrH - 2);
+            c.globalAlpha = 1;
+
+            // Trigger indicator — thin colored line at bottom
+            const trigColor = seg.trigger === 'silence' ? '#3fb950'
+                            : seg.trigger === 'spk_change' ? '#d29922'
+                            : seg.trigger === 'buffer_full' ? '#e5534b' : '#484f58';
+            c.fillStyle = trigColor;
+            c.fillRect(px1, asrY + asrH - 3, px2 - px1, 2);
+
+            // Text
+            if (px2 - px1 > 20) {
+                c.save();
+                c.beginPath();
+                c.rect(px1 + 1, asrY, px2 - px1 - 2, asrH);
+                c.clip();
+                c.fillStyle = '#fff';
+                c.font = '10px sans-serif';
+                c.textBaseline = 'middle';
+                const maxChars = Math.floor((px2 - px1 - 4) / 5.5);
+                const txt = seg.text.length > maxChars ? seg.text.slice(0, maxChars) + '…' : seg.text;
+                c.fillText(txt, px1 + 2, asrY + asrH / 2);
+                c.restore();
+            }
+        }
+
+        // ── SAAS lane ──
+        const spkY = lanes[2].y;
+        const spkH = lanes[2].h;
+        for (const seg of this.saasSegments) {
+            if (seg.end < tStart || seg.start > tEnd) continue;
+            const px1 = Math.max(x0, tx(Math.max(seg.start, tStart)));
+            const px2 = Math.min(W, tx(Math.min(seg.end, tEnd)));
+            if (px2 - px1 < 1) continue;
+
+            const color = seg.spkId >= 0 ? SPEAKER_COLORS[seg.spkId % SPEAKER_COLORS.length] : UNKNOWN_COLOR;
+            c.fillStyle = color;
+            c.globalAlpha = 0.7;
+            c.fillRect(px1, spkY + 1, px2 - px1, spkH - 2);
+            c.globalAlpha = 1;
+
+            // Source stripe at top
+            const srcColor = SOURCE_COLORS[seg.spkSrc] || '#555';
+            c.fillStyle = srcColor;
+            c.fillRect(px1, spkY + 1, px2 - px1, 2);
+
+            // Name
+            if (px2 - px1 > 24) {
+                c.save();
+                c.beginPath();
+                c.rect(px1, spkY, px2 - px1, spkH);
+                c.clip();
                 c.fillStyle = '#fff';
                 c.font = '9px monospace';
                 c.textBaseline = 'middle';
+                const label = seg.spkName || (seg.spkId >= 0 ? `S${seg.spkId}` : '?');
+                c.fillText(label, px1 + 2, spkY + spkH / 2 + 1);
+                c.restore();
+            }
+        }
+
+        // ── Tracker lane ──
+        const trkY = lanes[3].y;
+        const trkH = lanes[3].h;
+        for (const seg of this.trackerSegs) {
+            if (seg.end < tStart || seg.start > tEnd) continue;
+            const px1 = Math.max(x0, tx(Math.max(seg.start, tStart)));
+            const px2 = Math.min(W, tx(Math.min(seg.end, tEnd)));
+            if (px2 - px1 < 1) continue;
+
+            const color = seg.trkId >= 0 ? TRACKER_COLORS[seg.trkId % TRACKER_COLORS.length] : UNKNOWN_COLOR;
+            c.fillStyle = color;
+            c.globalAlpha = 0.55;
+            c.fillRect(px1, trkY + 1, px2 - px1, trkH - 2);
+            c.globalAlpha = 1;
+
+            if (px2 - px1 > 24) {
                 c.save();
                 c.beginPath();
-                c.rect(x0 + 1, y, x1 - x0 - 2, h);
+                c.rect(px1, trkY, px2 - px1, trkH);
                 c.clip();
-                c.fillText(name, x0 + 3, y + h / 2);
+                c.fillStyle = '#fff';
+                c.font = '9px monospace';
+                c.textBaseline = 'middle';
+                const label = seg.trkName || (seg.trkId >= 0 ? `T${seg.trkId}` : '?');
+                c.fillText(label, px1 + 2, trkY + trkH / 2);
                 c.restore();
             }
         }
     }
 
-    _updateHover(mx, my) {
-        const W = this.canvas.width / (window.devicePixelRatio || 1);
-        const timeH = 18;
-        const asrY = timeH;
-        const asrH = 40;
+    // ─── Hover tooltip ───
 
-        // Only check ASR lane hover
-        if (my < asrY || my > asrY + asrH) {
-            this.tooltipEl.hidden = true;
-            return;
-        }
-
-        const timeSec = this.viewStart + mx / this.pixelsPerSec;
-        const seg = this.asrSegments.find(s => s.start <= timeSec && s.end >= timeSec);
-        if (!seg) {
-            this.tooltipEl.hidden = true;
-            return;
-        }
-
-        const spkLabel = seg.spkId >= 0 ? `${seg.spkName || 'S' + seg.spkId} (sim=${seg.spkSim.toFixed(3)}, conf=${(seg.spkConf * 100).toFixed(0)}%, src=${seg.spkSrc})` : '?';
-        const trkLabel = seg.trkId >= 0 ? `${seg.trkName || 'T' + seg.trkId}` : '?';
-        this.tooltipEl.innerHTML =
-            `<strong>${seg.start.toFixed(1)}s – ${seg.end.toFixed(1)}s</strong> (${(seg.end - seg.start).toFixed(1)}s)<br>` +
-            `SPK: ${this._esc(spkLabel)} | TRK: ${this._esc(trkLabel)}<br>` +
-            `"${this._esc(seg.text.slice(0, 100))}"<br>` +
-            `Latency: ${seg.latency.toFixed(0)}ms | Trigger: ${seg.trigger}`;
-        this.tooltipEl.hidden = false;
-
-        // Position tooltip
+    _onHover(e) {
+        if (!this._secsPerRow || this._secsPerRow <= 0) return;
         const rect = this.canvas.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        const mx = (e.clientX - rect.left);
+        const my = (e.clientY - rect.top);
+
+        // Which row?
+        const row = Math.floor(my / ROW_H);
+        if (row < 0 || row >= this._numRows) { this.tooltipEl.hidden = true; return; }
+
+        const rowY = row * ROW_H;
+        const localY = my - rowY;
+        const tStart = row * this._secsPerRow;
+
+        // Which lane?
+        let lane = '';
+        const vadTop  = LH.time;
+        const asrTop  = vadTop + LH.vad;
+        const spkTop  = asrTop + LH.asr;
+        const trkTop  = spkTop + LH.saas;
+        const trkEnd  = trkTop + LH.tracker;
+        if (localY >= vadTop && localY < asrTop) lane = 'vad';
+        else if (localY >= asrTop && localY < spkTop) lane = 'asr';
+        else if (localY >= spkTop && localY < trkTop) lane = 'saas';
+        else if (localY >= trkTop && localY < trkEnd) lane = 'tracker';
+        else { this.tooltipEl.hidden = true; return; }
+
+        // Time at mouse
+        if (mx < LABEL_W) { this.tooltipEl.hidden = true; return; }
+        const usableW = this._layoutW - LABEL_W;
+        const timeSec = tStart + ((mx - LABEL_W) / usableW) * this._secsPerRow;
+
+        let html = '';
+        if (lane === 'vad') {
+            // Check VAD intervals
+            let found = this.vadIntervals.find(iv => iv.start <= timeSec && iv.end >= timeSec);
+            if (!found && this._vadSpeech && timeSec >= this._vadStart && timeSec <= this._lastStreamSec) {
+                found = { start: this._vadStart, end: this._lastStreamSec };
+            }
+            if (found) {
+                html = `<strong>VAD Speech</strong><br>${found.start.toFixed(1)}s – ${found.end.toFixed(1)}s (${(found.end - found.start).toFixed(1)}s)`;
+            }
+        } else if (lane === 'asr') {
+            const seg = this.asrSegments.find(s => s.start <= timeSec && s.end >= timeSec);
+            if (seg) {
+                html = `<strong>ASR</strong> ${seg.start.toFixed(1)}s – ${seg.end.toFixed(1)}s (${(seg.end - seg.start).toFixed(1)}s)<br>`
+                     + `"${this._esc(seg.text.slice(0, 120))}"<br>`
+                     + `Trigger: ${seg.trigger} | Latency: ${seg.latency.toFixed(0)}ms`;
+            }
+        } else if (lane === 'saas') {
+            const seg = this.saasSegments.find(s => s.start <= timeSec && s.end >= timeSec);
+            if (seg) {
+                const name = seg.spkName || (seg.spkId >= 0 ? `S${seg.spkId}` : '?');
+                html = `<strong>SAAS</strong> ${seg.start.toFixed(1)}s – ${seg.end.toFixed(1)}s<br>`
+                     + `${this._esc(name)} (sim=${seg.spkSim.toFixed(3)}, conf=${(seg.spkConf * 100).toFixed(0)}%)<br>`
+                     + `Source: ${seg.spkSrc}`;
+            }
+        } else if (lane === 'tracker') {
+            const seg = this.trackerSegs.find(s => s.start <= timeSec && s.end >= timeSec);
+            if (seg) {
+                const name = seg.trkName || (seg.trkId >= 0 ? `T${seg.trkId}` : '?');
+                html = `<strong>Tracker</strong> ${seg.start.toFixed(1)}s – ${seg.end.toFixed(1)}s<br>`
+                     + `${this._esc(name)} (sim=${seg.trkSim.toFixed(3)})`;
+            }
+        }
+
+        if (!html) { this.tooltipEl.hidden = true; return; }
+
+        this.tooltipEl.innerHTML = html;
+        this.tooltipEl.hidden = false;
         const parentRect = this.el.getBoundingClientRect();
-        this.tooltipEl.style.left = (mx + rect.left - parentRect.left + 10) + 'px';
-        this.tooltipEl.style.top = (my + rect.top - parentRect.top + 10) + 'px';
+        this.tooltipEl.style.left = (e.clientX - parentRect.left + 12) + 'px';
+        this.tooltipEl.style.top  = (e.clientY - parentRect.top + 12) + 'px';
     }
 
     _esc(s) {
