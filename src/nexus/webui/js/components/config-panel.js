@@ -23,12 +23,12 @@ export class ConfigPanel {
 
     _render() {
         const pipelineHTML = PIPELINES.map(p => `
-            <details class="cfg-pipeline" id="cfg-pipe-${p.id}">
-                <summary class="cfg-pipe-title">${p.label}
-                    <button class="btn btn--vad cfg-enable-toggle${p.defaultOn ? ' btn--active' : ''}"
-                            id="cfg-enable-${p.id}" data-pipeline="${p.id}"
-                            aria-pressed="${p.defaultOn}">${p.defaultOn ? 'ON' : 'OFF'}</button>
-                </summary>
+            <div class="cfg-pipeline" id="cfg-pipe-${p.id}">
+              <button class="btn btn--vad cfg-enable-toggle${p.defaultOn ? ' btn--active' : ''}"
+                      id="cfg-enable-${p.id}" data-pipeline="${p.id}"
+                      aria-pressed="${p.defaultOn}">${p.defaultOn ? 'ON' : 'OFF'}</button>
+              <details>
+                <summary class="cfg-pipe-title">${p.label}</summary>
                 <div class="cfg-pipe-body">
                     <label class="cfg-label" for="cfg-prompt-${p.id}">Prompt</label>
                     <textarea id="cfg-prompt-${p.id}" class="cfg-textarea" rows="2"
@@ -65,6 +65,7 @@ export class ConfigPanel {
                     </div>
                 </div>
             </details>
+            </div>
         `).join('');
 
         this.el.innerHTML = `
@@ -103,8 +104,7 @@ export class ConfigPanel {
     _bindEvents() {
         // Enable toggle buttons
         for (const [pipeId, btn] of Object.entries(this.toggles)) {
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation(); // prevent <details> toggle
+            btn.addEventListener('click', () => {
                 const on = btn.getAttribute('aria-pressed') === 'true';
                 const next = !on;
                 btn.classList.toggle('btn--active', next);

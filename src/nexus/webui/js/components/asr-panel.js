@@ -107,11 +107,11 @@ export class AsrPanel {
                     </label>
                 </div>
             </details>
-            <details class="asr-section">
-                <summary class="asr-section__title">Adaptive Silence (SAAS)
-                    <button class="btn btn--vad btn--active" id="asr-adaptive-toggle"
-                            aria-pressed="true">ON</button>
-                </summary>
+            <div class="asr-section">
+              <button class="btn btn--vad btn--active asr-section__action" id="asr-adaptive-toggle"
+                      aria-pressed="true">ON</button>
+              <details>
+                <summary class="asr-section__title">Adaptive Silence (SAAS)</summary>
                 <div class="asr-params" id="asr-adaptive-params">
                     <div class="asr-adaptive-status" id="asr-adaptive-status">
                         <span class="stat">Effective: <strong id="asr-effective-silence">300</strong> ms</span>
@@ -134,6 +134,7 @@ export class AsrPanel {
                     </label>
                 </div>
             </details>
+            </div>
             <canvas id="asr-latency-chart" class="asr-latency-chart" width="400" height="80"
                     aria-label="ASR latency history"></canvas>
             <div class="asr-partial" id="asr-partial" aria-live="polite">
