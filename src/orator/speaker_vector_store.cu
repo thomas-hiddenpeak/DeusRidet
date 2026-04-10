@@ -223,7 +223,9 @@ SpeakerVectorStore::SpeakerVectorStore(const std::string& label, int dim,
     cudaMalloc(&d_sims_,     capacity_ * sizeof(float));
     cudaMalloc(&d_spk_sims_, spk_alloc_ * sizeof(float));
     cudaMalloc(&d_spk_ex_,   spk_alloc_ * sizeof(int));
-    cudaMalloc(&d_pending_,  dim_ * sizeof(float));
+    cudaMalloc(&d_pending_pool_, (size_t)kMaxPending * dim_ * sizeof(float));
+    cudaMemsetAsync(d_pending_pool_, 0, (size_t)kMaxPending * dim_ * sizeof(float), stream_);
+    d_pending_ = d_pending_pool_;  // legacy alias → slot 0
     cudaMalloc(&d_result_,   sizeof(GpuSearchResult));
 
     cudaMallocHost(&h_result_, sizeof(GpuSearchResult));
@@ -243,7 +245,8 @@ SpeakerVectorStore::~SpeakerVectorStore() {
     cudaFree(d_sims_);
     cudaFree(d_spk_sims_);
     cudaFree(d_spk_ex_);
-    cudaFree(d_pending_);
+    cudaFree(d_pending_pool_);
+    d_pending_ = nullptr;  // was alias into pool
     cudaFree(d_result_);
 
     if (h_result_) cudaFreeHost(h_result_);
@@ -368,9 +371,14 @@ void SpeakerVectorStore::gpu_add_exemplar(int spk_idx) {
 }
 
 float SpeakerVectorStore::gpu_pending_dot() {
+    return gpu_pending_dot(0);
+}
+
+float SpeakerVectorStore::gpu_pending_dot(int slot) {
     int d_f4 = dim_ / 4;
+    float* slot_ptr = d_pending_pool_ + slot * dim_;
     single_dot_kernel<<<1, 32, 0, stream_>>>(
-        reinterpret_cast<const float4*>(d_pending_),
+        reinterpret_cast<const float4*>(slot_ptr),
         reinterpret_cast<const float4*>(d_query_),
         d_sims_,  // reuse first slot as scratch
         d_f4);
@@ -536,7 +544,15 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
         }
 
         if (best.similarity >= threshold && sr.spk_idx >= 0) {
-            // Matched — clear pending.
+            // === MATCHED ===
+            // Margin guard is NOT applied here — if best exceeds threshold,
+            // it's the best match regardless of how close second-best is.
+            // Margin is only used during registration (below) to prevent
+            // creating a new speaker that's too close to an existing one.
+
+            // Clear any pending slots (a match resets registration attempts).
+            for (int s = 0; s < kMaxPending; s++)
+                pending_slots_[s].active = false;
             has_pending_ = false;
 
             // Count how many exemplars exceeded threshold for this speaker.
@@ -545,10 +561,13 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
 
             // Frozen anchor strategy: never EMA-update existing exemplars.
             // Instead, consider adding a new exemplar if it brings diversity.
+            // Gate: only admit exemplars from high-confidence matches to prevent
+            // borderline matches from contaminating the speaker profile.
             auto& spk = speakers_[sr.spk_idx];
             float div = min_diversity(sr.spk_idx);
+            float admit_thresh = threshold + kExemplarAdmitMargin;
 
-            if (div >= kDiversityThresh) {
+            if (best.similarity >= admit_thresh && div >= kDiversityThresh) {
                 // This embedding is sufficiently different from all existing exemplars.
                 if (spk.exemplar_count < max_exemplars_) {
                     // Room available — add directly.
@@ -574,78 +593,141 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
         }
     }
 
-    // No match.
+    // === NO MATCH ===
     if (!auto_register) {
         best.speaker_id = -1;
         return best;
     }
 
-    if (!has_pending_) {
-        // First miss: store query as pending on GPU.
-        cudaMemcpyAsync(d_pending_, d_query_, dim_ * sizeof(float),
-                        cudaMemcpyDeviceToDevice, stream_);
-        has_pending_ = true;
-        LOG_INFO(label_.c_str(), "Pending new speaker (waiting for confirmation)");
-        best.speaker_id = -1;
-        best.similarity = 0.0f;
-        best.is_new = false;
-        return best;
-    }
-
-    // Second consecutive miss: check pending vs current on GPU.
-    float pending_sim = gpu_pending_dot();
-    if (pending_sim < threshold) {
-        // Different speakers. Replace pending with current.
-        cudaMemcpyAsync(d_pending_, d_query_, dim_ * sizeof(float),
-                        cudaMemcpyDeviceToDevice, stream_);
+    // Multi-pending pool: find if current query matches any existing pending slot.
+    int matched_slot = -1;
+    float best_pending_sim = -1.0f;
+    for (int s = 0; s < kMaxPending; s++) {
+        if (!pending_slots_[s].active) continue;
+        float sim = gpu_pending_dot(s);
         LOG_INFO(label_.c_str(),
-                 "Pending replaced (prev vs cur sim=%.3f < %.2f)",
-                 pending_sim, threshold);
-        best.speaker_id = -1;
-        best.similarity = 0.0f;
-        best.is_new = false;
+                 "Pending[%d] vs query: sim=%.3f (thresh=%.2f, age=%d)",
+                 s, sim, threshold, pending_miss_seq_ - pending_slots_[s].miss_seq);
+        if (sim >= threshold && sim > best_pending_sim) {
+            best_pending_sim = sim;
+            matched_slot = s;
+        }
+    }
+
+    if (matched_slot >= 0) {
+        // Confirmed: pending slot matches current query — same unknown speaker twice.
+        float pending_sim = best_pending_sim;
+
+        // Margin guard at REGISTRATION time: check if this pending embedding is
+        // too close to two existing speakers (would create a confusing duplicate).
+        if (!speakers_.empty() && second_best_id >= 0) {
+            float margin = best.similarity - second_best_sim;
+            if (margin >= 0 && margin < min_margin_ && best.similarity > threshold * 0.8f) {
+                LOG_INFO(label_.c_str(),
+                         "Registration blocked by margin guard: "
+                         "best_db=#%d(%.3f) 2nd_db=#%d(%.3f) margin=%.3f < %.3f, pending_sim=%.3f slot=%d",
+                         best.speaker_id, best.similarity,
+                         second_best_id, second_best_sim,
+                         margin, min_margin_, pending_sim, matched_slot);
+                // Don't register, but keep the pending slot alive — the speaker
+                // might accumulate a better embedding next time.
+                best.speaker_id = -1;
+                best.similarity = 0.0f;
+                best.is_new = false;
+                return best;
+            }
+        }
+
+        // Average pending + current on GPU, then register.
+        float* slot_ptr = d_pending_pool_ + matched_slot * dim_;
+        {
+            int d_f4 = dim_ / 4;
+            float4* prow = reinterpret_cast<float4*>(slot_ptr);
+            const float4* q = reinterpret_cast<const float4*>(d_query_);
+            ema_normalize_kernel<<<1, 32, 0, stream_>>>(prow, q, d_f4, 0.5f);
+        }
+
+        // Register new speaker.
+        int new_idx = (int)speakers_.size();
+        SpeakerMeta meta;
+        meta.external_id    = next_id_++;
+        meta.exemplar_count = 1;
+        meta.match_count    = 2;
+        speakers_.push_back(std::move(meta));
+        id_to_idx_[speakers_.back().external_id] = new_idx;
+
+        ensure_capacity(n_total_ + 1);
+        cudaMemcpyAsync(d_embeddings_ + n_total_ * dim_,
+                        slot_ptr, dim_ * sizeof(float),
+                        cudaMemcpyDeviceToDevice, stream_);
+        n_total_++;
+
+        offsets_.push_back(n_total_);
+        upload_offsets();
+
+        // Clear confirmed slot.
+        pending_slots_[matched_slot].active = false;
+        // Update legacy flag.
+        has_pending_ = false;
+        for (int s = 0; s < kMaxPending; s++)
+            if (pending_slots_[s].active) { has_pending_ = true; break; }
+
+        LOG_INFO(label_.c_str(),
+                 "Confirmed new speaker id=%d (pending_sim=%.3f, slot=%d, pool=[%d,%d,%d])",
+                 speakers_.back().external_id, pending_sim, matched_slot,
+                 (int)pending_slots_[0].active,
+                 (int)pending_slots_[1].active,
+                 (int)pending_slots_[2].active);
+
+        best.speaker_id = speakers_.back().external_id;
+        best.similarity = 1.0f;
+        best.is_new     = true;
+        best.name.clear();
         return best;
     }
 
-    // Same speaker confirmed: average pending + current, register.
-    // Blend on GPU: d_pending_ = 0.5*d_pending_ + 0.5*d_query_, then normalize.
-    // Reuse ema_normalize_kernel with alpha=0.5 on d_pending_.
-    {
-        int d_f4 = dim_ / 4;
-        float4* prow = reinterpret_cast<float4*>(d_pending_);
-        const float4* q = reinterpret_cast<const float4*>(d_query_);
-        ema_normalize_kernel<<<1, 32, 0, stream_>>>(prow, q, d_f4, 0.5f);
+    // No pending slot matched — store current query in a free or LRU slot.
+    pending_miss_seq_++;
+    int target_slot = -1;
+
+    // Prefer an empty slot.
+    for (int s = 0; s < kMaxPending; s++) {
+        if (!pending_slots_[s].active) { target_slot = s; break; }
     }
 
-    // Register new speaker from d_pending_.
-    int new_idx = (int)speakers_.size();
-    SpeakerMeta meta;
-    meta.external_id    = next_id_++;
-    meta.exemplar_count = 1;
-    meta.match_count    = 2;
-    speakers_.push_back(std::move(meta));
-    id_to_idx_[speakers_.back().external_id] = new_idx;
+    // No empty slot — evict the oldest (lowest miss_seq).
+    if (target_slot < 0) {
+        int oldest_seq = INT_MAX;
+        for (int s = 0; s < kMaxPending; s++) {
+            if (pending_slots_[s].miss_seq < oldest_seq) {
+                oldest_seq = pending_slots_[s].miss_seq;
+                target_slot = s;
+            }
+        }
+        LOG_INFO(label_.c_str(),
+                 "Pending pool full — evicting slot %d (age=%d)",
+                 target_slot, pending_miss_seq_ - oldest_seq);
+    }
 
-    // Append exemplar at end of embedding matrix.
-    ensure_capacity(n_total_ + 1);
-    cudaMemcpyAsync(d_embeddings_ + n_total_ * dim_,
-                    d_pending_, dim_ * sizeof(float),
+    // Store query in target slot.
+    float* slot_ptr = d_pending_pool_ + target_slot * dim_;
+    cudaMemcpyAsync(slot_ptr, d_query_, dim_ * sizeof(float),
                     cudaMemcpyDeviceToDevice, stream_);
-    n_total_++;
+    pending_slots_[target_slot].active = true;
+    pending_slots_[target_slot].miss_seq = pending_miss_seq_;
+    has_pending_ = true;
 
-    // Update offsets.
-    offsets_.push_back(n_total_);  // new speaker's end = current total
-    upload_offsets();
+    LOG_INFO(label_.c_str(),
+             "Pending new speaker in slot %d (pool=[%d,%d,%d], miss_seq=%d)",
+             target_slot,
+             (int)pending_slots_[0].active,
+             (int)pending_slots_[1].active,
+             (int)pending_slots_[2].active,
+             pending_miss_seq_);
 
-    has_pending_ = false;
-
-    LOG_INFO(label_.c_str(), "Confirmed new speaker id=%d (pending_sim=%.3f)",
-             speakers_.back().external_id, pending_sim);
-
-    best.speaker_id = speakers_.back().external_id;
-    best.similarity = 1.0f;
-    best.is_new     = true;
-    best.name.clear();
+    best.speaker_id = -1;
+    best.similarity = 0.0f;
+    best.is_new = false;
     return best;
 }
 
@@ -721,6 +803,9 @@ void SpeakerVectorStore::clear() {
     n_total_ = 0;
     next_id_ = 0;
     has_pending_ = false;
+    for (int s = 0; s < kMaxPending; s++)
+        pending_slots_[s].active = false;
+    pending_miss_seq_ = 0;
     speakers_.clear();
     offsets_.clear();
     offsets_.push_back(0);
@@ -729,6 +814,7 @@ void SpeakerVectorStore::clear() {
     // Zero GPU buffers (not strictly required, but clean).
     cudaMemsetAsync(d_embeddings_, 0, (size_t)capacity_ * dim_ * sizeof(float), stream_);
     cudaMemsetAsync(d_offsets_, 0, sizeof(int), stream_);  // single zero sentinel
+    cudaMemsetAsync(d_pending_pool_, 0, (size_t)kMaxPending * dim_ * sizeof(float), stream_);
     LOG_INFO(label_.c_str(), "Cleared");
 }
 

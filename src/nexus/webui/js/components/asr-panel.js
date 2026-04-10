@@ -107,6 +107,33 @@ export class AsrPanel {
                     </label>
                 </div>
             </details>
+            <details class="asr-section">
+                <summary class="asr-section__title">Adaptive Silence (SAAS)
+                    <button class="btn btn--vad btn--active" id="asr-adaptive-toggle"
+                            aria-pressed="true">ON</button>
+                </summary>
+                <div class="asr-params" id="asr-adaptive-params">
+                    <div class="asr-adaptive-status" id="asr-adaptive-status">
+                        <span class="stat">Effective: <strong id="asr-effective-silence">300</strong> ms</span>
+                        <span class="stat">Current: <strong id="asr-current-silence">0</strong> ms</span>
+                    </div>
+                    <label class="asr-param">
+                        <span class="asr-param__label">Short seg (&lt;0.8s) ms</span>
+                        <input type="range" id="asr-p-adaptive-short" min="200" max="1500" step="50" value="700">
+                        <output id="asr-v-adaptive-short">700</output>
+                    </label>
+                    <label class="asr-param">
+                        <span class="asr-param__label">Long seg (5-15s) ms</span>
+                        <input type="range" id="asr-p-adaptive-long" min="50" max="500" step="10" value="200">
+                        <output id="asr-v-adaptive-long">200</output>
+                    </label>
+                    <label class="asr-param">
+                        <span class="asr-param__label">Very long (&gt;15s) ms</span>
+                        <input type="range" id="asr-p-adaptive-vlong" min="50" max="500" step="10" value="150">
+                        <output id="asr-v-adaptive-vlong">150</output>
+                    </label>
+                </div>
+            </details>
             <canvas id="asr-latency-chart" class="asr-latency-chart" width="400" height="80"
                     aria-label="ASR latency history"></canvas>
             <div class="asr-partial" id="asr-partial" aria-live="polite">
@@ -146,6 +173,20 @@ export class AsrPanel {
             this._sliders[def.key] = this.el.querySelector(`#asr-p-${def.id}`);
             this._outputs[def.key] = this.el.querySelector(`#asr-v-${def.id}`);
         }
+
+        // SAAS adaptive silence elements.
+        this._adaptiveToggle = this.el.querySelector('#asr-adaptive-toggle');
+        this._effectiveSilenceEl = this.el.querySelector('#asr-effective-silence');
+        this._currentSilenceEl = this.el.querySelector('#asr-current-silence');
+        this._adaptiveParamDefs = [
+            { id: 'adaptive-short', key: 'adaptive_short_ms', fmt: v => `${v}` },
+            { id: 'adaptive-long',  key: 'adaptive_long_ms',  fmt: v => `${v}` },
+            { id: 'adaptive-vlong', key: 'adaptive_vlong_ms', fmt: v => `${v}` },
+        ];
+        for (const def of this._adaptiveParamDefs) {
+            this._sliders[def.key] = this.el.querySelector(`#asr-p-${def.id}`);
+            this._outputs[def.key] = this.el.querySelector(`#asr-v-${def.id}`);
+        }
     }
 
     _bindControls() {
@@ -166,6 +207,33 @@ export class AsrPanel {
         for (const def of this._paramDefs) {
             const slider = this._sliders[def.key];
             const output = this._outputs[def.key];
+            slider.addEventListener('input', () => {
+                output.textContent = def.fmt(slider.value);
+            });
+            slider.addEventListener('change', () => {
+                output.textContent = def.fmt(slider.value);
+                this.ws.sendText(`asr_param:${def.key}:${slider.value}`);
+            });
+        }
+
+        // SAAS adaptive silence toggle.
+        if (this._adaptiveToggle) {
+            this._adaptiveToggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const on = this._adaptiveToggle.getAttribute('aria-pressed') === 'true';
+                const next = !on;
+                this._adaptiveToggle.classList.toggle('btn--active', next);
+                this._adaptiveToggle.setAttribute('aria-pressed', String(next));
+                this._adaptiveToggle.textContent = next ? 'ON' : 'OFF';
+                this.ws.sendText(`asr_param:adaptive_silence:${next ? 'true' : 'false'}`);
+            });
+        }
+
+        // SAAS adaptive sliders.
+        for (const def of this._adaptiveParamDefs) {
+            const slider = this._sliders[def.key];
+            const output = this._outputs[def.key];
+            if (!slider || !output) continue;
             slider.addEventListener('input', () => {
                 output.textContent = def.fmt(slider.value);
             });
@@ -248,6 +316,23 @@ export class AsrPanel {
         this._syncParam('partial_sec', obj.asr_partial_sec);
         this._syncParam('speech_ratio', obj.asr_min_speech_ratio);
 
+        // SAAS adaptive silence feedback.
+        if (obj.asr_effective_silence_ms !== undefined && this._effectiveSilenceEl) {
+            this._effectiveSilenceEl.textContent = obj.asr_effective_silence_ms;
+        }
+        if (obj.asr_current_silence_ms !== undefined && this._currentSilenceEl) {
+            this._currentSilenceEl.textContent = obj.asr_current_silence_ms;
+        }
+        if (obj.asr_adaptive_silence !== undefined && this._adaptiveToggle) {
+            const on = obj.asr_adaptive_silence;
+            this._adaptiveToggle.classList.toggle('btn--active', on);
+            this._adaptiveToggle.setAttribute('aria-pressed', String(on));
+            this._adaptiveToggle.textContent = on ? 'ON' : 'OFF';
+        }
+        this._syncParam('adaptive_short_ms', obj.asr_adaptive_short_ms);
+        this._syncParam('adaptive_long_ms', obj.asr_adaptive_long_ms);
+        this._syncParam('adaptive_vlong_ms', obj.asr_adaptive_vlong_ms);
+
         // Sync ASR VAD source selector.
         if (obj.asr_vad_source !== undefined && this.asrVadSelect &&
             document.activeElement !== this.asrVadSelect) {
@@ -280,7 +365,14 @@ export class AsrPanel {
     // Called when backend confirms asr_param set.
     onAsrParam(obj) {
         if (obj.key && obj.value !== undefined) {
-            this._syncParam(obj.key, obj.value);
+            if (obj.key === 'adaptive_silence' && this._adaptiveToggle) {
+                const on = obj.value === true || obj.value === 'true';
+                this._adaptiveToggle.classList.toggle('btn--active', on);
+                this._adaptiveToggle.setAttribute('aria-pressed', String(on));
+                this._adaptiveToggle.textContent = on ? 'ON' : 'OFF';
+            } else {
+                this._syncParam(obj.key, obj.value);
+            }
         }
     }
 

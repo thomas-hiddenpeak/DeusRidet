@@ -47,6 +47,9 @@ export class AsrTranscriptPanel {
             speaker_id: obj.speaker_id ?? -1,
             speaker_name: obj.speaker_name || '',
             speaker_sim: obj.speaker_sim || 0,
+            tracker_id: obj.tracker_id ?? -1,
+            tracker_name: obj.tracker_name || '',
+            tracker_sim: obj.tracker_sim || 0,
             trigger: obj.trigger || '',
             ts
         };
@@ -89,12 +92,15 @@ export class AsrTranscriptPanel {
         return next.slice(overlapLen);
     }
 
-    _getSpeakerColor(id) {
+    _getSpeakerColor(id, isTracker = false) {
         if (id < 0) return '#888';
-        if (!(id in this._speakerColors)) {
-            this._speakerColors[id] = SPEAKER_COLORS[id % SPEAKER_COLORS.length];
+        // Use separate namespaces so tracker id=0 and SAAS id=0 get different colors.
+        const key = isTracker ? `t${id}` : `s${id}`;
+        if (!(key in this._speakerColors)) {
+            const offset = isTracker ? 5 : 0;  // offset tracker palette to avoid overlap
+            this._speakerColors[key] = SPEAKER_COLORS[(id + offset) % SPEAKER_COLORS.length];
         }
-        return this._speakerColors[id];
+        return this._speakerColors[key];
     }
 
     _addRow(entry) {
@@ -120,18 +126,28 @@ export class AsrTranscriptPanel {
         const latClass = entry.latency_ms > 5000 ? 'asr-tx-val--danger' :
                          entry.latency_ms > 2000 ? 'asr-tx-val--warn' : '';
 
-        // Speaker badge
+        // SAAS speaker badge
         const spkColor = this._getSpeakerColor(entry.speaker_id);
         const spkLabel = entry.speaker_id >= 0
             ? (entry.speaker_name || `S${entry.speaker_id}`)
             : '?';
         const spkTitle = entry.speaker_id >= 0
-            ? `Speaker ${entry.speaker_id}: ${entry.speaker_name || '(unnamed)'} (sim=${entry.speaker_sim.toFixed(3)})`
-            : 'Unknown speaker';
+            ? `SAAS Speaker ${entry.speaker_id}: ${entry.speaker_name || '(unnamed)'} (sim=${entry.speaker_sim.toFixed(3)})`
+            : 'SAAS: Unknown speaker';
+
+        // Tracker speaker badge
+        const trkColor = this._getSpeakerColor(entry.tracker_id, true);
+        const trkLabel = entry.tracker_id >= 0
+            ? (entry.tracker_name || `T${entry.tracker_id}`)
+            : '?';
+        const trkTitle = entry.tracker_id >= 0
+            ? `Tracker Speaker ${entry.tracker_id}: ${entry.tracker_name || '(unnamed)'} (sim=${entry.tracker_sim.toFixed(3)})`
+            : 'Tracker: Unknown speaker';
 
         row.innerHTML = `
             <span class="asr-tx-ts">${entry.ts}</span>
             <span class="asr-tx-speaker" style="--spk-color:${spkColor}" title="${spkTitle}">${this._esc(spkLabel)}</span>
+            <span class="asr-tx-speaker asr-tx-speaker--trk" style="--spk-color:${trkColor}" title="${trkTitle}">${this._esc(trkLabel)}</span>
             <span class="asr-tx-text">${this._esc(entry.text)}</span>
             <span class="asr-tx-meta">
                 <span class="asr-tx-metric ${latClass}">${entry.latency_ms.toFixed(0)}ms</span>

@@ -101,6 +101,8 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
             LOG_WARN("AudioPipe", "WavLM-ECAPA native GPU init failed");
         } else {
             LOG_INFO("AudioPipe", "WavLM-ECAPA native GPU encoder ready (192-dim)");
+            // Initialize SpeakerTracker (shares encoder, independent DB).
+            tracker_.init(&wlecapa_enc_);
         }
     }
 
@@ -222,7 +224,9 @@ void AudioPipeline::asr_loop() {
                      result.mel_ms, result.encoder_ms, result.decode_ms, result.token_count);
             if (on_transcript_) on_transcript_(result, job.audio_duration_sec,
                                                  job.speaker_id, job.speaker_name,
-                                                 job.speaker_sim, job.trigger_reason);
+                                                 job.speaker_sim, job.trigger_reason,
+                                                 job.tracker_id, job.tracker_name,
+                                                 job.tracker_sim);
         } else {
             LOG_INFO("AudioPipe", "ASR: (empty) (%.1fms, %.2fs audio)",
                      result.total_ms, job.audio_duration_sec);
@@ -311,6 +315,7 @@ void AudioPipeline::process_loop() {
                                 chunk_bytes);
         int n_samples = got / sizeof(int16_t);
         stats_.pcm_samples_in += n_samples;
+        total_samples_in_ += n_samples;
 
         // Apply gain before processing.
         float g = gain_.load(std::memory_order_relaxed);
@@ -429,15 +434,48 @@ void AudioPipeline::process_loop() {
                 seg_has_ref_       = false;
                 seg_last_recheck_at_ = 0;
                 seg_ref_emb_.clear();
+                seg_ref_speaker_id_ = -1;
+                seg_ref_speaker_name_.clear();
+                seg_ref_speaker_sim_ = 0.0f;
                 speech_pcm_buf_.clear();
                 speaker_fbank_.reset();
-                // Reset speaker ID for new segment — prevents stale ID from
-                // previous speaker being captured by ASR trigger if this segment
-                // is too short for WL-ECAPA extraction (< 1.0s full, < 1.7s early).
-                stats_.wlecapa_id = -1;
-                stats_.wlecapa_sim = 0.0f;
-                stats_.wlecapa_new = false;
-                strncpy(stats_.wlecapa_name, "", sizeof(stats_.wlecapa_name));
+
+                // SAAS: short-segment speaker inheritance.
+                // If this new segment starts within a short gap of the previous one,
+                // pre-populate the speaker ID so that very short utterances (< 1.0s)
+                // that can't extract their own embedding get a reasonable speaker label.
+                int64_t gap_samples = total_samples_in_ - prev_seg_end_sample_;
+                float gap_sec = gap_samples / 16000.0f;
+                if (prev_seg_speaker_id_ >= 0 && gap_sec < 0.8f) {
+                    stats_.wlecapa_id = prev_seg_speaker_id_;
+                    stats_.wlecapa_sim = prev_seg_speaker_sim_;
+                    stats_.wlecapa_new = false;
+                    strncpy(stats_.wlecapa_name, prev_seg_speaker_name_.c_str(),
+                            sizeof(stats_.wlecapa_name) - 1);
+                    stats_.wlecapa_name[sizeof(stats_.wlecapa_name) - 1] = '\0';
+                    seg_ref_speaker_id_ = prev_seg_speaker_id_;
+                    seg_ref_speaker_name_ = prev_seg_speaker_name_;
+                    seg_ref_speaker_sim_ = prev_seg_speaker_sim_;
+                    LOG_INFO("AudioPipe", "SAAS: inherited spk=%d (%s) from prev segment (gap=%.3fs)",
+                             prev_seg_speaker_id_, prev_seg_speaker_name_.c_str(), gap_sec);
+                    // Timeline: SAAS inheritance event (covers ~2s from onset).
+                    {
+                        SpeakerEvent ev{};
+                        ev.audio_start = total_samples_in_;
+                        ev.audio_end   = total_samples_in_ + 32000;  // 2s look-ahead
+                        ev.source      = SpkEventSource::SAAS_INHERIT;
+                        ev.speaker_id  = prev_seg_speaker_id_;
+                        ev.similarity  = prev_seg_speaker_sim_;
+                        strncpy(ev.name, prev_seg_speaker_name_.c_str(), sizeof(ev.name) - 1);
+                        spk_timeline_.push(ev);
+                    }
+                } else {
+                    // Reset speaker ID for new segment.
+                    stats_.wlecapa_id = -1;
+                    stats_.wlecapa_sim = 0.0f;
+                    stats_.wlecapa_new = false;
+                    strncpy(stats_.wlecapa_name, "", sizeof(stats_.wlecapa_name));
+                }
             }
             if (in_speech_segment_) {
                 speech_pcm_buf_.insert(speech_pcm_buf_.end(),
@@ -493,6 +531,10 @@ void AudioPipeline::process_loop() {
                             stats_.wlecapa_count = wlecapa_db_.count();
                             stats_.wlecapa_exemplars = match.exemplar_count;
                             stats_.wlecapa_hits_above = match.hits_above;
+                            // SAAS: track speaker ref for ASR annotation and inheritance.
+                            seg_ref_speaker_id_ = match.speaker_id;
+                            seg_ref_speaker_name_ = match.name;
+                            seg_ref_speaker_sim_ = match.similarity;
                             strncpy(stats_.wlecapa_name, match.name.c_str(),
                                     sizeof(stats_.wlecapa_name) - 1);
                             stats_.wlecapa_name[sizeof(stats_.wlecapa_name) - 1] = '\0';
@@ -502,6 +544,17 @@ void AudioPipeline::process_loop() {
                                      early_samples / 16000.0f,
                                      wlecapa_enc_.last_lat_total_ms());
                             if (on_speaker_) on_speaker_(match);
+                            // Timeline: SAAS early extraction event.
+                            {
+                                SpeakerEvent ev{};
+                                ev.audio_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
+                                ev.audio_end   = total_samples_in_;
+                                ev.source      = SpkEventSource::SAAS_EARLY;
+                                ev.speaker_id  = match.speaker_id;
+                                ev.similarity  = match.similarity;
+                                strncpy(ev.name, match.name.c_str(), sizeof(ev.name) - 1);
+                                spk_timeline_.push(ev);
+                            }
                         } else {
                             // No match — signal "identifying" to UI.
                             stats_.wlecapa_id = -1;
@@ -551,31 +604,101 @@ void AudioPipeline::process_loop() {
                                 LOG_INFO("AudioPipe", "SPK-RECHECK: sim=%.3f (thresh=%.3f) at %.2fs in segment",
                                          sim, change_thresh, buf_sz / 16000.0f);
                                 if (sim < change_thresh) {
-                                    // Speaker changed mid-segment! Force segment end.
-                                    LOG_INFO("AudioPipe", "SPK-CHANGE detected (sim=%.3f < %.3f) — forcing segment split at %.2fs",
+                                    // Speaker changed mid-segment! Soft restart:
+                                    // 1. Run full WL-ECAPA on pre-change audio (auto_register=true)
+                                    // 2. Save speaker state for inheritance
+                                    // 3. Trigger ASR split
+                                    // 4. Keep in_speech_segment_=true, carry tail audio forward
+                                    LOG_INFO("AudioPipe", "SPK-CHANGE detected (sim=%.3f < %.3f) — soft restart at %.2fs",
                                              sim, change_thresh, buf_sz / 16000.0f);
-                                    // Truncate speech buffer to before the change window.
-                                    // Keep audio up to start of the re-check window as the
-                                    // "old speaker" segment; the window becomes the start of
-                                    // the "new speaker" segment.
+
+                                    // --- 1. Full WL-ECAPA on pre-change audio ---
+                                    int pre_samples = start;
+                                    int pre_min = min_speech_samples_.load(std::memory_order_relaxed);
+                                    if (pre_samples >= pre_min) {
+                                        std::vector<float> pre_f32(pre_samples);
+                                        for (int i = 0; i < pre_samples; i++)
+                                            pre_f32[i] = speech_pcm_buf_[i] / 32768.0f;
+                                        auto pre_emb = wlecapa_enc_.extract(pre_f32.data(), pre_samples);
+                                        if (!pre_emb.empty()) {
+                                            float wt = wlecapa_threshold_.load(std::memory_order_relaxed);
+                                            SpeakerMatch m = wlecapa_db_.identify(pre_emb, wt);
+                                            seg_ref_speaker_id_ = m.speaker_id;
+                                            seg_ref_speaker_name_ = m.name;
+                                            seg_ref_speaker_sim_ = m.similarity;
+                                            stats_.wlecapa_id = m.speaker_id;
+                                            stats_.wlecapa_sim = m.similarity;
+                                            stats_.wlecapa_new = m.is_new;
+                                            stats_.wlecapa_count = wlecapa_db_.count();
+                                            stats_.wlecapa_exemplars = m.exemplar_count;
+                                            stats_.wlecapa_hits_above = m.hits_above;
+                                            stats_.wlecapa_is_early = false;
+                                            strncpy(stats_.wlecapa_name, m.name.c_str(),
+                                                    sizeof(stats_.wlecapa_name) - 1);
+                                            stats_.wlecapa_name[sizeof(stats_.wlecapa_name) - 1] = '\0';
+                                            LOG_INFO("AudioPipe", "SPK-CHANGE full-extract: id=%d sim=%.3f %s%s (%.2fs)",
+                                                     m.speaker_id, m.similarity,
+                                                     m.is_new ? "NEW " : "",
+                                                     m.name.empty() ? "(unnamed)" : m.name.c_str(),
+                                                     pre_samples / 16000.0f);
+                                            if (on_speaker_) on_speaker_(m);
+                                            prev_wlecapa_emb_ = pre_emb;
+                                            // Timeline: SAAS speaker change event.
+                                            {
+                                                int64_t seg_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
+                                                SpeakerEvent ev{};
+                                                ev.audio_start = seg_start;
+                                                ev.audio_end   = seg_start + pre_samples;
+                                                ev.source      = SpkEventSource::SAAS_CHANGE;
+                                                ev.speaker_id  = m.speaker_id;
+                                                ev.similarity  = m.similarity;
+                                                strncpy(ev.name, m.name.c_str(), sizeof(ev.name) - 1);
+                                                spk_timeline_.push(ev);
+                                            }
+                                        }
+                                    }
+
+                                    // --- 2. Save speaker state for inheritance ---
+                                    prev_seg_end_sample_ = total_samples_in_;
+                                    if (seg_ref_speaker_id_ >= 0) {
+                                        prev_seg_speaker_id_ = seg_ref_speaker_id_;
+                                        prev_seg_speaker_name_ = seg_ref_speaker_name_;
+                                        prev_seg_speaker_sim_ = seg_ref_speaker_sim_;
+                                    }
+
+                                    // --- 3. Trigger ASR split ---
+                                    int tail_samples = buf_sz - start;
+                                    int asr_buf_sz = (int)asr_pcm_buf_.size();
+                                    int split_at = std::max(0, asr_buf_sz - tail_samples);
+                                    if (asr_saw_speech_ && split_at > 0 && split_at < asr_buf_sz) {
+                                        asr_spk_change_pending_ = true;
+                                        asr_spk_change_split_at_ = split_at;
+                                        LOG_INFO("AudioPipe", "SAAS: ASR split queued at sample %d/%d (%.2fs)",
+                                                 split_at, asr_buf_sz, split_at / 16000.0f);
+                                    }
+
+                                    // --- 4. Soft restart: carry tail audio, reset for new speaker ---
                                     std::vector<int16_t> tail(speech_pcm_buf_.begin() + start,
                                                               speech_pcm_buf_.end());
-                                    speech_pcm_buf_.resize(start);
-                                    // Process the old-speaker segment end (will be handled
-                                    // by the end-of-segment code below).
-                                    in_speech_segment_ = false;
-                                    // Process end-of-segment for old speaker...
-                                    // (fall through to the end-of-segment block below)
-                                    // After that, start a new segment with the tail.
-                                    // We simulate this by setting a flag and re-starting.
-                                    // For simplicity: just end the current segment here.
-                                    // The tail will be picked up on the next iteration
-                                    // since VAD is still active.
-                                    // But we need to handle the tail PCM — push it back
-                                    // so the next cycle's speech accumulation picks it up.
-                                    // Actually, the simplest approach: end the segment and
-                                    // let the next tick's vad_speech=true start a fresh one.
-                                    // The tail audio is lost (100ms at most). Acceptable.
+                                    speech_pcm_buf_ = std::move(tail);
+                                    // New speaker's embedding becomes ref
+                                    seg_ref_emb_ = emb;
+                                    seg_has_ref_ = true;
+                                    early_extracted_ = true;
+                                    seg_last_recheck_at_ = (int)speech_pcm_buf_.size();
+                                    seg_ref_speaker_id_ = -1;
+                                    seg_ref_speaker_name_.clear();
+                                    seg_ref_speaker_sim_ = 0.0f;
+                                    // Reset fbank for new sub-segment
+                                    speaker_fbank_.reset();
+                                    if (((speaker_enc_.initialized() &&
+                                          enable_speaker_.load(std::memory_order_relaxed)) ||
+                                         (unispeech_enc_.initialized() &&
+                                          enable_unispeech_.load(std::memory_order_relaxed))) &&
+                                        !speech_pcm_buf_.empty()) {
+                                        speaker_fbank_.push_pcm(speech_pcm_buf_.data(),
+                                                                (int)speech_pcm_buf_.size());
+                                    }
                                 }
                             }
                         }
@@ -587,8 +710,22 @@ void AudioPipeline::process_loop() {
                 int speech_samples = (int)speech_pcm_buf_.size();
                 float speech_duration = speech_samples / 16000.0f;
 
-                LOG_INFO("AudioPipe", "Speech segment ended: %.2fs (%d samples)",
-                         speech_duration, speech_samples);
+                // SAAS: save speaker state for short-segment inheritance.
+                prev_seg_end_sample_ = total_samples_in_;
+                if (seg_ref_speaker_id_ >= 0) {
+                    prev_seg_speaker_id_ = seg_ref_speaker_id_;
+                    prev_seg_speaker_name_ = seg_ref_speaker_name_;
+                    prev_seg_speaker_sim_ = seg_ref_speaker_sim_;
+                } else if (stats_.wlecapa_id >= 0) {
+                    // Fallback: use whatever speaker ID was last reported.
+                    prev_seg_speaker_id_ = stats_.wlecapa_id;
+                    prev_seg_speaker_name_ = stats_.wlecapa_name;
+                    prev_seg_speaker_sim_ = stats_.wlecapa_sim;
+                }
+
+                LOG_INFO("AudioPipe", "Speech segment ended: %.2fs (%d samples, spk=%d %s)",
+                         speech_duration, speech_samples, prev_seg_speaker_id_,
+                         prev_seg_speaker_name_.c_str());
 
                 // Debug: dump first 10 speech segments to WAV for analysis.
                 {
@@ -774,6 +911,11 @@ void AudioPipeline::process_loop() {
                         stats_.wlecapa_lat_ecapa_ms   = wlecapa_enc_.last_lat_ecapa_ms();
                         stats_.wlecapa_lat_total_ms   = wlecapa_enc_.last_lat_total_ms();
 
+                        // SAAS: track speaker ref for ASR annotation and inheritance.
+                        seg_ref_speaker_id_ = match.speaker_id;
+                        seg_ref_speaker_name_ = match.name;
+                        seg_ref_speaker_sim_ = match.similarity;
+
                         // Change detection: cosine similarity with previous segment embedding.
                         if (!prev_wlecapa_emb_.empty() && prev_wlecapa_emb_.size() == emb.size()) {
                             float dot = 0;
@@ -796,10 +938,55 @@ void AudioPipeline::process_loop() {
                                  match.name.empty() ? "(unnamed)" : match.name.c_str(),
                                  speech_samples, wlecapa_enc_.last_lat_total_ms());
                         if (on_speaker_) on_speaker_(match);
+                        // Timeline: SAAS full end-of-segment event (highest authority).
+                        {
+                            int64_t seg_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
+                            SpeakerEvent ev{};
+                            ev.audio_start = seg_start;
+                            ev.audio_end   = total_samples_in_;
+                            ev.source      = SpkEventSource::SAAS_FULL;
+                            ev.speaker_id  = match.speaker_id;
+                            ev.similarity  = match.similarity;
+                            strncpy(ev.name, match.name.c_str(), sizeof(ev.name) - 1);
+                            spk_timeline_.push(ev);
+                        }
                     }
                 }
 
                 speech_pcm_buf_.clear();
+            }
+        }
+
+        // SpeakerTracker: independent continuous pipeline.
+        // Uses same VAD source as SAAS for consistency but tracks independently.
+        {
+            VadSource src = static_cast<VadSource>(vad_source_.load(std::memory_order_relaxed));
+            bool tracker_vad = false;
+            switch (src) {
+                case VadSource::SILERO: tracker_vad = stats_.silero_speech; break;
+                case VadSource::FSMN:   tracker_vad = stats_.fsmn_speech; break;
+                case VadSource::TEN:    tracker_vad = stats_.ten_speech; break;
+                case VadSource::ANY:
+                default:
+                    tracker_vad = stats_.is_speech || stats_.silero_speech ||
+                                  stats_.fsmn_speech || stats_.ten_speech;
+                    break;
+            }
+            tracker_.feed(pcm_buf.data(), n_samples, tracker_vad);
+            if (tracker_.check()) {
+                // Timeline: Tracker identification event.
+                auto& ts = tracker_.stats();
+                if (ts.speaker_id >= 0) {
+                    int win = tracker_.window_ms() * 16;  // window in samples
+                    SpeakerEvent ev{};
+                    ev.audio_start = total_samples_in_ - win;
+                    ev.audio_end   = total_samples_in_;
+                    ev.source      = SpkEventSource::TRACKER;
+                    ev.speaker_id  = ts.speaker_id;
+                    ev.similarity  = ts.speaker_sim;
+                    strncpy(ev.name, ts.speaker_name, sizeof(ev.name) - 1);
+                    spk_timeline_.push(ev);
+                }
             }
         }
 
@@ -860,17 +1047,109 @@ void AudioPipeline::process_loop() {
             }
 
             // Trigger transcription when:
-            // (a) Post-speech silence reaches configured threshold, or
-            // (b) Buffer exceeds max size during continuous speech.
-            int asr_post_silence_chunks = asr_post_silence_ms_.load(std::memory_order_relaxed)
-                                          / cfg_.process_chunk_ms;
+            // (a) Post-speech silence reaches adaptive threshold, or
+            // (b) Buffer exceeds max size during continuous speech, or
+            // (c) Speaker change detected (SAAS split).
+            int base_silence_ms = asr_post_silence_ms_.load(std::memory_order_relaxed);
+            int effective_silence_ms = base_silence_ms;
+
+            // SAAS: adaptive post-silence based on current buffer length.
+            if (asr_adaptive_silence_.load(std::memory_order_relaxed) && asr_saw_speech_) {
+                float buf_sec = asr_pcm_buf_.size() / 16000.0f;
+                if (buf_sec < 0.8f) {
+                    effective_silence_ms = asr_adaptive_short_ms_.load(std::memory_order_relaxed);
+                } else if (buf_sec > 15.0f) {
+                    effective_silence_ms = asr_adaptive_vlong_ms_.load(std::memory_order_relaxed);
+                } else if (buf_sec > 5.0f) {
+                    effective_silence_ms = asr_adaptive_long_ms_.load(std::memory_order_relaxed);
+                }
+                // else: use base value (0.8-5s range)
+            }
+
+            int asr_post_silence_chunks = effective_silence_ms / cfg_.process_chunk_ms;
             if (asr_post_silence_chunks < 1) asr_post_silence_chunks = 1;
             int ASR_MAX_BUF_SAMPLES = asr_max_buf_samples_.load(std::memory_order_relaxed);
             int ASR_MIN_SAMPLES = asr_min_samples_.load(std::memory_order_relaxed);
             int ASR_PRE_ROLL_SAMPLES = asr_pre_roll_samples_.load(std::memory_order_relaxed);
 
+            // Update stats with effective silence for frontend display.
+            stats_.asr_effective_silence_ms = effective_silence_ms;
+            stats_.asr_post_silence_ms = asr_post_silence_ * cfg_.process_chunk_ms;
+
             bool asr_trigger = false;
             std::string trigger_reason;
+
+            // SAAS: speaker-change-driven ASR split takes priority.
+            if (asr_spk_change_pending_) {
+                asr_spk_change_pending_ = false;
+                int split_at = asr_spk_change_split_at_;
+                int asr_buf_sz = (int)asr_pcm_buf_.size();
+                if (split_at > ASR_MIN_SAMPLES && split_at < asr_buf_sz) {
+                    // Submit the pre-change portion for ASR.
+                    int pre_samples = split_at;
+                    float pre_duration = pre_samples / 16000.0f;
+                    float speech_sec = asr_speech_samples_ / 16000.0f;
+
+                    std::vector<float> pcm_f32(pre_samples);
+                    for (int i = 0; i < pre_samples; i++)
+                        pcm_f32[i] = asr_pcm_buf_[i] / 32768.0f;
+
+                    if (on_asr_log_) {
+                        char json[512];
+                        snprintf(json, sizeof(json),
+                            R"({"stage":"trigger","reason":"spk_change","buf_sec":%.2f,"speech_sec":%.2f,"split_at":%d})",
+                            pre_duration, speech_sec, split_at);
+                        on_asr_log_(json);
+                    }
+
+                    // Resolve old speaker via timeline for pre-change audio.
+                    int64_t asr_audio_start = total_samples_in_ - (int64_t)asr_pcm_buf_.size();
+                    int64_t asr_audio_end = asr_audio_start + split_at;
+                    auto resolved = spk_timeline_.resolve(asr_audio_start, asr_audio_end);
+                    int spk_id = resolved.speaker_id;
+                    float spk_sim = resolved.similarity;
+                    std::string spk_name(resolved.name);
+                    // Fallback: if timeline has no result, use seg_ref (old speaker snapshot).
+                    if (spk_id < 0) {
+                        spk_id = seg_ref_speaker_id_;
+                        spk_sim = seg_ref_speaker_sim_;
+                        spk_name = seg_ref_speaker_name_;
+                    } else {
+                        static const char* kSourceNames[] = {"SAAS_EARLY","SAAS_FULL","SAAS_CHANGE","SAAS_INHERIT","TRACKER"};
+                        LOG_INFO("AudioPipe", "Timeline(spk_change): resolved spk=%d %s (sim=%.3f, src=%s) for %.2f-%.2fs",
+                                 spk_id, spk_name.c_str(), spk_sim,
+                                 kSourceNames[static_cast<int>(resolved.source)],
+                                 asr_audio_start / 16000.0f, asr_audio_end / 16000.0f);
+                    }
+                    // Capture tracker pipeline speaker for A/B comparison.
+                    auto& tst = tracker_.stats();
+                    int trk_id = tst.speaker_id;
+                    float trk_sim = tst.speaker_sim;
+                    std::string trk_name(tst.speaker_name);
+                    {
+                        std::lock_guard<std::mutex> lock(asr_mutex_);
+                        ASRJob job{std::move(pcm_f32), pre_duration, "spk_change",
+                                   /*is_partial=*/false, spk_id, std::move(spk_name), spk_sim,
+                                   trk_id, std::move(trk_name), trk_sim};
+                        asr_queue_.push(std::move(job));
+                    }
+                    asr_cv_.notify_one();
+
+                    // Keep post-change audio as the start of the new segment.
+                    asr_pcm_buf_.erase(asr_pcm_buf_.begin(),
+                                       asr_pcm_buf_.begin() + split_at);
+                    asr_saw_speech_ = true;  // new segment starts with speech
+                    asr_post_silence_ = 0;
+                    asr_speech_samples_ = 0;
+                    asr_partial_sent_at_ = 0;
+
+                    LOG_INFO("AudioPipe", "SAAS: ASR split done, pre=%.2fs, remaining=%d samples",
+                             pre_duration, (int)asr_pcm_buf_.size());
+                } else {
+                    LOG_INFO("AudioPipe", "SAAS: ASR split skipped (split_at=%d too small or invalid)", split_at);
+                }
+            }
+
             if (asr_saw_speech_ && asr_post_silence_ >= asr_post_silence_chunks) {
                 asr_trigger = true;
                 trigger_reason = "post_silence";
@@ -963,14 +1242,35 @@ void AudioPipeline::process_loop() {
                     }
 
                     // Push job to async ASR thread (non-blocking).
-                    // Capture current speaker identification for transcript annotation.
-                    int spk_id = stats_.wlecapa_id;
-                    float spk_sim = stats_.wlecapa_sim;
-                    std::string spk_name(stats_.wlecapa_name);
+                    // Resolve speaker label via timeline (fused SAAS + Tracker).
+                    int64_t asr_audio_start = total_samples_in_ - (int64_t)asr_pcm_buf_.size();
+                    int64_t asr_audio_end = total_samples_in_;
+                    auto resolved = spk_timeline_.resolve(asr_audio_start, asr_audio_end);
+                    int spk_id = resolved.speaker_id;
+                    float spk_sim = resolved.similarity;
+                    std::string spk_name(resolved.name);
+                    // Fallback: if timeline has no result, use current SAAS snapshot.
+                    if (spk_id < 0) {
+                        spk_id = stats_.wlecapa_id;
+                        spk_sim = stats_.wlecapa_sim;
+                        spk_name = std::string(stats_.wlecapa_name);
+                    } else {
+                        static const char* kSourceNames[] = {"SAAS_EARLY","SAAS_FULL","SAAS_CHANGE","SAAS_INHERIT","TRACKER"};
+                        LOG_INFO("AudioPipe", "Timeline: resolved spk=%d %s (sim=%.3f, conf=%.3f, src=%s) for %.2f-%.2fs",
+                                 spk_id, spk_name.c_str(), spk_sim, resolved.confidence,
+                                 kSourceNames[static_cast<int>(resolved.source)],
+                                 asr_audio_start / 16000.0f, asr_audio_end / 16000.0f);
+                    }
+                    // Capture tracker pipeline speaker for A/B comparison.
+                    auto& ts = tracker_.stats();
+                    int trk_id = ts.speaker_id;
+                    float trk_sim = ts.speaker_sim;
+                    std::string trk_name(ts.speaker_name);
                     {
                         std::lock_guard<std::mutex> lock(asr_mutex_);
                         ASRJob job{std::move(pcm_f32), trimmed_duration, trigger_reason,
-                                   /*is_partial=*/false, spk_id, std::move(spk_name), spk_sim};
+                                   /*is_partial=*/false, spk_id, std::move(spk_name), spk_sim,
+                                   trk_id, std::move(trk_name), trk_sim};
                         asr_queue_.push(std::move(job));
                     }
                     asr_cv_.notify_one();
@@ -1057,6 +1357,584 @@ void AudioPipeline::process_loop() {
                      gain_.load(std::memory_order_relaxed),
                      stats_.speaker_id, stats_.speaker_sim);
         }
+    }
+}
+
+// ==================== SpeakerTracker Implementation ====================
+
+SpeakerTracker::SpeakerTracker() = default;
+
+void SpeakerTracker::init(WavLMEcapaEncoder* enc, int dim) {
+    enc_ = enc;
+    ring_capacity_ = window_samples_ * 2;
+    ring_.resize(ring_capacity_, 0);
+    ring_write_ = 0;
+    ring_count_ = 0;
+    clear();
+    LOG_INFO("Tracker", "Initialized (dim=%d, interval=%dms, window=%dms)",
+             dim, interval_samples_ / 16, window_samples_ / 16);
+}
+
+void SpeakerTracker::clear() {
+    db_.clear();
+    ref_emb_.clear();
+    ref_f0_ = 0.0f;
+    current_spk_id_ = -1;
+    current_spk_name_.clear();
+    current_sim_ = 0.0f;
+    confidence_ = TrackerConfidence::NONE;
+    state_ = TrackerState::SILENCE;
+    seg_start_sample_ = 0;
+    low_sim_count_ = 0;
+    sim_running_avg_ = 0.0f;
+    declining_count_ = 0;
+    unknown_count_ = 0;
+    unknown_embs_.clear();
+    unknown_f0s_.clear();
+    f0_profiles_.clear();
+    centroids_.clear();
+    centroid_counts_.clear();
+    timeline_.clear();
+    samples_since_check_ = 0;
+    total_samples_ = 0;
+    vad_speech_ = false;
+    prev_vad_speech_ = false;
+    silence_samples_ = 0;
+    speech_since_onset_ = 0;
+    onset_pending_ = false;
+    onset_at_sample_ = 0;
+    memset(&stats_, 0, sizeof(stats_));
+}
+
+void SpeakerTracker::feed(const int16_t* pcm, int n_samples, bool vad_speech) {
+    if (!enc_ || !enabled_.load(std::memory_order_relaxed)) return;
+
+    // Push PCM to circular ring buffer.
+    for (int i = 0; i < n_samples; i++) {
+        ring_[ring_write_] = pcm[i];
+        ring_write_ = (ring_write_ + 1) % ring_capacity_;
+        if (ring_count_ < ring_capacity_) ring_count_++;
+    }
+
+    prev_vad_speech_ = vad_speech_;
+    vad_speech_ = vad_speech;
+
+    if (vad_speech) {
+        speech_since_onset_ += n_samples;
+        silence_samples_ = 0;
+
+        // Detect silence→speech onset for fast path.
+        if (!prev_vad_speech_) {
+            onset_pending_ = true;
+            onset_at_sample_ = (int)total_samples_;
+            speech_since_onset_ = n_samples;
+        }
+    } else {
+        silence_samples_ += n_samples;
+        speech_since_onset_ = 0;
+
+        // 1s silence → close current segment.
+        if (silence_samples_ > 16000 && state_ != TrackerState::SILENCE) {
+            if (!timeline_.empty() && timeline_.back().end_sample == 0)
+                timeline_.back().end_sample = total_samples_;
+            state_ = TrackerState::SILENCE;
+            confidence_ = TrackerConfidence::NONE;
+            current_spk_id_ = -1;
+            current_spk_name_.clear();
+            ref_emb_.clear();
+            low_sim_count_ = 0;
+            declining_count_ = 0;
+            onset_pending_ = false;
+        }
+    }
+
+    samples_since_check_ += n_samples;
+    total_samples_ += n_samples;
+}
+
+bool SpeakerTracker::check() {
+    if (!enc_ || !enc_->initialized() ||
+        !enabled_.load(std::memory_order_relaxed))
+        return false;
+
+    stats_.check_active = false;
+    stats_.reg_event = false;
+
+    // Determine if check is needed.
+    bool do_check = false;
+    bool is_fast_path = false;
+    int extract_samples = window_samples_;
+
+    // Fast path: 0.5s after silence→speech onset.
+    if (onset_pending_ && vad_speech_ &&
+        speech_since_onset_ >= fast_path_samples_) {
+        do_check = true;
+        is_fast_path = true;
+        extract_samples = fast_path_samples_;
+        onset_pending_ = false;
+    }
+
+    // Regular interval check during speech.
+    if (!do_check && vad_speech_ && samples_since_check_ >= interval_samples_) {
+        do_check = true;
+    }
+
+    if (!do_check) return false;
+    samples_since_check_ = 0;
+
+    // Extract PCM window from ring buffer.
+    int n = std::min(extract_samples, ring_count_);
+    if (n < 8000) return false;  // minimum 0.5s
+
+    std::vector<float> pcm_f32(n);
+    int read_pos = (ring_write_ - n + ring_capacity_) % ring_capacity_;
+    for (int i = 0; i < n; i++)
+        pcm_f32[i] = ring_[(read_pos + i) % ring_capacity_] / 32768.0f;
+
+    auto t0 = std::chrono::steady_clock::now();
+
+    auto emb = enc_->extract(pcm_f32.data(), n);
+    if (emb.empty()) return false;
+
+    float f0 = estimate_f0(pcm_f32.data(), n);
+    float jitter = compute_f0_jitter(pcm_f32.data(), n);
+
+    auto t1 = std::chrono::steady_clock::now();
+    float lat_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
+
+    // === No current speaker — identify from scratch ===
+    if (current_spk_id_ < 0 || state_ == TrackerState::SILENCE) {
+        ScoredMatch sm = score_best(emb, f0);
+
+        if (sm.speaker_id >= 0) {
+            current_spk_id_ = sm.speaker_id;
+            current_spk_name_ = sm.name;
+            current_sim_ = sm.score;
+            ref_emb_ = emb;
+            ref_f0_ = f0;
+            state_ = TrackerState::TRACKING;
+            confidence_ = TrackerConfidence::LOW;
+            seg_start_sample_ = total_samples_ - n;
+            low_sim_count_ = 0;
+            declining_count_ = 0;
+            sim_running_avg_ = sm.sim_emb;
+            unknown_count_ = 0;
+            unknown_embs_.clear();
+            unknown_f0s_.clear();
+
+            // Update centroid.
+            auto cit = centroids_.find(sm.speaker_id);
+            if (cit != centroids_.end()) {
+                int cnt = ++centroid_counts_[sm.speaker_id];
+                float a = 1.0f / cnt;
+                for (size_t j = 0; j < emb.size(); j++)
+                    cit->second[j] = cit->second[j] * (1.0f - a) + emb[j] * a;
+            } else {
+                centroids_[sm.speaker_id] = emb;
+                centroid_counts_[sm.speaker_id] = 1;
+            }
+
+            // Update F0 profile.
+            if (f0 > 0) {
+                auto& fp = f0_profiles_[sm.speaker_id];
+                fp.count++;
+                float old_mean = fp.mean;
+                fp.mean += (f0 - old_mean) / fp.count;
+                fp.sum_sq += (f0 - old_mean) * (f0 - fp.mean);
+            }
+
+            // Start timeline entry.
+            if ((int)timeline_.size() >= MAX_TIMELINE)
+                timeline_.erase(timeline_.begin());
+            timeline_.push_back({seg_start_sample_, 0, current_spk_id_,
+                                current_spk_name_, current_sim_, confidence_, state_});
+            LOG_INFO("Tracker", "Identified: id=%d sim=%.3f score=%.3f %s (%.2fs, fast=%d)",
+                     sm.speaker_id, sm.sim_emb, sm.score,
+                     sm.name.empty() ? "(unnamed)" : sm.name.c_str(),
+                     n / 16000.0f, is_fast_path);
+        } else {
+            // Unknown speaker — registration gate.
+            state_ = TrackerState::UNKNOWN;
+            unknown_count_++;
+            unknown_embs_.push_back(emb);
+            unknown_f0s_.push_back(f0);
+
+            if (unknown_count_ >= register_confirm_) {
+                // Self-consistency check: average pairwise cosine sim.
+                float pair_sum = 0;
+                int pair_count = 0;
+                for (size_t a = 0; a < unknown_embs_.size(); a++) {
+                    for (size_t b = a + 1; b < unknown_embs_.size(); b++) {
+                        float dot = 0;
+                        for (size_t j = 0; j < unknown_embs_[a].size(); j++)
+                            dot += unknown_embs_[a][j] * unknown_embs_[b][j];
+                        pair_sum += dot;
+                        pair_count++;
+                    }
+                }
+                float avg_pair = pair_count > 0 ? pair_sum / pair_count : 0;
+                bool consistent = avg_pair >= self_consistency_;
+
+                // F0 stability check: CV < 0.20.
+                bool f0_stable = true;
+                if (unknown_f0s_.size() >= 2) {
+                    float fsum = 0, fsum2 = 0;
+                    int fvalid = 0;
+                    for (float v : unknown_f0s_) {
+                        if (v > 0) { fsum += v; fsum2 += v * v; fvalid++; }
+                    }
+                    if (fvalid >= 2) {
+                        float fm = fsum / fvalid;
+                        float fv = fsum2 / fvalid - fm * fm;
+                        float cv = fm > 1e-6f ? sqrtf(std::max(0.0f, fv)) / fm : 0;
+                        f0_stable = cv < 0.20f;
+                    }
+                }
+
+                if (consistent && f0_stable) {
+                    // Build average embedding.
+                    int dim = (int)emb.size();
+                    std::vector<float> avg_emb(dim, 0.0f);
+                    for (auto& e : unknown_embs_)
+                        for (int j = 0; j < dim; j++) avg_emb[j] += e[j];
+                    float inv = 1.0f / unknown_embs_.size();
+                    float norm = 0;
+                    for (int j = 0; j < dim; j++) {
+                        avg_emb[j] *= inv;
+                        norm += avg_emb[j] * avg_emb[j];
+                    }
+                    norm = sqrtf(norm);
+                    if (norm > 0)
+                        for (int j = 0; j < dim; j++) avg_emb[j] /= norm;
+
+                    int new_id = db_.register_speaker("", avg_emb);
+                    current_spk_id_ = new_id;
+                    current_spk_name_.clear();
+                    current_sim_ = 1.0f;
+                    ref_emb_ = avg_emb;
+                    ref_f0_ = 0;
+                    for (float v : unknown_f0s_) if (v > 0) ref_f0_ += v;
+                    int fcnt = 0;
+                    for (float v : unknown_f0s_) if (v > 0) fcnt++;
+                    if (fcnt > 0) ref_f0_ /= fcnt;
+
+                    state_ = TrackerState::TRACKING;
+                    confidence_ = TrackerConfidence::LOW;
+                    seg_start_sample_ = total_samples_ - n;
+                    sim_running_avg_ = 1.0f;
+                    centroids_[new_id] = avg_emb;
+                    centroid_counts_[new_id] = (int)unknown_embs_.size();
+                    if (ref_f0_ > 0)
+                        f0_profiles_[new_id] = {ref_f0_, 0.0f, 1};
+
+                    if ((int)timeline_.size() >= MAX_TIMELINE)
+                        timeline_.erase(timeline_.begin());
+                    timeline_.push_back({seg_start_sample_, 0, new_id, "",
+                                        1.0f, confidence_, state_});
+
+                    stats_.reg_event = true;
+                    stats_.reg_id = new_id;
+                    stats_.reg_name[0] = '\0';
+                    LOG_INFO("Tracker", "Registered NEW speaker id=%d (pair_sim=%.3f, f0=%.0f Hz)",
+                             new_id, avg_pair, ref_f0_);
+                } else {
+                    LOG_INFO("Tracker", "Registration gate failed (pair=%.3f stable=%d) — reset",
+                             avg_pair, (int)f0_stable);
+                }
+                unknown_count_ = 0;
+                unknown_embs_.clear();
+                unknown_f0s_.clear();
+            }
+        }
+    } else {
+        // === Already tracking — check if still same speaker ===
+        float sim_to_ref = 0;
+        if (!ref_emb_.empty() && ref_emb_.size() == emb.size()) {
+            for (size_t i = 0; i < emb.size(); i++)
+                sim_to_ref += ref_emb_[i] * emb[i];
+        }
+
+        // Update EMA.
+        const float ema_alpha = 0.3f;
+        sim_running_avg_ = sim_running_avg_ * (1.0f - ema_alpha) +
+                           sim_to_ref * ema_alpha;
+
+        // Absolute change detection.
+        if (sim_to_ref < change_threshold_) {
+            low_sim_count_++;
+        } else {
+            low_sim_count_ = 0;
+        }
+
+        // Relative decline detection.
+        if (sim_running_avg_ - sim_to_ref > 0.25f) {
+            declining_count_++;
+        } else {
+            declining_count_ = 0;
+        }
+
+        bool speaker_changed = (low_sim_count_ >= change_confirm_count_) ||
+                               (declining_count_ >= 3);
+        bool overlap_suspected = (jitter > 0.15f && low_sim_count_ >= 1);
+
+        if (speaker_changed) {
+            // Close current timeline entry.
+            if (!timeline_.empty() && timeline_.back().end_sample == 0)
+                timeline_.back().end_sample = total_samples_;
+            stats_.switches++;
+
+            // Identify new speaker.
+            ScoredMatch sm = score_best(emb, f0);
+            if (sm.speaker_id >= 0 && sm.speaker_id != current_spk_id_) {
+                LOG_INFO("Tracker", "Speaker CHANGE: %d→%d (sim_ref=%.3f, score=%.3f)",
+                         current_spk_id_, sm.speaker_id, sim_to_ref, sm.score);
+                current_spk_id_ = sm.speaker_id;
+                current_spk_name_ = sm.name;
+                current_sim_ = sm.score;
+                ref_emb_ = emb;
+                ref_f0_ = f0;
+                state_ = TrackerState::TRACKING;
+                confidence_ = TrackerConfidence::LOW;
+                seg_start_sample_ = total_samples_ - n;
+                sim_running_avg_ = sm.sim_emb;
+
+                // Update centroid and F0.
+                auto cit = centroids_.find(sm.speaker_id);
+                if (cit != centroids_.end()) {
+                    int cnt = ++centroid_counts_[sm.speaker_id];
+                    float a = 1.0f / cnt;
+                    for (size_t j = 0; j < emb.size(); j++)
+                        cit->second[j] = cit->second[j] * (1.0f - a) + emb[j] * a;
+                } else {
+                    centroids_[sm.speaker_id] = emb;
+                    centroid_counts_[sm.speaker_id] = 1;
+                }
+                if (f0 > 0) {
+                    auto& fp = f0_profiles_[sm.speaker_id];
+                    fp.count++;
+                    float old_mean = fp.mean;
+                    fp.mean += (f0 - old_mean) / fp.count;
+                    fp.sum_sq += (f0 - old_mean) * (f0 - fp.mean);
+                }
+
+                if ((int)timeline_.size() >= MAX_TIMELINE)
+                    timeline_.erase(timeline_.begin());
+                timeline_.push_back({seg_start_sample_, 0, current_spk_id_,
+                                    current_spk_name_, current_sim_, confidence_, state_});
+            } else if (sm.speaker_id < 0) {
+                LOG_INFO("Tracker", "Speaker CHANGE: %d→unknown (sim_ref=%.3f)",
+                         current_spk_id_, sim_to_ref);
+                current_spk_id_ = -1;
+                current_spk_name_.clear();
+                ref_emb_.clear();
+                state_ = TrackerState::UNKNOWN;
+                confidence_ = TrackerConfidence::NONE;
+                unknown_count_ = 1;
+                unknown_embs_ = {emb};
+                unknown_f0s_ = {f0};
+
+                if ((int)timeline_.size() >= MAX_TIMELINE)
+                    timeline_.erase(timeline_.begin());
+                timeline_.push_back({total_samples_ - n, 0, -1, "",
+                                    0, confidence_, state_});
+            } else {
+                // Same speaker re-identified — false alarm.
+                LOG_INFO("Tracker", "Change false alarm: still id=%d", current_spk_id_);
+            }
+            low_sim_count_ = 0;
+            declining_count_ = 0;
+        } else if (overlap_suspected) {
+            state_ = TrackerState::OVERLAP;
+        } else {
+            // Same speaker continues.
+            current_sim_ = sim_to_ref;
+            state_ = TrackerState::TRACKING;
+
+            // Update centroid and F0.
+            auto cit = centroids_.find(current_spk_id_);
+            if (cit != centroids_.end()) {
+                int cnt = ++centroid_counts_[current_spk_id_];
+                float a = 1.0f / cnt;
+                for (size_t j = 0; j < emb.size(); j++)
+                    cit->second[j] = cit->second[j] * (1.0f - a) + emb[j] * a;
+            } else {
+                centroids_[current_spk_id_] = emb;
+                centroid_counts_[current_spk_id_] = 1;
+            }
+            if (f0 > 0) {
+                auto& fp = f0_profiles_[current_spk_id_];
+                fp.count++;
+                float old_mean = fp.mean;
+                fp.mean += (f0 - old_mean) / fp.count;
+                fp.sum_sq += (f0 - old_mean) * (f0 - fp.mean);
+            }
+
+            // Progressive refinement.
+            int seg_duration = (int)(total_samples_ - seg_start_sample_);
+            if (confidence_ == TrackerConfidence::LOW && seg_duration >= 48000) {
+                confidence_ = TrackerConfidence::MED;
+                try_refine();
+            } else if (confidence_ == TrackerConfidence::MED && seg_duration >= 80000) {
+                confidence_ = TrackerConfidence::HIGH;
+                try_refine();
+            }
+
+            // Update active timeline entry.
+            if (!timeline_.empty() && timeline_.back().end_sample == 0) {
+                timeline_.back().avg_sim = sim_running_avg_;
+                timeline_.back().confidence = confidence_;
+            }
+        }
+    }
+
+    // Update stats.
+    stats_.enabled = true;
+    stats_.state = state_;
+    stats_.speaker_id = current_spk_id_;
+    stats_.speaker_sim = current_sim_;
+    strncpy(stats_.speaker_name, current_spk_name_.c_str(),
+            sizeof(stats_.speaker_name) - 1);
+    stats_.speaker_name[sizeof(stats_.speaker_name) - 1] = '\0';
+    stats_.confidence = confidence_;
+    stats_.speaker_count = db_.count();
+    stats_.timeline_len = (int)timeline_.size();
+    stats_.f0_hz = f0;
+    stats_.f0_jitter = jitter;
+    stats_.sim_to_ref = (state_ == TrackerState::TRACKING && !ref_emb_.empty()) ?
+        sim_running_avg_ : 0.0f;
+    stats_.sim_running_avg = sim_running_avg_;
+    stats_.check_active = true;
+    stats_.check_lat_ms = lat_ms;
+
+    return true;
+}
+
+float SpeakerTracker::estimate_f0(const float* pcm, int n_samples) {
+    // Autocorrelation-based F0 estimation.
+    // Search range: 60-500 Hz → lags [32, 266] at 16 kHz.
+    const int min_lag = 32;   // 500 Hz
+    const int max_lag = 266;  // ~60 Hz
+    if (n_samples < max_lag * 2) return 0.0f;
+
+    // Use center 4000 samples (~250ms) for efficiency.
+    int win = std::min(n_samples, 4000);
+    int offset = (n_samples - win) / 2;
+    const float* p = pcm + offset;
+
+    float best_corr = 0.0f;
+    int best_lag = 0;
+
+    for (int lag = min_lag; lag <= max_lag && lag < win; lag++) {
+        float sum = 0.0f;
+        float norm_a = 0.0f, norm_b = 0.0f;
+        int len = win - lag;
+        for (int i = 0; i < len; i++) {
+            sum += p[i] * p[i + lag];
+            norm_a += p[i] * p[i];
+            norm_b += p[i + lag] * p[i + lag];
+        }
+        float denom = sqrtf(norm_a * norm_b);
+        float corr = denom > 1e-8f ? sum / denom : 0.0f;
+        if (corr > best_corr) {
+            best_corr = corr;
+            best_lag = lag;
+        }
+    }
+
+    // Require minimum correlation for valid F0.
+    if (best_corr < 0.3f || best_lag == 0) return 0.0f;
+    return 16000.0f / best_lag;
+}
+
+float SpeakerTracker::compute_f0_jitter(const float* pcm, int n_samples) {
+    // Split into 30ms frames, estimate F0 per frame, compute CV (coeff of variation).
+    const int frame_len = 480;  // 30ms at 16 kHz
+    const int hop = 480;
+    std::vector<float> f0s;
+    for (int start = 0; start + frame_len <= n_samples; start += hop) {
+        float f = estimate_f0(pcm + start, frame_len);
+        if (f > 0.0f) f0s.push_back(f);
+    }
+    if (f0s.size() < 3) return 0.0f;
+
+    float sum = 0, sum2 = 0;
+    for (float v : f0s) { sum += v; sum2 += v * v; }
+    float mean = sum / f0s.size();
+    float var = sum2 / f0s.size() - mean * mean;
+    if (mean < 1e-6f) return 0.0f;
+    return sqrtf(std::max(0.0f, var)) / mean;  // CV
+}
+
+SpeakerTracker::ScoredMatch SpeakerTracker::score_best(
+    const std::vector<float>& emb, float query_f0) {
+    // Primary scoring: DB identify for embedding match.
+    SpeakerMatch db_match = db_.identify(emb, identify_threshold_, /*auto_register=*/false);
+    ScoredMatch result;
+
+    if (db_match.speaker_id < 0) return result;
+
+    result.speaker_id = db_match.speaker_id;
+    result.sim_emb = db_match.similarity;
+    result.name = db_match.name;
+
+    // Centroid similarity bonus.
+    auto cit = centroids_.find(db_match.speaker_id);
+    if (cit != centroids_.end()) {
+        float dot = 0;
+        for (size_t i = 0; i < emb.size() && i < cit->second.size(); i++)
+            dot += emb[i] * cit->second[i];
+        result.sim_cen = dot;  // both L2-normalized
+    } else {
+        result.sim_cen = result.sim_emb;  // fallback to emb sim
+    }
+
+    // F0 compatibility.
+    auto fit = f0_profiles_.find(db_match.speaker_id);
+    if (fit != f0_profiles_.end() && fit->second.count >= 2 && query_f0 > 0) {
+        float f0_mean = fit->second.mean;
+        float f0_std = (fit->second.count > 1) ?
+            sqrtf(std::max(0.0f, fit->second.sum_sq / (fit->second.count - 1))) : 50.0f;
+        f0_std = std::max(f0_std, 20.0f);  // minimum 20 Hz spread
+        float diff = fabsf(query_f0 - f0_mean);
+        result.f0_compat = std::max(0.0f, 1.0f - diff / (3.0f * f0_std));
+    } else {
+        result.f0_compat = 0.5f;  // neutral when no profile
+    }
+
+    result.score = w_emb_ * result.sim_emb +
+                   w_centroid_ * result.sim_cen +
+                   w_f0_ * result.f0_compat;
+    return result;
+}
+
+void SpeakerTracker::try_refine() {
+    if (!enc_ || !enc_->initialized()) return;
+
+    // Re-extract from a larger window for better accuracy.
+    int n = std::min(ring_count_, window_samples_);
+    if (n < 16000) return;
+
+    std::vector<float> pcm_f32(n);
+    int read_pos = (ring_write_ - n + ring_capacity_) % ring_capacity_;
+    for (int i = 0; i < n; i++)
+        pcm_f32[i] = ring_[(read_pos + i) % ring_capacity_] / 32768.0f;
+
+    auto emb = enc_->extract(pcm_f32.data(), n);
+    if (emb.empty()) return;
+
+    // Re-identify with refined embedding.
+    SpeakerMatch match = db_.identify(emb, identify_threshold_, /*auto_register=*/false);
+    if (match.speaker_id >= 0) {
+        // Update reference embedding to the refined one.
+        ref_emb_ = emb;
+        current_spk_id_ = match.speaker_id;
+        current_spk_name_ = match.name;
+        current_sim_ = match.similarity;
+        sim_running_avg_ = match.similarity;
+        LOG_INFO("Tracker", "Refined: id=%d sim=%.3f conf=%d %s (%.2fs)",
+                 match.speaker_id, match.similarity, (int)confidence_,
+                 match.name.empty() ? "(unnamed)" : match.name.c_str(),
+                 n / 16000.0f);
     }
 }
 

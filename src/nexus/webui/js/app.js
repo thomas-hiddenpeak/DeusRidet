@@ -11,6 +11,7 @@ import { AsrLogPanel } from './components/asr-log-panel.js';
 import { ConsciousnessPanel } from './components/consciousness-panel.js';
 import { TextOutputPanel } from './components/text-output-panel.js';
 import { ConfigPanel } from './components/config-panel.js';
+import { TrackerPanel } from './components/tracker-panel.js';
 import { spkColor } from './utils/speaker-colors.js';
 
 // --- Log utility ---
@@ -53,6 +54,7 @@ ws.onText = (msg) => {
             updateSpeakerPanel(obj);
             speakerDebug.onPipelineStats(obj);
             asrPanel.onPipelineStats(obj);
+            trackerPanel.onPipelineStats(obj);
             return;
         }
         if (obj.type === 'vad') {
@@ -170,6 +172,7 @@ const asrLogPanel = new AsrLogPanel(ws);
 const consciousnessPanel = new ConsciousnessPanel(ws);
 const textOutputPanel = new TextOutputPanel(ws);
 const configPanel = new ConfigPanel(ws);
+const trackerPanel = new TrackerPanel(ws);
 
 // --- VAD source selector ---
 const vadSourceSelect = document.getElementById('vad-source-select');
@@ -235,6 +238,19 @@ MODELS.forEach(m => {
         ws.sendText(`${m.thresholdCmd}:${v.toFixed(2)}`);
     });
 });
+
+// WL-ECAPA margin guard slider.
+{
+    const marginSlider = document.getElementById('wlecapa-margin');
+    const marginVal = document.getElementById('wlecapa-margin-val');
+    if (marginSlider && marginVal) {
+        marginSlider.addEventListener('input', () => {
+            const v = parseFloat(marginSlider.value);
+            marginVal.textContent = v.toFixed(2);
+            ws.sendText(`wlecapa_margin:${v.toFixed(2)}`);
+        });
+    }
+}
 
 // Early trigger controls.
 {
@@ -321,6 +337,15 @@ function updateSpeakerPanel(stats) {
             }
         }
     });
+    // Sync margin slider.
+    if (stats.wlecapa_margin !== undefined) {
+        const s = document.getElementById('wlecapa-margin');
+        const v = document.getElementById('wlecapa-margin-val');
+        if (s && v && !s.matches(':active')) {
+            s.value = stats.wlecapa_margin;
+            v.textContent = stats.wlecapa_margin.toFixed(2);
+        }
+    }
     // Sync VAD source.
     if (stats.vad_source !== undefined && vadSourceSelect && !vadSourceSelect.matches(':focus')) {
         const map = {0:'silero', 1:'fsmn', 2:'ten', 3:'any'};

@@ -93,6 +93,10 @@ public:
     // src is deleted after merge. Returns true on success.
     bool merge_speakers(int dst_id, int src_id);
 
+    // ---- Margin guard ----
+    void  set_min_margin(float m) { min_margin_ = m; }
+    float min_margin() const { return min_margin_; }
+
     // ---- Persistence ----
 
     // Save store to directory (creates dir if needed).
@@ -128,7 +132,8 @@ private:
     // Sync host offsets_ → d_offsets_.
     void upload_offsets();
 
-    // Compute single dot product between d_pending_ and d_query_ on GPU.
+    // Compute single dot product between d_pending_pool_[0] and d_query_ on GPU.
+    // Legacy — use gpu_pending_dot(int slot) for multi-pending.
     float gpu_pending_dot();
 
     // Count how many exemplars of spk_idx scored above threshold.
@@ -153,6 +158,9 @@ private:
     // External ID → internal index.
     int id_to_idx(int id) const;
 
+    // Compute dot product between d_pending_pool_[slot] and d_query_.
+    float gpu_pending_dot(int slot);
+
     // ---- Device buffers ----
     float* d_embeddings_ = nullptr;  // [capacity_ × dim_], L2-normed
     int*   d_offsets_    = nullptr;  // [spk_alloc_ + 1], exemplar prefix sums
@@ -160,8 +168,12 @@ private:
     float* d_sims_       = nullptr;  // [capacity_], per-exemplar dot products
     float* d_spk_sims_   = nullptr;  // [spk_alloc_], per-speaker best sim
     int*   d_spk_ex_     = nullptr;  // [spk_alloc_], best exemplar row per spk
-    float* d_pending_    = nullptr;  // [dim_], pending embedding for 2-miss
+    float* d_pending_    = nullptr;  // [dim_], legacy alias → d_pending_pool_[0]
     GpuSearchResult* d_result_ = nullptr;  // single-element result
+
+    // Multi-pending pool: up to kMaxPending slots for simultaneous unknown candidates.
+    static constexpr int kMaxPending = 3;
+    float* d_pending_pool_ = nullptr;  // [kMaxPending × dim_], GPU embeddings
 
     // ---- Pinned host buffer for result readback ----
     GpuSearchResult* h_result_ = nullptr;
@@ -182,12 +194,29 @@ private:
     std::vector<int> offsets_;  // host mirror of d_offsets_, size = speakers_.size()+1
     std::unordered_map<int, int> id_to_idx_;
 
-    // 2-miss pending state.
+    // Multi-pending pool state.
+    struct PendingSlot {
+        bool   active   = false;
+        int    miss_seq = 0;  // monotonic sequence number at creation (for LRU)
+    };
+    PendingSlot pending_slots_[kMaxPending] = {};
+    int pending_miss_seq_ = 0;  // global miss counter for LRU
+
+    // Legacy single-pending compat.
     bool has_pending_ = false;
 
     // Minimum cosine distance for a new exemplar to be considered "diverse enough".
     // If the closest existing exemplar is nearer than this, the new sample is redundant.
     static constexpr float kDiversityThresh = 0.08f;
+
+    // Exemplar admission margin: match_sim must exceed threshold by at least
+    // this amount before a new exemplar is added.  Prevents borderline matches
+    // (just above threshold) from contaminating the speaker profile.
+    static constexpr float kExemplarAdmitMargin = 0.10f;
+
+    // Margin guard for registration: if pending embedding is too close to two
+    // existing speakers, reject registration to avoid creating duplicates.
+    float min_margin_ = 0.08f;
 
     cudaStream_t stream_ = nullptr;
 };

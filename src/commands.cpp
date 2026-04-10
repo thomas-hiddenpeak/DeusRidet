@@ -1502,27 +1502,34 @@ int cmd_test_ws(const std::string& webui_dir,
     // ASR transcript callback (called from ASR worker thread).
     audio.set_on_transcript([&](const deusridet::asr::ASRResult& result, float audio_sec,
                                 int speaker_id, const std::string& speaker_name,
-                                float speaker_sim, const std::string& trigger_reason) {
+                                float speaker_sim, const std::string& trigger_reason,
+                                int tracker_id, const std::string& tracker_name,
+                                float tracker_sim) {
         std::string escaped = json_escape(result.text);
         std::string spk_escaped = json_escape(speaker_name);
+        std::string trk_escaped = json_escape(tracker_name);
         char json[2048];
         snprintf(json, sizeof(json),
             R"({"type":"asr_transcript","text":"%s","latency_ms":%.1f,"audio_sec":%.2f,)"
             R"("mel_ms":%.1f,"encoder_ms":%.1f,"decode_ms":%.1f,"tokens":%d,"mel_frames":%d,)"
-            R"("speaker_id":%d,"speaker_name":"%s","speaker_sim":%.3f,"trigger":"%s"})",
+            R"("speaker_id":%d,"speaker_name":"%s","speaker_sim":%.3f,"trigger":"%s",)"
+            R"("tracker_id":%d,"tracker_name":"%s","tracker_sim":%.3f})",
             escaped.c_str(), result.total_ms, audio_sec,
             result.mel_ms, result.encoder_ms, result.decode_ms,
             result.token_count, result.mel_frames,
             speaker_id, spk_escaped.c_str(), speaker_sim,
-            trigger_reason.c_str());
+            trigger_reason.c_str(),
+            tracker_id, trk_escaped.c_str(), tracker_sim);
         server.broadcast_text(json);
         if (speaker_id >= 0)
-            printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s]\n",
+            printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s | trk=%d %s]\n",
                    result.text.c_str(), result.total_ms, audio_sec,
-                   speaker_id, speaker_name.c_str());
+                   speaker_id, speaker_name.c_str(),
+                   tracker_id, tracker_name.c_str());
         else
-            printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s)\n",
-                   result.text.c_str(), result.total_ms, audio_sec);
+            printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [trk=%d %s]\n",
+                   result.text.c_str(), result.total_ms, audio_sec,
+                   tracker_id, tracker_name.c_str());
 
         // Inject ASR transcript into consciousness stream
         if (llm_loaded && !result.text.empty()) {
@@ -1642,18 +1649,26 @@ int cmd_test_ws(const std::string& webui_dir,
             audio.wlecapa_threshold(),
             st.wlecapa_active ? "true" : "false");
 
-        // Append speaker lists (if changed) and closing brace.
+        // Append wlecapa margin guard value.
         std::string full_json(json);
+        {
+            char margin_buf[64];
+            snprintf(margin_buf, sizeof(margin_buf),
+                R"(,"wlecapa_margin":%.2f)", audio.wlecapa_db().min_margin());
+            full_json += margin_buf;
+        }
 
         // ASR stats + tunable parameters.
         {
-            char asr[512];
+            char asr[768];
             snprintf(asr, sizeof(asr),
                 R"(,"asr_enabled":%s,"asr_loaded":%s,"asr_active":%s,"asr_busy":%s,"asr_latency_ms":%.1f,"asr_audio_sec":%.2f)"
                 R"(,"asr_buf_sec":%.2f,"asr_buf_has_speech":%s)"
                 R"(,"asr_post_silence_ms":%d,"asr_max_buf_sec":%.1f,"asr_min_dur_sec":%.2f)"
                 R"(,"asr_pre_roll_sec":%.2f,"asr_max_tokens":%d,"asr_rep_penalty":%.2f,"asr_min_energy":%.4f)"
-                R"(,"asr_vad_source":%d,"asr_partial_sec":%.1f,"asr_min_speech_ratio":%.2f)",
+                R"(,"asr_vad_source":%d,"asr_partial_sec":%.1f,"asr_min_speech_ratio":%.2f)"
+                R"(,"asr_adaptive_silence":%s,"asr_effective_silence_ms":%d,"asr_current_silence_ms":%d)"
+                R"(,"asr_adaptive_short_ms":%d,"asr_adaptive_long_ms":%d,"asr_adaptive_vlong_ms":%d)",
                 audio.asr_enabled() ? "true" : "false",
                 audio.asr_loaded() ? "true" : "false",
                 st.asr_active ? "true" : "false",
@@ -1671,7 +1686,13 @@ int cmd_test_ws(const std::string& webui_dir,
                 audio.asr_min_energy(),
                 static_cast<int>(audio.asr_vad_source()),
                 audio.asr_partial_sec(),
-                audio.asr_min_speech_ratio());
+                audio.asr_min_speech_ratio(),
+                audio.asr_adaptive_silence() ? "true" : "false",
+                st.asr_effective_silence_ms,
+                st.asr_post_silence_ms,
+                audio.asr_adaptive_short_ms(),
+                audio.asr_adaptive_long_ms(),
+                audio.asr_adaptive_vlong_ms());
             full_json += asr;
         }
 
@@ -1697,6 +1718,46 @@ int cmd_test_ws(const std::string& webui_dir,
             }
 
 
+        }
+
+        // SpeakerTracker stats.
+        {
+            auto& ts = audio.tracker().stats();
+            char trk[512];
+            snprintf(trk, sizeof(trk),
+                R"(,"tracker_enabled":%s,"tracker_state":%d,"tracker_spk_id":%d,"tracker_spk_sim":%.3f)"
+                R"(,"tracker_spk_name":"%s","tracker_confidence":%d,"tracker_spk_count":%d)"
+                R"(,"tracker_timeline_len":%d,"tracker_switches":%d)"
+                R"(,"tracker_f0_hz":%.1f,"tracker_f0_jitter":%.3f)"
+                R"(,"tracker_sim_to_ref":%.3f,"tracker_sim_avg":%.3f)"
+                R"(,"tracker_check_active":%s,"tracker_check_lat_ms":%.1f)"
+                R"(,"tracker_interval_ms":%d,"tracker_window_ms":%d,"tracker_threshold":%.2f)",
+                ts.enabled ? "true" : "false",
+                static_cast<int>(ts.state),
+                ts.speaker_id, ts.speaker_sim,
+                ts.speaker_name,
+                static_cast<int>(ts.confidence),
+                ts.speaker_count,
+                ts.timeline_len, ts.switches,
+                ts.f0_hz, ts.f0_jitter,
+                ts.sim_to_ref, ts.sim_running_avg,
+                ts.check_active ? "true" : "false",
+                ts.check_lat_ms,
+                audio.tracker().interval_ms(),
+                audio.tracker().window_ms(),
+                audio.tracker().threshold());
+            full_json += trk;
+
+            if (ts.reg_event) {
+                char reg[128];
+                snprintf(reg, sizeof(reg),
+                    R"(,"tracker_reg_event":true,"tracker_reg_id":%d,"tracker_reg_name":"%s")",
+                    ts.reg_id, ts.reg_name);
+                full_json += reg;
+            }
+
+            // Tracker speaker list.
+            full_json += R"(,"tracker_speakers":)" + speaker_list_json(audio.tracker().db());
         }
 
         full_json += lists_json;
@@ -2110,6 +2171,16 @@ int cmd_test_ws(const std::string& webui_dir,
                 R"({"type":"wlecapa_threshold","value":%.2f})", t);
             server.send_text(fd, json);
             printf("[test-ws] WL-ECAPA threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("wlecapa_margin:", 0) == 0) {
+            float m = std::strtof(msg.c_str() + 15, nullptr);
+            if (m < 0.0f) m = 0.0f;
+            if (m > 0.5f) m = 0.5f;
+            audio.wlecapa_db().set_min_margin(m);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"wlecapa_margin","value":%.2f})", m);
+            server.send_text(fd, json);
+            printf("[test-ws] WL-ECAPA margin = %.2f (fd=%d)\n", m, fd);
         } else if (msg.rfind("early_trigger:", 0) == 0) {
             float s = std::strtof(msg.c_str() + 14, nullptr);
             if (s < 0.5f) s = 0.5f;
@@ -2178,6 +2249,72 @@ int cmd_test_ws(const std::string& webui_dir,
                     dst, src, ok ? "true" : "false");
                 server.send_text(fd, json);
                 printf("[test-ws] WL-ECAPA merge #%d←#%d %s (fd=%d)\n", dst, src, ok ? "OK" : "FAIL", fd);
+            }
+        // ── SpeakerTracker controls ──
+        } else if (msg == "tracker_enable:on" || msg == "tracker_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.tracker().set_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"tracker_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] Tracker %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg.rfind("tracker_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 18, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.tracker().set_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"tracker_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] Tracker threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("tracker_change_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 24, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.tracker().set_change_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"tracker_change_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] Tracker change threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("tracker_interval:", 0) == 0) {
+            int ms = std::stoi(msg.substr(17));
+            if (ms < 250) ms = 250;
+            if (ms > 5000) ms = 5000;
+            audio.tracker().set_interval_ms(ms);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"tracker_interval","value":%d})", ms);
+            server.send_text(fd, json);
+            printf("[test-ws] Tracker interval = %d ms (fd=%d)\n", ms, fd);
+        } else if (msg.rfind("tracker_window:", 0) == 0) {
+            int ms = std::stoi(msg.substr(15));
+            if (ms < 500) ms = 500;
+            if (ms > 5000) ms = 5000;
+            audio.tracker().set_window_ms(ms);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"tracker_window","value":%d})", ms);
+            server.send_text(fd, json);
+            printf("[test-ws] Tracker window = %d ms (fd=%d)\n", ms, fd);
+        } else if (msg == "tracker_clear") {
+            audio.tracker().clear();
+            server.send_text(fd, R"({"type":"tracker_clear"})");
+            printf("[test-ws] Tracker DB cleared (fd=%d)\n", fd);
+        } else if (msg.rfind("tracker_name:", 0) == 0) {
+            auto rest = msg.substr(13);
+            auto colon = rest.find(':');
+            if (colon != std::string::npos) {
+                int id = std::stoi(rest.substr(0, colon));
+                std::string name = rest.substr(colon + 1);
+                audio.tracker().set_speaker_name(id, name);
+                char json[256];
+                snprintf(json, sizeof(json),
+                    R"({"type":"tracker_name","id":%d,"name":"%s"})", id, name.c_str());
+                server.send_text(fd, json);
+                printf("[test-ws] Tracker Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
             }
         } else if (msg == "asr_enable:on" || msg == "asr_enable:off") {
             bool on = msg.back() == 'n';
@@ -2263,6 +2400,30 @@ int cmd_test_ws(const std::string& webui_dir,
                     snprintf(json, sizeof(json),
                         R"({"type":"asr_param","key":"speech_ratio","value":%.2f})",
                         audio.asr_min_speech_ratio());
+                } else if (key == "adaptive_silence") {
+                    bool v = (val == "true" || val == "1" || val == "on");
+                    audio.set_asr_adaptive_silence(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"adaptive_silence","value":%s})",
+                        audio.asr_adaptive_silence() ? "true" : "false");
+                } else if (key == "adaptive_short_ms") {
+                    int v = std::stoi(val);
+                    audio.set_asr_adaptive_short_ms(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"adaptive_short_ms","value":%d})",
+                        audio.asr_adaptive_short_ms());
+                } else if (key == "adaptive_long_ms") {
+                    int v = std::stoi(val);
+                    audio.set_asr_adaptive_long_ms(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"adaptive_long_ms","value":%d})",
+                        audio.asr_adaptive_long_ms());
+                } else if (key == "adaptive_vlong_ms") {
+                    int v = std::stoi(val);
+                    audio.set_asr_adaptive_vlong_ms(v);
+                    snprintf(json, sizeof(json),
+                        R"({"type":"asr_param","key":"adaptive_vlong_ms","value":%d})",
+                        audio.asr_adaptive_vlong_ms());
                 } else {
                     snprintf(json, sizeof(json),
                         R"({"type":"asr_param","key":"%s","error":"unknown"})",

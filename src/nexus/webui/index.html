@@ -172,6 +172,12 @@
                     <input type="range" id="wlecapa-threshold" class="vad-threshold-slider"
                            min="0.30" max="0.80" step="0.01" value="0.55">
                 </div>
+                <div class="spk-thresh-row">
+                    <label class="spk-thresh-label">Margin
+                        <strong id="wlecapa-margin-val">0.08</strong></label>
+                    <input type="range" id="wlecapa-margin" class="vad-threshold-slider"
+                           min="0.00" max="0.30" step="0.01" value="0.08">
+                </div>
                 <div class="spk-thresh-divider"></div>
                 <div class="spk-thresh-row">
                     <label class="spk-thresh-label">
@@ -195,6 +201,9 @@
         </section>
 
         <section class="panel speaker-debug-panel" aria-label="Speaker Debug" id="speaker-debug">
+        </section>
+
+        <section class="panel tracker-panel" aria-label="Speaker Tracker" id="tracker-panel">
         </section>
 
         <section class="panel asr-panel" aria-label="ASR" id="asr-panel">
