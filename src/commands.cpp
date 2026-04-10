@@ -1506,7 +1506,8 @@ int cmd_test_ws(const std::string& webui_dir,
                                 const std::string& speaker_source,
                                 const std::string& trigger_reason,
                                 int tracker_id, const std::string& tracker_name,
-                                float tracker_sim) {
+                                float tracker_sim,
+                                float stream_start_sec, float stream_end_sec) {
         std::string escaped = json_escape(result.text);
         std::string spk_escaped = json_escape(speaker_name);
         std::string trk_escaped = json_escape(tracker_name);
@@ -1514,11 +1515,13 @@ int cmd_test_ws(const std::string& webui_dir,
         char json[2048];
         snprintf(json, sizeof(json),
             R"({"type":"asr_transcript","text":"%s","latency_ms":%.1f,"audio_sec":%.2f,)"
+            R"("stream_start_sec":%.2f,"stream_end_sec":%.2f,)"
             R"("mel_ms":%.1f,"encoder_ms":%.1f,"decode_ms":%.1f,"tokens":%d,"mel_frames":%d,)"
             R"("speaker_id":%d,"speaker_name":"%s","speaker_sim":%.3f,"speaker_confidence":%.3f,"speaker_source":"%s",)"
             R"("trigger":"%s",)"
             R"("tracker_id":%d,"tracker_name":"%s","tracker_sim":%.3f})",
             escaped.c_str(), result.total_ms, audio_sec,
+            stream_start_sec, stream_end_sec,
             result.mel_ms, result.encoder_ms, result.decode_ms,
             result.token_count, result.mel_frames,
             speaker_id, spk_escaped.c_str(), speaker_sim, speaker_confidence, src_escaped.c_str(),

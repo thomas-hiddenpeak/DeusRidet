@@ -227,7 +227,8 @@ void AudioPipeline::asr_loop() {
                                                  job.speaker_sim, job.speaker_confidence,
                                                  job.speaker_source, job.trigger_reason,
                                                  job.tracker_id, job.tracker_name,
-                                                 job.tracker_sim);
+                                                 job.tracker_sim,
+                                                 job.stream_start_sec, job.stream_end_sec);
         } else {
             LOG_INFO("AudioPipe", "ASR: (empty) (%.1fms, %.2fs audio)",
                      result.total_ms, job.audio_duration_sec);
@@ -1141,6 +1142,8 @@ void AudioPipeline::process_loop() {
                         job.audio_duration_sec = pre_duration;
                         job.trigger_reason = "spk_change";
                         job.is_partial = false;
+                        job.stream_start_sec = asr_audio_start / 16000.0f;
+                        job.stream_end_sec   = asr_audio_end / 16000.0f;
                         job.speaker_id = spk_id;
                         job.speaker_name = std::move(spk_name);
                         job.speaker_sim = spk_sim;
@@ -1296,6 +1299,8 @@ void AudioPipeline::process_loop() {
                         job.audio_duration_sec = trimmed_duration;
                         job.trigger_reason = trigger_reason;
                         job.is_partial = false;
+                        job.stream_start_sec = asr_audio_start / 16000.0f;
+                        job.stream_end_sec   = asr_audio_end / 16000.0f;
                         job.speaker_id = spk_id;
                         job.speaker_name = std::move(spk_name);
                         job.speaker_sim = spk_sim;

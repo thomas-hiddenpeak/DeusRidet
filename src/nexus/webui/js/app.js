@@ -12,6 +12,7 @@ import { ConsciousnessPanel } from './components/consciousness-panel.js';
 import { TextOutputPanel } from './components/text-output-panel.js';
 import { ConfigPanel } from './components/config-panel.js';
 import { TrackerPanel } from './components/tracker-panel.js';
+import { TimelinePanel } from './components/timeline-panel.js';
 import { spkColor } from './utils/speaker-colors.js';
 
 // --- Log utility ---
@@ -55,6 +56,7 @@ ws.onText = (msg) => {
             speakerDebug.onPipelineStats(obj);
             asrPanel.onPipelineStats(obj);
             trackerPanel.onPipelineStats(obj);
+            timelinePanel.onPipelineStats(obj);
             return;
         }
         if (obj.type === 'vad') {
@@ -77,6 +79,7 @@ ws.onText = (msg) => {
             asrTranscriptPanel.onTranscript(obj);
             asrLogPanel.onTranscript(obj);
             textOutputPanel.onAsrTranscript(obj);
+            timelinePanel.onTranscript(obj);
             log(`ASR: "${obj.text}" (${obj.latency_ms.toFixed(0)}ms, ${obj.audio_sec.toFixed(1)}s)`);
             return;
         }
@@ -173,6 +176,7 @@ const consciousnessPanel = new ConsciousnessPanel(ws);
 const textOutputPanel = new TextOutputPanel(ws);
 const configPanel = new ConfigPanel(ws);
 const trackerPanel = new TrackerPanel(ws);
+const timelinePanel = new TimelinePanel();
 
 // --- VAD source selector ---
 const vadSourceSelect = document.getElementById('vad-source-select');

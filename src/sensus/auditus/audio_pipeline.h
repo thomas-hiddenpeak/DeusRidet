@@ -577,7 +577,8 @@ public:
                                              const std::string& speaker_source,
                                              const std::string& trigger_reason,
                                              int tracker_id, const std::string& tracker_name,
-                                             float tracker_sim)>;
+                                             float tracker_sim,
+                                             float stream_start_sec, float stream_end_sec)>;
     using OnAsrLog = std::function<void(const std::string& json)>;
     using OnAsrPartial = std::function<void(const std::string& text, float audio_sec)>;
 
@@ -898,6 +899,9 @@ private:
         float audio_duration_sec;
         std::string trigger_reason;     // "post_silence" or "buffer_full" or "streaming_partial"
         bool is_partial = false;        // streaming partial — don't count as final transcript
+        // Stream position (absolute time from start of audio stream, in seconds).
+        float stream_start_sec = 0.0f;  // start of this segment in stream time
+        float stream_end_sec   = 0.0f;  // end of this segment in stream time
         // Speaker identification from timeline fusion.
         int speaker_id = -1;            // resolved speaker ID (-1 = unknown)
         std::string speaker_name;       // resolved speaker name

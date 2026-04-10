@@ -46,13 +46,12 @@ body {
     display: grid;
     grid-template-columns: 1fr;
     gap: var(--sp-md);
-    padding: var(--sp-lg);
-    max-width: 1600px;
+    padding: var(--sp-md);
 }
 
 @media (min-width: 768px) {
     .app-main {
-        grid-template-columns: 1fr 1fr 1fr;
+        grid-template-columns: repeat(4, 1fr);
     }
 }
 
@@ -251,6 +250,9 @@ body {
 
 @media (min-width: 768px) {
     .log-panel {
+        grid-column: 1 / -1;
+    }
+    .timeline-panel {
         grid-column: 1 / -1;
     }
 }
@@ -1608,5 +1610,86 @@ body {
 .cfg-slider {
     width: 100%;
     cursor: pointer;
+}
+
+/* ============ Timeline Panel ============ */
+.timeline-panel {
+    position: relative;
+}
+
+.tl-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-sm);
+    margin-bottom: var(--sp-sm);
+}
+
+.tl-range,
+.tl-count {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--clr-text-dim);
+}
+
+.tl-canvas-wrap {
+    width: 100%;
+    overflow: hidden;
+    border-radius: var(--radius);
+    background: var(--clr-bg);
+    border: 1px solid var(--clr-border);
+}
+
+.tl-canvas {
+    display: block;
+    width: 100%;
+    cursor: grab;
+}
+
+.tl-canvas:active {
+    cursor: grabbing;
+}
+
+.tl-tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: rgba(22, 27, 34, 0.95);
+    border: 1px solid var(--clr-border);
+    border-radius: var(--radius);
+    padding: var(--sp-xs) var(--sp-sm);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--clr-text);
+    line-height: 1.5;
+    max-width: 420px;
+    z-index: 100;
+    white-space: nowrap;
+}
+
+.tl-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sp-sm) var(--sp-md);
+    margin-top: var(--sp-xs);
+    font-size: 11px;
+    color: var(--clr-text-dim);
+}
+
+.tl-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.tl-legend-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+}
+
+.btn--sm {
+    font-size: 12px;
+    padding: 2px 10px;
+    min-width: 32px;
 }
 
