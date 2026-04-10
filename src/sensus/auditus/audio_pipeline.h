@@ -181,6 +181,8 @@ public:
 
     // Resolve the best speaker label for a given audio sample range.
     // Uses weighted majority voting with overlap-proportional weighting.
+    // If no events overlap the query range, performs context fill:
+    // finds the nearest event before and after — if they agree on speaker, fills.
     ResolvedSpeaker resolve(int64_t start_sample, int64_t end_sample) const {
         if (count_ == 0 || end_sample <= start_sample)
             return {};
@@ -203,6 +205,20 @@ public:
         char  best_name[kMaxSpk][64] = {};
         SpkEventSource best_source[kMaxSpk] = {};
         float best_source_weight[kMaxSpk] = {};
+        bool any_overlap = false;
+
+        // Also track nearest non-overlapping events for context fill.
+        int64_t nearest_before_dist = INT64_MAX;
+        int     nearest_before_spk  = -1;
+        float   nearest_before_sim  = 0.0f;
+        char    nearest_before_name[64] = {};
+        SpkEventSource nearest_before_src = SpkEventSource::SAAS_EARLY;
+
+        int64_t nearest_after_dist  = INT64_MAX;
+        int     nearest_after_spk   = -1;
+        float   nearest_after_sim   = 0.0f;
+        char    nearest_after_name[64] = {};
+        SpkEventSource nearest_after_src = SpkEventSource::SAAS_EARLY;
 
         int start_idx = (count_ < kMaxEvents) ? 0 : write_pos_;
         for (int i = 0; i < count_; ++i) {
@@ -213,43 +229,117 @@ public:
             // Compute overlap between event range and query range.
             int64_t ov_start = std::max(ev.audio_start, start_sample);
             int64_t ov_end   = std::min(ev.audio_end, end_sample);
-            if (ov_end <= ov_start) continue;
+            if (ov_end > ov_start) {
+                any_overlap = true;
+                float overlap_frac = (float)(ov_end - ov_start) / (float)query_len;
+                float w = kWeights[static_cast<int>(ev.source)] * overlap_frac;
+                votes[ev.speaker_id] += w;
 
-            float overlap_frac = (float)(ov_end - ov_start) / (float)query_len;
-            float w = kWeights[static_cast<int>(ev.source)] * overlap_frac;
-            votes[ev.speaker_id] += w;
-
-            // Track best similarity per speaker (prefer highest-authority source).
-            float sw = kWeights[static_cast<int>(ev.source)];
-            if (sw > best_source_weight[ev.speaker_id] ||
-                (sw == best_source_weight[ev.speaker_id] &&
-                 ev.similarity > best_sim[ev.speaker_id])) {
-                best_sim[ev.speaker_id] = ev.similarity;
-                memcpy(best_name[ev.speaker_id], ev.name, 64);
-                best_source[ev.speaker_id] = ev.source;
-                best_source_weight[ev.speaker_id] = sw;
+                // Track best similarity per speaker (prefer highest-authority source).
+                float sw = kWeights[static_cast<int>(ev.source)];
+                if (sw > best_source_weight[ev.speaker_id] ||
+                    (sw == best_source_weight[ev.speaker_id] &&
+                     ev.similarity > best_sim[ev.speaker_id])) {
+                    best_sim[ev.speaker_id] = ev.similarity;
+                    memcpy(best_name[ev.speaker_id], ev.name, 64);
+                    best_source[ev.speaker_id] = ev.source;
+                    best_source_weight[ev.speaker_id] = sw;
+                }
+            } else {
+                // No overlap — track nearest events for context fill.
+                if (ev.audio_end <= start_sample) {
+                    int64_t dist = start_sample - ev.audio_end;
+                    if (dist < nearest_before_dist) {
+                        nearest_before_dist = dist;
+                        nearest_before_spk  = ev.speaker_id;
+                        nearest_before_sim  = ev.similarity;
+                        memcpy(nearest_before_name, ev.name, 64);
+                        nearest_before_src  = ev.source;
+                    }
+                } else if (ev.audio_start >= end_sample) {
+                    int64_t dist = ev.audio_start - end_sample;
+                    if (dist < nearest_after_dist) {
+                        nearest_after_dist = dist;
+                        nearest_after_spk  = ev.speaker_id;
+                        nearest_after_sim  = ev.similarity;
+                        memcpy(nearest_after_name, ev.name, 64);
+                        nearest_after_src  = ev.source;
+                    }
+                }
             }
         }
 
-        // Find speaker with highest vote.
-        int best_id = -1;
-        float best_vote = 0.0f;
-        for (int i = 0; i < kMaxSpk; ++i) {
-            if (votes[i] > best_vote) {
-                best_vote = votes[i];
-                best_id = i;
+        if (any_overlap) {
+            // Find speaker with highest vote.
+            int best_id = -1;
+            float best_vote = 0.0f;
+            for (int i = 0; i < kMaxSpk; ++i) {
+                if (votes[i] > best_vote) {
+                    best_vote = votes[i];
+                    best_id = i;
+                }
             }
+
+            if (best_id < 0) return {};
+
+            ResolvedSpeaker result;
+            result.speaker_id = best_id;
+            result.confidence = best_vote;
+            result.similarity = best_sim[best_id];
+            memcpy(result.name, best_name[best_id], 64);
+            result.source = best_source[best_id];
+            return result;
         }
 
-        if (best_id < 0) return {};
+        // Context fill: no overlapping events. Check nearest before/after.
+        // If both agree on same speaker AND gap is < 5s (80000 samples), fill.
+        // If only one side has a result within 3s (48000 samples), use it.
+        static constexpr int64_t kFillBothMaxGap  = 80000;  // 5s
+        static constexpr int64_t kFillSingleMaxGap = 48000;  // 3s
 
-        ResolvedSpeaker result;
-        result.speaker_id = best_id;
-        result.confidence = best_vote;
-        result.similarity = best_sim[best_id];
-        memcpy(result.name, best_name[best_id], 64);
-        result.source = best_source[best_id];
-        return result;
+        if (nearest_before_spk >= 0 && nearest_after_spk >= 0 &&
+            nearest_before_spk == nearest_after_spk &&
+            nearest_before_dist + nearest_after_dist < kFillBothMaxGap) {
+            // Both neighbors agree — high confidence context fill.
+            ResolvedSpeaker result;
+            result.speaker_id = nearest_before_spk;
+            result.confidence = 0.35f;  // lower confidence for context fill
+            // Use the higher-authority source's similarity.
+            float sw_b = kWeights[static_cast<int>(nearest_before_src)];
+            float sw_a = kWeights[static_cast<int>(nearest_after_src)];
+            if (sw_b >= sw_a) {
+                result.similarity = nearest_before_sim;
+                memcpy(result.name, nearest_before_name, 64);
+                result.source = nearest_before_src;
+            } else {
+                result.similarity = nearest_after_sim;
+                memcpy(result.name, nearest_after_name, 64);
+                result.source = nearest_after_src;
+            }
+            return result;
+        }
+
+        // Single-side fill: only one neighbor within 3s.
+        if (nearest_before_spk >= 0 && nearest_before_dist < kFillSingleMaxGap) {
+            ResolvedSpeaker result;
+            result.speaker_id = nearest_before_spk;
+            result.confidence = 0.20f;  // low confidence single-side fill
+            result.similarity = nearest_before_sim;
+            memcpy(result.name, nearest_before_name, 64);
+            result.source = nearest_before_src;
+            return result;
+        }
+        if (nearest_after_spk >= 0 && nearest_after_dist < kFillSingleMaxGap) {
+            ResolvedSpeaker result;
+            result.speaker_id = nearest_after_spk;
+            result.confidence = 0.15f;  // lowest confidence
+            result.similarity = nearest_after_sim;
+            memcpy(result.name, nearest_after_name, 64);
+            result.source = nearest_after_src;
+            return result;
+        }
+
+        return {};
     }
 
     int event_count() const { return count_; }
@@ -483,7 +573,8 @@ public:
     using OnSpeaker   = std::function<void(const SpeakerMatch&)>;
     using OnTranscript = std::function<void(const asr::ASRResult& result, float audio_sec,
                                              int speaker_id, const std::string& speaker_name,
-                                             float speaker_sim,
+                                             float speaker_sim, float speaker_confidence,
+                                             const std::string& speaker_source,
                                              const std::string& trigger_reason,
                                              int tracker_id, const std::string& tracker_name,
                                              float tracker_sim)>;
@@ -807,10 +898,12 @@ private:
         float audio_duration_sec;
         std::string trigger_reason;     // "post_silence" or "buffer_full" or "streaming_partial"
         bool is_partial = false;        // streaming partial — don't count as final transcript
-        // Speaker identification snapshot captured at trigger time (SAAS pipeline).
-        int speaker_id = -1;            // wlecapa speaker ID (-1 = unknown)
-        std::string speaker_name;       // wlecapa speaker name (empty = unnamed)
-        float speaker_sim = 0.0f;       // wlecapa cosine similarity
+        // Speaker identification from timeline fusion.
+        int speaker_id = -1;            // resolved speaker ID (-1 = unknown)
+        std::string speaker_name;       // resolved speaker name
+        float speaker_sim = 0.0f;       // similarity from best-authority source
+        float speaker_confidence = 0.0f; // timeline fusion confidence (weighted vote)
+        std::string speaker_source;      // source name ("SAAS_FULL", "TRACKER", etc.)
         // SpeakerTracker snapshot (independent pipeline for A/B comparison).
         int tracker_id = -1;
         std::string tracker_name;

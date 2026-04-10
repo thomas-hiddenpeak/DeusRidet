@@ -1502,29 +1502,33 @@ int cmd_test_ws(const std::string& webui_dir,
     // ASR transcript callback (called from ASR worker thread).
     audio.set_on_transcript([&](const deusridet::asr::ASRResult& result, float audio_sec,
                                 int speaker_id, const std::string& speaker_name,
-                                float speaker_sim, const std::string& trigger_reason,
+                                float speaker_sim, float speaker_confidence,
+                                const std::string& speaker_source,
+                                const std::string& trigger_reason,
                                 int tracker_id, const std::string& tracker_name,
                                 float tracker_sim) {
         std::string escaped = json_escape(result.text);
         std::string spk_escaped = json_escape(speaker_name);
         std::string trk_escaped = json_escape(tracker_name);
+        std::string src_escaped = json_escape(speaker_source);
         char json[2048];
         snprintf(json, sizeof(json),
             R"({"type":"asr_transcript","text":"%s","latency_ms":%.1f,"audio_sec":%.2f,)"
             R"("mel_ms":%.1f,"encoder_ms":%.1f,"decode_ms":%.1f,"tokens":%d,"mel_frames":%d,)"
-            R"("speaker_id":%d,"speaker_name":"%s","speaker_sim":%.3f,"trigger":"%s",)"
+            R"("speaker_id":%d,"speaker_name":"%s","speaker_sim":%.3f,"speaker_confidence":%.3f,"speaker_source":"%s",)"
+            R"("trigger":"%s",)"
             R"("tracker_id":%d,"tracker_name":"%s","tracker_sim":%.3f})",
             escaped.c_str(), result.total_ms, audio_sec,
             result.mel_ms, result.encoder_ms, result.decode_ms,
             result.token_count, result.mel_frames,
-            speaker_id, spk_escaped.c_str(), speaker_sim,
+            speaker_id, spk_escaped.c_str(), speaker_sim, speaker_confidence, src_escaped.c_str(),
             trigger_reason.c_str(),
             tracker_id, trk_escaped.c_str(), tracker_sim);
         server.broadcast_text(json);
         if (speaker_id >= 0)
-            printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s | trk=%d %s]\n",
+            printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s conf=%.2f src=%s | trk=%d %s]\n",
                    result.text.c_str(), result.total_ms, audio_sec,
-                   speaker_id, speaker_name.c_str(),
+                   speaker_id, speaker_name.c_str(), speaker_confidence, speaker_source.c_str(),
                    tracker_id, tracker_name.c_str());
         else
             printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [trk=%d %s]\n",

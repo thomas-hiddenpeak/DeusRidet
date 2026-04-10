@@ -47,6 +47,8 @@ export class AsrTranscriptPanel {
             speaker_id: obj.speaker_id ?? -1,
             speaker_name: obj.speaker_name || '',
             speaker_sim: obj.speaker_sim || 0,
+            speaker_confidence: obj.speaker_confidence || 0,
+            speaker_source: obj.speaker_source || '',
             tracker_id: obj.tracker_id ?? -1,
             tracker_name: obj.tracker_name || '',
             tracker_sim: obj.tracker_sim || 0,
@@ -126,14 +128,18 @@ export class AsrTranscriptPanel {
         const latClass = entry.latency_ms > 5000 ? 'asr-tx-val--danger' :
                          entry.latency_ms > 2000 ? 'asr-tx-val--warn' : '';
 
-        // SAAS speaker badge
+        // SAAS speaker badge — includes source indicator for timeline fusion.
         const spkColor = this._getSpeakerColor(entry.speaker_id);
         const spkLabel = entry.speaker_id >= 0
             ? (entry.speaker_name || `S${entry.speaker_id}`)
             : '?';
+        // Source abbreviation for badge superscript.
+        const srcMap = {SAAS_FULL:'F', SAAS_EARLY:'E', SAAS_CHANGE:'C', SAAS_INHERIT:'I', TRACKER:'T', SNAPSHOT:'S'};
+        const srcAbbr = srcMap[entry.speaker_source] || '';
+        const confPct = (entry.speaker_confidence * 100).toFixed(0);
         const spkTitle = entry.speaker_id >= 0
-            ? `SAAS Speaker ${entry.speaker_id}: ${entry.speaker_name || '(unnamed)'} (sim=${entry.speaker_sim.toFixed(3)})`
-            : 'SAAS: Unknown speaker';
+            ? `Speaker ${entry.speaker_id}: ${entry.speaker_name || '(unnamed)'} (sim=${entry.speaker_sim.toFixed(3)}, conf=${confPct}%, src=${entry.speaker_source})`
+            : 'Unknown speaker';
 
         // Tracker speaker badge
         const trkColor = this._getSpeakerColor(entry.tracker_id, true);
@@ -146,7 +152,7 @@ export class AsrTranscriptPanel {
 
         row.innerHTML = `
             <span class="asr-tx-ts">${entry.ts}</span>
-            <span class="asr-tx-speaker" style="--spk-color:${spkColor}" title="${spkTitle}">${this._esc(spkLabel)}</span>
+            <span class="asr-tx-speaker" style="--spk-color:${spkColor}" title="${spkTitle}">${this._esc(spkLabel)}${srcAbbr ? `<sup>${srcAbbr}</sup>` : ''}</span>
             <span class="asr-tx-speaker asr-tx-speaker--trk" style="--spk-color:${trkColor}" title="${trkTitle}">${this._esc(trkLabel)}</span>
             <span class="asr-tx-text">${this._esc(entry.text)}</span>
             <span class="asr-tx-meta">
