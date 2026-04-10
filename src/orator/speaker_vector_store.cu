@@ -550,10 +550,11 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
             // Margin is only used during registration (below) to prevent
             // creating a new speaker that's too close to an existing one.
 
-            // Clear any pending slots (a match resets registration attempts).
-            for (int s = 0; s < kMaxPending; s++)
-                pending_slots_[s].active = false;
-            has_pending_ = false;
+            // DO NOT clear pending slots on match. Pending slots hold evidence
+            // for unknown speakers that haven't been confirmed yet. Clearing
+            // them on every match destroys that evidence, making it nearly
+            // impossible to register new speakers in active conversations
+            // where matches are frequent.
 
             // Count how many exemplars exceeded threshold for this speaker.
             best.hits_above     = count_hits_above(sr.spk_idx, threshold);
@@ -565,9 +566,35 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
             // borderline matches from contaminating the speaker profile.
             auto& spk = speakers_[sr.spk_idx];
             float div = min_diversity(sr.spk_idx);
-            float admit_thresh = threshold + kExemplarAdmitMargin;
 
-            if (best.similarity >= admit_thresh && div >= kDiversityThresh) {
+            // Dynamic admission margin: stricter when exemplar set is small
+            // (early exemplars define the speaker's cluster center and must
+            // be high-quality to prevent cross-speaker contamination).
+            float admit_margin = kExemplarAdmitMargin;  // default 0.10
+            if (spk.exemplar_count < 5)
+                admit_margin = 0.20f;  // very strict early on
+            else if (spk.exemplar_count < 10)
+                admit_margin = 0.15f;  // moderate
+            float admit_thresh = threshold + admit_margin;
+
+            // Hit-ratio gate: when we have enough exemplars, require that
+            // a meaningful fraction actually matched (not just the closest one).
+            // Prevents cross-speaker contamination where a different speaker's
+            // embedding happens to match 1-2 outlier exemplars but misses most.
+            bool hit_ratio_ok = true;
+            if (spk.exemplar_count >= 5) {
+                float hit_ratio = (float)best.hits_above / spk.exemplar_count;
+                if (hit_ratio < 0.3f) {
+                    hit_ratio_ok = false;
+                    LOG_INFO(label_.c_str(),
+                             "Exemplar blocked by hit-ratio for #%d: "
+                             "hits=%d/%d (%.1f%%) < 30%%",
+                             spk.external_id, best.hits_above,
+                             spk.exemplar_count, hit_ratio * 100.0f);
+                }
+            }
+
+            if (best.similarity >= admit_thresh && div >= kDiversityThresh && hit_ratio_ok) {
                 // This embedding is sufficiently different from all existing exemplars.
                 if (spk.exemplar_count < max_exemplars_) {
                     // Room available — add directly.
@@ -673,11 +700,13 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
             if (pending_slots_[s].active) { has_pending_ = true; break; }
 
         LOG_INFO(label_.c_str(),
-                 "Confirmed new speaker id=%d (pending_sim=%.3f, slot=%d, pool=[%d,%d,%d])",
+                 "Confirmed new speaker id=%d (pending_sim=%.3f, slot=%d, pool=[%d,%d,%d,%d,%d])",
                  speakers_.back().external_id, pending_sim, matched_slot,
                  (int)pending_slots_[0].active,
                  (int)pending_slots_[1].active,
-                 (int)pending_slots_[2].active);
+                 (int)pending_slots_[2].active,
+                 (int)pending_slots_[3].active,
+                 (int)pending_slots_[4].active);
 
         best.speaker_id = speakers_.back().external_id;
         best.similarity = 1.0f;
@@ -718,11 +747,13 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
     has_pending_ = true;
 
     LOG_INFO(label_.c_str(),
-             "Pending new speaker in slot %d (pool=[%d,%d,%d], miss_seq=%d)",
+             "Pending new speaker in slot %d (pool=[%d,%d,%d,%d,%d], miss_seq=%d)",
              target_slot,
              (int)pending_slots_[0].active,
              (int)pending_slots_[1].active,
              (int)pending_slots_[2].active,
+             (int)pending_slots_[3].active,
+             (int)pending_slots_[4].active,
              pending_miss_seq_);
 
     best.speaker_id = -1;

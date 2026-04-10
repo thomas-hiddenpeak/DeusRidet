@@ -172,7 +172,9 @@ private:
     GpuSearchResult* d_result_ = nullptr;  // single-element result
 
     // Multi-pending pool: up to kMaxPending slots for simultaneous unknown candidates.
-    static constexpr int kMaxPending = 3;
+    // 5 slots provide enough room for evidence accumulation in active conversations
+    // where frequent matches previously wiped pending evidence.
+    static constexpr int kMaxPending = 5;
     float* d_pending_pool_ = nullptr;  // [kMaxPending × dim_], GPU embeddings
 
     // ---- Pinned host buffer for result readback ----
