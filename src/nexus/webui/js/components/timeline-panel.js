@@ -42,12 +42,18 @@ export class TimelinePanel {
         this.vadIntervals  = [];  // {start, end}
         this.asrSegments   = [];  // {start, end, text, trigger, latency, ...}
         this.saasSegments  = [];  // {start, end, spkId, spkName, spkSim, spkConf, spkSrc}
-        this.trackerSegs   = [];  // {start, end, trkId, trkName, trkSim}
+        this.trackerSpans  = [];  // {start, end, trkId, trkName, state, sim}
+        this.trackerEvents = [];  // {time, type, oldId, newId, name, sim, state}
         this.maxEntries    = 800;
         // VAD state tracking from pipeline_stats
         this._vadSpeech    = false;
         this._vadStart     = 0;
         this._lastStreamSec = 0;
+        // Tracker state tracking from pipeline_stats
+        this._trkPrevId    = -2;  // -2 = no data yet
+        this._trkPrevState = -1;
+        this._trkPrevSwitches = 0;
+        this._trkSpanStart = 0;
         // View
         this.pxPerSec      = DEFAULT_PX_SEC;
         this.autoScroll    = true;
@@ -79,6 +85,9 @@ export class TimelinePanel {
                 <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#d29922"></span>Change</span>
                 <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#8b949e"></span>Inherit</span>
                 <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#b48ead"></span>Tracker</span>
+                <span class="tl-legend-item"><span style="color:#e5534b;font-weight:bold">⬥</span> Spk Change</span>
+                <span class="tl-legend-item"><span style="color:#3fb950;font-weight:bold">▲</span> Register</span>
+                <span class="tl-legend-item"><span style="color:#d29922;font-weight:bold">✕</span> Overlap</span>
             </div>
         `;
         this.scrollEl  = this.el.querySelector('#tl-scroll');
@@ -153,6 +162,67 @@ export class TimelinePanel {
         }
         // Extend current speech interval visually
         if (this._vadSpeech) this._dirty = true;
+
+        // Track SpeakerTracker from pipeline_stats
+        if (obj.tracker_enabled && obj.tracker_check_active) {
+            const trkId    = obj.tracker_spk_id ?? -1;
+            const trkName  = obj.tracker_spk_name || '';
+            const trkState = obj.tracker_state ?? 0;
+            const trkSim   = obj.tracker_sim_to_ref || 0;
+            const switches = obj.tracker_switches || 0;
+
+            // Detect speaker change (switches increment or ID change)
+            if (this._trkPrevId !== -2) {
+                if (switches > this._trkPrevSwitches) {
+                    // Speaker change event
+                    this.trackerEvents.push({
+                        time: streamSec, type: 'change',
+                        oldId: this._trkPrevId, newId: trkId,
+                        name: trkName, sim: trkSim, state: trkState,
+                    });
+                    if (this.trackerEvents.length > this.maxEntries) this.trackerEvents.shift();
+                }
+                if (trkState === 3 && this._trkPrevState !== 3) {
+                    // OVERLAP start
+                    this.trackerEvents.push({
+                        time: streamSec, type: 'overlap',
+                        oldId: this._trkPrevId, newId: trkId,
+                        name: '', sim: trkSim, state: 3,
+                    });
+                    if (this.trackerEvents.length > this.maxEntries) this.trackerEvents.shift();
+                }
+            }
+
+            // Registration event
+            if (obj.tracker_reg_event) {
+                this.trackerEvents.push({
+                    time: streamSec, type: 'register',
+                    oldId: -1, newId: obj.tracker_reg_id ?? trkId,
+                    name: obj.tracker_reg_name || trkName, sim: trkSim, state: trkState,
+                });
+                if (this.trackerEvents.length > this.maxEntries) this.trackerEvents.shift();
+            }
+
+            // Build continuous spans — close old span on ID or state change
+            if (trkId !== this._trkPrevId || trkState !== this._trkPrevState) {
+                if (this._trkPrevId !== -2) {
+                    this.trackerSpans.push({
+                        start: this._trkSpanStart, end: streamSec,
+                        trkId: this._trkPrevId, trkName: this._trkPrevName || '',
+                        state: this._trkPrevState, sim: this._trkPrevSim || 0,
+                    });
+                    if (this.trackerSpans.length > this.maxEntries) this.trackerSpans.shift();
+                }
+                this._trkSpanStart = streamSec;
+            }
+
+            this._trkPrevId = trkId;
+            this._trkPrevName = trkName;
+            this._trkPrevState = trkState;
+            this._trkPrevSim = trkSim;
+            this._trkPrevSwitches = switches;
+            this._dirty = true;
+        }
     }
 
     onTranscript(obj) {
@@ -192,14 +262,8 @@ export class TimelinePanel {
         });
         if (this.saasSegments.length > this.maxEntries) this.saasSegments.shift();
 
-        // Tracker segment
-        this.trackerSegs.push({
-            start, end,
-            trkId:   obj.tracker_id ?? -1,
-            trkName: obj.tracker_name || '',
-            trkSim:  obj.tracker_sim || 0,
-        });
-        if (this.trackerSegs.length > this.maxEntries) this.trackerSegs.shift();
+        // (Tracker segments now come from pipeline_stats continuous tracking,
+        //  not from asr_transcript snapshots)
 
         this._dirty = true;
     }
@@ -425,21 +489,62 @@ export class TimelinePanel {
             }
         }
 
-        // ── Tracker lane ──
+        // ── Tracker lane (continuous spans from pipeline_stats) ──
         const trkY = lanes[3].y;
         const trkH = lanes[3].h;
-        for (const seg of this.trackerSegs) {
+
+        const STATE_NAMES = ['SIL', 'TRK', 'TRANS', 'OVLP', 'UNK'];
+        const STATE_ALPHA = [0.2, 0.55, 0.4, 0.5, 0.35];
+
+        // Draw completed spans
+        const allTrkSpans = [...this.trackerSpans];
+        // Add in-progress span
+        if (this._trkPrevId !== -2 && this._lastStreamSec > this._trkSpanStart) {
+            allTrkSpans.push({
+                start: this._trkSpanStart, end: this._lastStreamSec,
+                trkId: this._trkPrevId, trkName: this._trkPrevName || '',
+                state: this._trkPrevState, sim: this._trkPrevSim || 0,
+            });
+        }
+        for (const seg of allTrkSpans) {
             if (seg.end < tStart || seg.start > tEnd) continue;
             const px1 = Math.max(x0, tx(Math.max(seg.start, tStart)));
             const px2 = Math.min(W, tx(Math.min(seg.end, tEnd)));
             if (px2 - px1 < 1) continue;
 
+            const st = seg.state || 0;
             const color = seg.trkId >= 0 ? TRACKER_COLORS[seg.trkId % TRACKER_COLORS.length] : UNKNOWN_COLOR;
             c.fillStyle = color;
-            c.globalAlpha = 0.55;
+            c.globalAlpha = STATE_ALPHA[st] || 0.4;
             c.fillRect(px1, trkY + 1, px2 - px1, trkH - 2);
             c.globalAlpha = 1;
 
+            // OVERLAP: hatched overlay
+            if (st === 3) {
+                c.strokeStyle = '#e5534b';
+                c.lineWidth = 1;
+                c.globalAlpha = 0.6;
+                for (let hx = px1; hx < px2; hx += 6) {
+                    c.beginPath();
+                    c.moveTo(hx, trkY + 1);
+                    c.lineTo(hx + 3, trkY + trkH - 1);
+                    c.stroke();
+                }
+                c.globalAlpha = 1;
+            }
+            // UNKNOWN: dotted top border
+            if (st === 4) {
+                c.strokeStyle = '#d29922';
+                c.lineWidth = 1;
+                c.setLineDash([3, 3]);
+                c.beginPath();
+                c.moveTo(px1, trkY + 1);
+                c.lineTo(px2, trkY + 1);
+                c.stroke();
+                c.setLineDash([]);
+            }
+
+            // Label
             if (px2 - px1 > 24) {
                 c.save();
                 c.beginPath();
@@ -448,9 +553,55 @@ export class TimelinePanel {
                 c.fillStyle = '#fff';
                 c.font = '9px monospace';
                 c.textBaseline = 'middle';
-                const label = seg.trkName || (seg.trkId >= 0 ? `T${seg.trkId}` : '?');
-                c.fillText(label, px1 + 2, trkY + trkH / 2);
+                const name = seg.trkName || (seg.trkId >= 0 ? `T${seg.trkId}` : STATE_NAMES[st] || '?');
+                c.fillText(name, px1 + 2, trkY + trkH / 2);
                 c.restore();
+            }
+        }
+
+        // ── Tracker events (change markers, registration markers) ──
+        for (const ev of this.trackerEvents) {
+            if (ev.time < tStart || ev.time > tEnd) continue;
+            const px = tx(ev.time);
+
+            if (ev.type === 'change') {
+                // Vertical red line spanning all lanes for visibility
+                c.strokeStyle = '#e5534b';
+                c.lineWidth = 2;
+                c.globalAlpha = 0.8;
+                c.beginPath();
+                c.moveTo(px, trkY);
+                c.lineTo(px, trkY + trkH);
+                c.stroke();
+                c.globalAlpha = 1;
+                // Diamond marker
+                c.fillStyle = '#e5534b';
+                c.beginPath();
+                c.moveTo(px, trkY);
+                c.lineTo(px + 4, trkY + trkH / 2);
+                c.lineTo(px, trkY + trkH);
+                c.lineTo(px - 4, trkY + trkH / 2);
+                c.closePath();
+                c.fill();
+            } else if (ev.type === 'register') {
+                // Green triangle-up marker
+                c.fillStyle = '#3fb950';
+                c.beginPath();
+                c.moveTo(px, trkY + 1);
+                c.lineTo(px + 4, trkY + trkH - 1);
+                c.lineTo(px - 4, trkY + trkH - 1);
+                c.closePath();
+                c.fill();
+            } else if (ev.type === 'overlap') {
+                // Orange X marker
+                c.strokeStyle = '#d29922';
+                c.lineWidth = 2;
+                c.beginPath();
+                c.moveTo(px - 3, trkY + 2);
+                c.lineTo(px + 3, trkY + trkH - 2);
+                c.moveTo(px + 3, trkY + 2);
+                c.lineTo(px - 3, trkY + trkH - 2);
+                c.stroke();
             }
         }
     }
@@ -516,11 +667,30 @@ export class TimelinePanel {
                      + `Source: ${seg.spkSrc}`;
             }
         } else if (lane === 'tracker') {
-            const seg = this.trackerSegs.find(s => s.start <= timeSec && s.end >= timeSec);
-            if (seg) {
-                const name = seg.trkName || (seg.trkId >= 0 ? `T${seg.trkId}` : '?');
-                html = `<strong>Tracker</strong> ${seg.start.toFixed(1)}s – ${seg.end.toFixed(1)}s<br>`
-                     + `${this._esc(name)} (sim=${seg.trkSim.toFixed(3)})`;
+            // Check continuous tracker spans
+            const allSpans = [...this.trackerSpans];
+            if (this._trkPrevId !== -2 && this._lastStreamSec > this._trkSpanStart) {
+                allSpans.push({
+                    start: this._trkSpanStart, end: this._lastStreamSec,
+                    trkId: this._trkPrevId, trkName: this._trkPrevName || '',
+                    state: this._trkPrevState, sim: this._trkPrevSim || 0,
+                });
+            }
+            const span = allSpans.find(s => s.start <= timeSec && s.end >= timeSec);
+            const STATE_LABELS = ['SILENCE', 'TRACKING', 'TRANSITION', 'OVERLAP', 'UNKNOWN'];
+            if (span) {
+                const name = span.trkName || (span.trkId >= 0 ? `T${span.trkId}` : '?');
+                html = `<strong>Tracker</strong> ${span.start.toFixed(1)}s – ${span.end.toFixed(1)}s<br>`
+                     + `${this._esc(name)} (sim=${span.sim.toFixed(3)})<br>`
+                     + `State: ${STATE_LABELS[span.state] || span.state}`;
+            }
+            // Check for nearby events
+            const nearEv = this.trackerEvents.find(e => Math.abs(e.time - timeSec) < 0.5);
+            if (nearEv) {
+                const evLabels = { change: '⬥ SPK CHANGE', register: '▲ NEW SPEAKER', overlap: '✕ OVERLAP' };
+                html += `<br><span style="color:#e5534b">${evLabels[nearEv.type] || nearEv.type}</span>`;
+                if (nearEv.type === 'change') html += ` (${nearEv.oldId}→${nearEv.newId})`;
+                if (nearEv.name) html += ` ${this._esc(nearEv.name)}`;
             }
         }
 
