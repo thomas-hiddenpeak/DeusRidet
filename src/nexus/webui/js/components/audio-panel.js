@@ -222,7 +222,7 @@ export class AudioPanel {
                     channelCount: 1,
                     sampleRate: 16000,
                     // Disable browser audio processing to preserve speaker-specific
-                    // waveform characteristics needed by WavLM/UniSpeech encoders.
+                    // waveform characteristics needed by speaker encoders.
                     // AGC normalizes amplitude, noise suppression strips spectral
                     // detail, echo cancellation modifies the signal — all degrade
                     // speaker verification accuracy.

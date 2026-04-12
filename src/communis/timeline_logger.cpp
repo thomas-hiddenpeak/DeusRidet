@@ -9,7 +9,6 @@
 namespace deusridet {
 
 void TimelineLogger::log_stats(const AudioPipelineStats& st,
-                               const TrackerStats& ts,
                                 float wlecapa_margin,
                                 float change_sim, bool change_valid) {
     std::lock_guard<std::mutex> lk(mu_);
@@ -43,24 +42,7 @@ void TimelineLogger::log_stats(const AudioPipelineStats& st,
         }
     }
 
-    // Tracker.
-    if (ts.check_active) {
-        n += snprintf(buf + n, sizeof(buf) - n,
-            R"("trk_check":true,"trk_state":%d,"trk_id":%d,"trk_name":"%s",)"
-            R"("trk_sim":%.3f,"trk_avg":%.3f,"trk_conf":%d,)"
-            R"("trk_switches":%d,"trk_f0":%.1f,"trk_jitter":%.3f,)",
-            static_cast<int>(ts.state), ts.speaker_id, ts.speaker_name,
-            ts.sim_to_ref, ts.sim_running_avg,
-            static_cast<int>(ts.confidence),
-            ts.switches, ts.f0_hz, ts.f0_jitter);
-    }
 
-    // Tracker registration event.
-    if (ts.reg_event) {
-        n += snprintf(buf + n, sizeof(buf) - n,
-            R"("trk_reg":true,"trk_reg_id":%d,"trk_reg_name":"%s",)",
-            ts.reg_id, ts.reg_name);
-    }
 
     // ASR buffer state.
     n += snprintf(buf + n, sizeof(buf) - n,
@@ -84,8 +66,7 @@ void TimelineLogger::log_asr(const char* text, float stream_start, float stream_
                                float latency_ms, float audio_sec,
                                const char* trigger,
                                int spk_id, const char* spk_name, float spk_sim,
-                               float spk_conf, const char* spk_src,
-                               int trk_id, const char* trk_name, float trk_sim) {
+                               float spk_conf, const char* spk_src) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!fp_) return;
 
@@ -104,22 +85,40 @@ void TimelineLogger::log_asr(const char* text, float stream_start, float stream_
     int n = snprintf(buf, sizeof(buf),
         R"({"t":"asr","s":%.2f,"e":%.2f,"text":"%s",)"
         R"("trigger":"%s","latency":%.1f,"audio":%.2f,)"
-        R"("spk_id":%d,"spk_name":"%s","spk_sim":%.3f,"spk_conf":%.3f,"spk_src":"%s",)"
-        R"("trk_id":%d,"trk_name":"%s","trk_sim":%.3f})"
+        R"("spk_id":%d,"spk_name":"%s","spk_sim":%.3f,"spk_conf":%.3f,"spk_src":"%s"})"
         "\n",
         stream_start, stream_end, esc.c_str(),
         trigger ? trigger : "", latency_ms, audio_sec,
         spk_id, spk_name ? spk_name : "", spk_sim, spk_conf,
-        spk_src ? spk_src : "",
-        trk_id, trk_name ? trk_name : "", trk_sim);
+        spk_src ? spk_src : "");
     (void)n;
 
     fputs(buf, fp_);
     asr_count_++;
 }
 
-void TimelineLogger::log_vad(bool is_speech, bool segment_start, bool segment_end,
-                               int frame_idx, float energy) {
+void TimelineLogger::log_spk(float stream_start, float stream_end,
+                               const char* source,
+                               int spk_id, const char* spk_name, float spk_sim,
+                               bool is_new) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!fp_) return;
+
+    char buf[512];
+    snprintf(buf, sizeof(buf),
+        R"({"t":"spk","s":%.4f,"e":%.4f,"src":"%s","id":%d,"name":"%s","sim":%.3f,"new":%s})"
+        "\n",
+        stream_start, stream_end,
+        source ? source : "", spk_id,
+        spk_name ? spk_name : "", spk_sim,
+        is_new ? "true" : "false");
+
+    fputs(buf, fp_);
+    spk_count_++;
+}
+
+void TimelineLogger::log_vad(float stream_sec, bool segment_start, bool segment_end,
+                               float energy) {
     // Only log segment boundaries, not every frame.
     if (!segment_start && !segment_end) return;
 
@@ -128,11 +127,11 @@ void TimelineLogger::log_vad(bool is_speech, bool segment_start, bool segment_en
 
     char buf[256];
     snprintf(buf, sizeof(buf),
-        R"({"t":"vad","event":"%s","speech":%s,"frame":%d,"energy":%.2f})"
+        R"({"t":"vad","s":%.4f,"event":"%s","energy":%.2f})"
         "\n",
+        stream_sec,
         segment_start ? "start" : "end",
-        is_speech ? "true" : "false",
-        frame_idx, energy);
+        energy);
 
     fputs(buf, fp_);
     vad_count_++;

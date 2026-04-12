@@ -124,12 +124,6 @@
                 <button id="spk-en-campp" class="btn btn--vad"
                         data-prefix="speaker" data-cmd="speaker_enable"
                         aria-pressed="false">CAM++</button>
-                <button id="spk-en-wavlm" class="btn btn--vad"
-                        data-prefix="wavlm" data-cmd="wavlm_enable"
-                        aria-pressed="false">WavLM</button>
-                <button id="spk-en-ecapa" class="btn btn--vad"
-                        data-prefix="unispeech" data-cmd="unispeech_enable"
-                        aria-pressed="false">ECAPA</button>
                 <button id="spk-en-wlecapa" class="btn btn--vad btn--active"
                         data-prefix="wlecapa" data-cmd="wlecapa_enable"
                         aria-pressed="true">WL-ECAPA</button>
@@ -153,18 +147,6 @@
                         <strong id="speaker-threshold-val">0.75</strong></label>
                     <input type="range" id="speaker-threshold" class="vad-threshold-slider"
                            min="0.3" max="0.95" step="0.05" value="0.75">
-                </div>
-                <div class="spk-thresh-row">
-                    <label class="spk-thresh-label">WavLM
-                        <strong id="wavlm-threshold-val">0.92</strong></label>
-                    <input type="range" id="wavlm-threshold" class="vad-threshold-slider"
-                           min="0.70" max="0.99" step="0.01" value="0.92">
-                </div>
-                <div class="spk-thresh-row">
-                    <label class="spk-thresh-label">ECAPA
-                        <strong id="unispeech-threshold-val">0.55</strong></label>
-                    <input type="range" id="unispeech-threshold" class="vad-threshold-slider"
-                           min="0.30" max="0.80" step="0.01" value="0.55">
                 </div>
                 <div class="spk-thresh-row">
                     <label class="spk-thresh-label">WL-ECAPA
@@ -201,9 +183,6 @@
         </section>
 
         <section class="panel speaker-debug-panel" aria-label="Speaker Debug" id="speaker-debug">
-        </section>
-
-        <section class="panel tracker-panel" aria-label="Speaker Tracker" id="tracker-panel">
         </section>
 
         <section class="panel asr-panel" aria-label="ASR" id="asr-panel">

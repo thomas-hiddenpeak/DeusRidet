@@ -20,10 +20,11 @@
 #include "asr/asr_engine.h"
 #include "../../communis/ring_buffer.h"
 #include "../../orator/speaker_encoder.h"
-#include "../../orator/onnx_speaker_encoder.h"
 #include "../../orator/wavlm_ecapa_encoder.h"
 #include "../../orator/speaker_db.h"
 #include "../../orator/speaker_vector_store.h"
+#include "speaker_stream.h"
+#include "speaker_timeline.h"
 
 #include <algorithm>
 #include <atomic>
@@ -54,16 +55,12 @@ struct AudioPipelineConfig {
     FsmnVadConfig fsmn;                 // FSMN VAD model config
     TenVadConfig  ten;                  // TEN VAD model config
     SpeakerEncoderConfig speaker;       // CAM++ speaker encoder config
-    OnnxSpeakerConfig wavlm;              // WavLM speaker encoder config
-    OnnxSpeakerConfig unispeech;          // ECAPA-TDNN speaker encoder config (uses fbank, not raw PCM)
     std::string wavlm_ecapa_model;         // WavLM-Large+ECAPA-TDNN safetensors path (native GPU)
     float wavlm_ecapa_threshold = 0.55f;   // default cosine sim threshold
     std::string asr_model_path;            // Qwen3-ASR model directory (empty = disabled)
     size_t ring_buffer_bytes = 1 << 20;  // 1 MB (~32 seconds of int16 mono 16kHz)
     int process_chunk_ms     = 100;      // process in 100ms chunks (10 mel frames)
     float speaker_threshold  = 0.50f;    // CAM++ cosine sim threshold (same ~0.67, diff ~0.07)
-    float wavlm_threshold    = 0.80f;    // WavLM Gemm threshold (same ~0.86-0.93, diff ~0.36-0.76)
-    float unispeech_threshold= 0.55f;    // ECAPA-TDNN threshold (same ~0.57, diff ~0.03-0.45)
 };
 
 struct AudioPipelineStats {
@@ -88,18 +85,6 @@ struct AudioPipelineStats {
     bool     speaker_new;      // true if newly registered speaker
     int      speaker_count;    // number of known speakers
     char     speaker_name[64]; // current speaker name (empty if unnamed)
-    // Speaker identification (WavLM).
-    int      wavlm_id;         // WavLM speaker ID
-    float    wavlm_sim;        // WavLM best similarity
-    bool     wavlm_new;
-    int      wavlm_count;
-    char     wavlm_name[64];
-    // Speaker identification (UniSpeech-SAT).
-    int      unispeech_id;
-    float    unispeech_sim;
-    bool     unispeech_new;
-    int      unispeech_count;
-    char     unispeech_name[64];
     // Speaker identification (WavLM-Large + ECAPA-TDNN, native GPU).
     int      wlecapa_id;
     float    wlecapa_sim;
@@ -110,8 +95,6 @@ struct AudioPipelineStats {
     char     wlecapa_name[64];
     // Active flags — true only on the tick when extraction happened.
     bool     speaker_active;
-    bool     wavlm_active;
-    bool     unispeech_active;
     bool     wlecapa_active;
     // WL-ECAPA latency breakdown (ms), set after each extraction.
     float    wlecapa_lat_cnn_ms;
@@ -134,450 +117,17 @@ struct AudioPipelineStats {
     int      asr_post_silence_ms;    // current accumulated post-silence (ms)
 };
 
-// ─── SpeakerTimeline: fused speaker resolution via event sourcing ───
-//
-// All speaker identification subsystems (SAAS early/full/change/inherit, Tracker)
-// write timestamped events to a shared timeline. When an ASR segment needs a
-// speaker label, resolve() queries the timeline for the best label covering the
-// audio range via weighted majority voting.
-//
-// Authority hierarchy: SAAS_FULL > SAAS_CHANGE > SAAS_EARLY > SAAS_INHERIT > TRACKER
-// This replaces the point-in-time snapshot approach that caused timing mismatches.
-
-enum class SpkEventSource : uint8_t {
-    SAAS_EARLY   = 0,  // SAAS early extraction (auto_register=false)
-    SAAS_FULL    = 1,  // SAAS end-of-segment (auto_register=true)
-    SAAS_CHANGE  = 2,  // SAAS intra-segment speaker change detection
-    SAAS_INHERIT = 3,  // SAAS inheritance from previous segment
-    TRACKER      = 4,  // SpeakerTracker
-};
-
-struct SpeakerEvent {
-    int64_t  audio_start;   // start of audio range this event covers (absolute sample)
-    int64_t  audio_end;     // end of audio range this event covers (absolute sample)
-    SpkEventSource source;
-    int      speaker_id;    // -1 = unknown/no match
-    float    similarity;
-    char     name[64];
-};
-
-struct ResolvedSpeaker {
-    int      speaker_id = -1;
-    float    confidence = 0.0f;   // total weighted vote
-    float    similarity = 0.0f;
-    char     name[64] = {};
-    SpkEventSource source = SpkEventSource::SAAS_EARLY;
-};
-
-class SpeakerTimeline {
-public:
-    static constexpr int kMaxEvents = 2000;
-
-    void push(const SpeakerEvent& ev) {
-        events_[write_pos_] = ev;
-        write_pos_ = (write_pos_ + 1) % kMaxEvents;
-        if (count_ < kMaxEvents) ++count_;
-    }
-
-    // Resolve the best speaker label for a given audio sample range.
-    // Uses weighted majority voting with overlap-proportional weighting.
-    // If no events overlap the query range, performs context fill:
-    // finds the nearest event before and after — if they agree on speaker, fills.
-    ResolvedSpeaker resolve(int64_t start_sample, int64_t end_sample) const {
-        if (count_ == 0 || end_sample <= start_sample)
-            return {};
-
-        // Source authority weights.
-        static constexpr float kWeights[] = {
-            0.70f,  // SAAS_EARLY   — early extraction, might not match final
-            1.00f,  // SAAS_FULL    — end-of-segment, highest authority
-            0.90f,  // SAAS_CHANGE  — speaker change detection, high authority
-            0.50f,  // SAAS_INHERIT — inherited from previous, could be wrong
-            0.40f,  // TRACKER      — independent pipeline, lower authority
-        };
-
-        int64_t query_len = end_sample - start_sample;
-
-        // Accumulate weighted votes per speaker_id.
-        static constexpr int kMaxSpk = 64;
-        float votes[kMaxSpk] = {};
-        float best_sim[kMaxSpk] = {};
-        char  best_name[kMaxSpk][64] = {};
-        SpkEventSource best_source[kMaxSpk] = {};
-        float best_source_weight[kMaxSpk] = {};
-        bool any_overlap = false;
-
-        // Also track nearest non-overlapping events for context fill.
-        int64_t nearest_before_dist = INT64_MAX;
-        int     nearest_before_spk  = -1;
-        float   nearest_before_sim  = 0.0f;
-        char    nearest_before_name[64] = {};
-        SpkEventSource nearest_before_src = SpkEventSource::SAAS_EARLY;
-
-        int64_t nearest_after_dist  = INT64_MAX;
-        int     nearest_after_spk   = -1;
-        float   nearest_after_sim   = 0.0f;
-        char    nearest_after_name[64] = {};
-        SpkEventSource nearest_after_src = SpkEventSource::SAAS_EARLY;
-
-        int start_idx = (count_ < kMaxEvents) ? 0 : write_pos_;
-        for (int i = 0; i < count_; ++i) {
-            int idx = (start_idx + i) % kMaxEvents;
-            const auto& ev = events_[idx];
-            if (ev.speaker_id < 0 || ev.speaker_id >= kMaxSpk) continue;
-
-            // Compute overlap between event range and query range.
-            int64_t ov_start = std::max(ev.audio_start, start_sample);
-            int64_t ov_end   = std::min(ev.audio_end, end_sample);
-            if (ov_end > ov_start) {
-                any_overlap = true;
-                float overlap_frac = (float)(ov_end - ov_start) / (float)query_len;
-                float w = kWeights[static_cast<int>(ev.source)] * overlap_frac;
-                votes[ev.speaker_id] += w;
-
-                // Track best similarity per speaker (prefer highest-authority source).
-                float sw = kWeights[static_cast<int>(ev.source)];
-                if (sw > best_source_weight[ev.speaker_id] ||
-                    (sw == best_source_weight[ev.speaker_id] &&
-                     ev.similarity > best_sim[ev.speaker_id])) {
-                    best_sim[ev.speaker_id] = ev.similarity;
-                    memcpy(best_name[ev.speaker_id], ev.name, 64);
-                    best_source[ev.speaker_id] = ev.source;
-                    best_source_weight[ev.speaker_id] = sw;
-                }
-            } else {
-                // No overlap — track nearest events for context fill.
-                if (ev.audio_end <= start_sample) {
-                    int64_t dist = start_sample - ev.audio_end;
-                    if (dist < nearest_before_dist) {
-                        nearest_before_dist = dist;
-                        nearest_before_spk  = ev.speaker_id;
-                        nearest_before_sim  = ev.similarity;
-                        memcpy(nearest_before_name, ev.name, 64);
-                        nearest_before_src  = ev.source;
-                    }
-                } else if (ev.audio_start >= end_sample) {
-                    int64_t dist = ev.audio_start - end_sample;
-                    if (dist < nearest_after_dist) {
-                        nearest_after_dist = dist;
-                        nearest_after_spk  = ev.speaker_id;
-                        nearest_after_sim  = ev.similarity;
-                        memcpy(nearest_after_name, ev.name, 64);
-                        nearest_after_src  = ev.source;
-                    }
-                }
-            }
-        }
-
-        if (any_overlap) {
-            // Find speaker with highest vote.
-            int best_id = -1;
-            float best_vote = 0.0f;
-            for (int i = 0; i < kMaxSpk; ++i) {
-                if (votes[i] > best_vote) {
-                    best_vote = votes[i];
-                    best_id = i;
-                }
-            }
-
-            if (best_id < 0) return {};
-
-            ResolvedSpeaker result;
-            result.speaker_id = best_id;
-            result.confidence = best_vote;
-            result.similarity = best_sim[best_id];
-            memcpy(result.name, best_name[best_id], 64);
-            result.source = best_source[best_id];
-            return result;
-        }
-
-        // Context fill: no overlapping events. Check nearest before/after.
-        // If both agree on same speaker AND gap is < 5s (80000 samples), fill.
-        // If only one side has a result within 3s (48000 samples), use it.
-        static constexpr int64_t kFillBothMaxGap  = 80000;  // 5s
-        static constexpr int64_t kFillSingleMaxGap = 48000;  // 3s
-
-        if (nearest_before_spk >= 0 && nearest_after_spk >= 0 &&
-            nearest_before_spk == nearest_after_spk &&
-            nearest_before_dist + nearest_after_dist < kFillBothMaxGap) {
-            // Both neighbors agree — high confidence context fill.
-            ResolvedSpeaker result;
-            result.speaker_id = nearest_before_spk;
-            result.confidence = 0.35f;  // lower confidence for context fill
-            // Use the higher-authority source's similarity.
-            float sw_b = kWeights[static_cast<int>(nearest_before_src)];
-            float sw_a = kWeights[static_cast<int>(nearest_after_src)];
-            if (sw_b >= sw_a) {
-                result.similarity = nearest_before_sim;
-                memcpy(result.name, nearest_before_name, 64);
-                result.source = nearest_before_src;
-            } else {
-                result.similarity = nearest_after_sim;
-                memcpy(result.name, nearest_after_name, 64);
-                result.source = nearest_after_src;
-            }
-            return result;
-        }
-
-        // Single-side fill: only one neighbor within 3s.
-        if (nearest_before_spk >= 0 && nearest_before_dist < kFillSingleMaxGap) {
-            ResolvedSpeaker result;
-            result.speaker_id = nearest_before_spk;
-            result.confidence = 0.20f;  // low confidence single-side fill
-            result.similarity = nearest_before_sim;
-            memcpy(result.name, nearest_before_name, 64);
-            result.source = nearest_before_src;
-            return result;
-        }
-        if (nearest_after_spk >= 0 && nearest_after_dist < kFillSingleMaxGap) {
-            ResolvedSpeaker result;
-            result.speaker_id = nearest_after_spk;
-            result.confidence = 0.15f;  // lowest confidence
-            result.similarity = nearest_after_sim;
-            memcpy(result.name, nearest_after_name, 64);
-            result.source = nearest_after_src;
-            return result;
-        }
-
-        return {};
-    }
-
-    int event_count() const { return count_; }
-    void clear() { count_ = 0; write_pos_ = 0; }
-
-private:
-    SpeakerEvent events_[kMaxEvents];
-    int write_pos_ = 0;
-    int count_ = 0;
-};
-
-// SpeakerTracker: continuous sliding-window speaker identification pipeline.
-//
-// Independent from the SAAS pipeline. Extracts embeddings from a 1.5s sliding
-// window every 0.5s, identifies speakers via its own SpeakerVectorStore DB,
-// and outputs a speaker timeline for comparison with SAAS results.
-//
-// Features:
-//   - Regular check (every interval_ms, 1.5s window)
-//   - VAD-onset fast path (0.5s window, single-confirm after silence gap)
-//   - Progressive refinement (re-identify at 3s, 5s from segment start)
-//   - Change detection: absolute (2× confirm) + relative (sim drop)
-//   - Multi-signal scoring: embedding + centroid + F0
-//   - Registration gate: 3× unknown + self-consistency + F0 stability
-//   - Overlap detection: F0 jitter + embedding instability
-
-// Tracker confidence level for current speaker attribution.
-enum class TrackerConfidence : int {
-    NONE       = 0,  // no identification yet
-    LOW        = 1,  // 1.5-3s of audio
-    MED        = 2,  // 3-5s of audio
-    HIGH       = 3,  // ≥ 5s of audio (locked)
-};
-
-// Tracker state per check cycle.
-enum class TrackerState : int {
-    SILENCE    = 0,  // VAD=false, no tracking
-    TRACKING   = 1,  // normal speaker tracking
-    TRANSITION = 2,  // speaker change pending confirmation
-    OVERLAP    = 3,  // multiple speakers detected
-    UNKNOWN    = 4,  // speaker not in DB
-};
-
-// Timeline entry for the speaker tracker.
-struct TrackerTimelineEntry {
-    int64_t start_sample  = 0;
-    int64_t end_sample    = 0;    // 0 = still active
-    int     speaker_id    = -1;   // -1 = unknown
-    std::string name;
-    float   avg_sim       = 0.0f;
-    TrackerConfidence confidence = TrackerConfidence::NONE;
-    TrackerState state    = TrackerState::SILENCE;
-};
-
-// Stats exposed to WebUI via pipeline_stats JSON.
-struct TrackerStats {
-    bool     enabled       = false;
-    TrackerState state     = TrackerState::SILENCE;
-    int      speaker_id    = -1;
-    float    speaker_sim   = 0.0f;
-    char     speaker_name[64] = {};
-    TrackerConfidence confidence = TrackerConfidence::NONE;
-    int      speaker_count = 0;
-    int      timeline_len  = 0;
-    int      switches      = 0;    // total speaker change count
-    float    f0_hz         = 0.0f; // latest F0 estimate
-    float    f0_jitter     = 0.0f; // frame-to-frame F0 variability
-    float    sim_to_ref    = 0.0f; // cosine sim to current ref embedding
-    float    sim_running_avg = 0.0f; // EMA of sim_to_ref
-    bool     check_active  = false; // true on tick when a check ran
-    float    check_lat_ms  = 0.0f;  // latency of last check (extraction + scoring)
-    // Registration events.
-    bool     reg_event     = false;  // true on tick when new speaker registered
-    int      reg_id        = -1;
-    char     reg_name[64]  = {};
-};
-
-class SpeakerTracker {
-public:
-    SpeakerTracker();
-    ~SpeakerTracker() = default;
-
-    // Initialize with encoder reference and parameters.
-    // The tracker does NOT own the encoder — it shares the encoder instance
-    // with the SAAS pipeline (serial calls from same thread, safe).
-    void init(WavLMEcapaEncoder* enc, int dim = 192);
-
-    // Feed PCM chunk (called every process loop iteration).
-    void feed(const int16_t* pcm, int n_samples, bool vad_speech);
-
-    // Perform check if interval reached. Returns true if a check was executed.
-    // Must be called after feed() in the same loop iteration.
-    bool check();
-
-    // Access current stats (read by commands.cpp for JSON).
-    const TrackerStats& stats() const { return stats_; }
-
-    // Access timeline (for detailed JSON dump).
-    const std::vector<TrackerTimelineEntry>& timeline() const { return timeline_; }
-
-    // Access the independent speaker DB.
-    SpeakerVectorStore& db() { return db_; }
-    const SpeakerVectorStore& db() const { return db_; }
-
-    // Runtime parameter control.
-    void set_enabled(bool e) { enabled_.store(e, std::memory_order_relaxed); }
-    bool enabled() const { return enabled_.load(std::memory_order_relaxed); }
-
-    void set_interval_ms(int ms) { interval_samples_ = std::max(4000, ms * 16); }
-    int  interval_ms() const { return interval_samples_ / 16; }
-
-    void set_window_ms(int ms) { window_samples_ = std::max(8000, ms * 16); }
-    int  window_ms() const { return window_samples_ / 16; }
-
-    void set_threshold(float t) { identify_threshold_ = t; }
-    float threshold() const { return identify_threshold_; }
-
-    void set_change_threshold(float t) { change_threshold_ = t; }
-    float change_threshold() const { return change_threshold_; }
-
-    // Clear DB and reset all state.
-    void clear();
-
-    void set_speaker_name(int id, const std::string& name) { db_.set_name(id, name); }
-
-private:
-    // Estimate F0 (fundamental frequency) from PCM using autocorrelation.
-    float estimate_f0(const float* pcm, int n_samples);
-
-    // Compute F0 jitter: frame-by-frame F0 stability measure.
-    float compute_f0_jitter(const float* pcm, int n_samples);
-
-    // Multi-signal speaker scoring.
-    struct ScoredMatch {
-        int   speaker_id = -1;
-        float score      = 0.0f;  // weighted combined score
-        float sim_emb    = 0.0f;  // raw embedding similarity
-        float sim_cen    = 0.0f;  // centroid similarity
-        float f0_compat  = 0.0f;  // F0 compatibility [0, 1]
-        std::string name;
-    };
-
-    // Score all speakers in DB against query embedding + F0.
-    ScoredMatch score_best(const std::vector<float>& emb, float query_f0);
-
-    // Attempt progressive refinement using accumulated segment audio.
-    void try_refine();
-
-    // ---- State ----
-    WavLMEcapaEncoder* enc_ = nullptr;
-    SpeakerVectorStore db_{"TrackerDb", 192, 0.15f};
-    std::atomic<bool> enabled_{true};
-
-    // Ring buffer for recent PCM (stores window_samples_ + margin).
-    std::vector<int16_t> ring_;
-    int ring_capacity_ = 0;
-    int ring_write_    = 0;   // next write position (circular)
-    int ring_count_    = 0;   // valid samples in ring
-
-    // Timing.
-    int interval_samples_ = 8000;   // 0.5s
-    int window_samples_   = 24000;  // 1.5s
-    int samples_since_check_ = 0;
-    int64_t total_samples_   = 0;   // monotonic counter
-
-    // VAD state.
-    bool vad_speech_      = false;
-    bool prev_vad_speech_ = false;
-    int  silence_samples_ = 0;    // consecutive silence samples
-    int  speech_since_onset_ = 0; // speech samples since last silence→speech transition
-
-    // VAD-onset fast path state.
-    bool onset_pending_   = false;   // silence→speech detected, waiting 0.5s for fast check
-    int  onset_at_sample_ = 0;      // sample count at onset
-
-    // Current segment state.
-    std::vector<float> ref_emb_;     // reference embedding for current speaker
-    float ref_f0_         = 0.0f;    // reference F0 for current speaker
-    int   current_spk_id_ = -1;
-    std::string current_spk_name_;
-    float current_sim_    = 0.0f;
-    TrackerConfidence confidence_ = TrackerConfidence::NONE;
-    TrackerState state_   = TrackerState::SILENCE;
-    int64_t seg_start_sample_ = 0;  // start of current speaker segment
-
-    // Change detection.
-    int   low_sim_count_  = 0;       // consecutive checks with sim < change_threshold
-    float sim_running_avg_ = 0.0f;   // EMA of sim_to_ref
-    int   declining_count_ = 0;      // consecutive checks where sim dropped > 0.25 from avg
-
-    // Registration gate.
-    int   unknown_count_       = 0;  // consecutive unknown checks
-    std::vector<std::vector<float>> unknown_embs_; // embeddings during unknown streak
-    std::vector<float> unknown_f0s_; // F0 values during unknown streak
-
-    // Per-speaker F0 profile (maintained on host).
-    struct F0Profile {
-        float mean    = 0.0f;
-        float sum_sq  = 0.0f;  // for variance calculation
-        int   count   = 0;
-    };
-    std::unordered_map<int, F0Profile> f0_profiles_;
-
-    // Per-speaker centroid (maintained on host for multi-signal scoring).
-    std::unordered_map<int, std::vector<float>> centroids_;  // spk_id → 192-dim mean
-    std::unordered_map<int, int> centroid_counts_;           // number of embeddings in mean
-
-    // Timeline.
-    std::vector<TrackerTimelineEntry> timeline_;
-    static constexpr int MAX_TIMELINE = 500;
-
-    // Output stats.
-    TrackerStats stats_{};
-
-    // Parameters.
-    float identify_threshold_   = 0.55f;
-    float change_threshold_     = 0.35f;
-    int   change_confirm_count_ = 2;
-    int   register_confirm_     = 3;
-    float self_consistency_     = 0.78f;
-    float w_emb_                = 0.50f;
-    float w_centroid_           = 0.30f;
-    float w_f0_                 = 0.20f;
-    int   fast_path_samples_    = 8000;  // 0.5s for VAD-onset fast path
-};
-
 class AudioPipeline {
 public:
-    using OnVadEvent  = std::function<void(const VadResult&, int frame_idx)>;
+    using OnVadEvent  = std::function<void(const VadResult&, float stream_sec)>;
     using OnStats     = std::function<void(const AudioPipelineStats&)>;
     using OnSpeaker   = std::function<void(const SpeakerMatch&)>;
+    using OnSpkEvent  = std::function<void(const SpeakerEvent&)>;
     using OnTranscript = std::function<void(const asr::ASRResult& result, float audio_sec,
                                              int speaker_id, const std::string& speaker_name,
                                              float speaker_sim, float speaker_confidence,
                                              const std::string& speaker_source,
                                              const std::string& trigger_reason,
-                                             int tracker_id, const std::string& tracker_name,
-                                             float tracker_sim,
                                              float stream_start_sec, float stream_end_sec)>;
     using OnAsrLog = std::function<void(const std::string& json)>;
     using OnAsrPartial = std::function<void(const std::string& text, float audio_sec)>;
@@ -599,6 +149,7 @@ public:
     void set_on_vad(OnVadEvent cb) { on_vad_ = std::move(cb); }
     void set_on_stats(OnStats cb)  { on_stats_ = std::move(cb); }
     void set_on_speaker(OnSpeaker cb) { on_speaker_ = std::move(cb); }
+    void set_on_spk_event(OnSpkEvent cb) { on_spk_event_ = std::move(cb); }
     void set_on_transcript(OnTranscript cb) { on_transcript_ = std::move(cb); }
     void set_on_asr_log(OnAsrLog cb) { on_asr_log_ = std::move(cb); }
     void set_on_asr_partial(OnAsrPartial cb) { on_asr_partial_ = std::move(cb); }
@@ -634,20 +185,12 @@ public:
     // Speaker encoder enable/disable (thread-safe).
     void set_speaker_enabled(bool e) { enable_speaker_.store(e, std::memory_order_relaxed); }
     bool speaker_enabled() const { return enable_speaker_.load(std::memory_order_relaxed); }
-    void set_wavlm_enabled(bool e) { enable_wavlm_.store(e, std::memory_order_relaxed); }
-    bool wavlm_enabled() const { return enable_wavlm_.load(std::memory_order_relaxed); }
-    void set_unispeech_enabled(bool e) { enable_unispeech_.store(e, std::memory_order_relaxed); }
-    bool unispeech_enabled() const { return enable_unispeech_.load(std::memory_order_relaxed); }
     void set_wlecapa_enabled(bool e) { enable_wlecapa_.store(e, std::memory_order_relaxed); }
     bool wlecapa_enabled() const { return enable_wlecapa_.load(std::memory_order_relaxed); }
 
     // Per-backend threshold control.
     void set_speaker_threshold(float t) { speaker_threshold_.store(t, std::memory_order_relaxed); }
     float speaker_threshold() const { return speaker_threshold_.load(std::memory_order_relaxed); }
-    void set_wavlm_threshold(float t) { wavlm_threshold_.store(t, std::memory_order_relaxed); }
-    float wavlm_threshold() const { return wavlm_threshold_.load(std::memory_order_relaxed); }
-    void set_unispeech_threshold(float t) { unispeech_threshold_.store(t, std::memory_order_relaxed); }
-    float unispeech_threshold() const { return unispeech_threshold_.load(std::memory_order_relaxed); }
     void set_wlecapa_threshold(float t) { wlecapa_threshold_.store(t, std::memory_order_relaxed); }
     float wlecapa_threshold() const { return wlecapa_threshold_.load(std::memory_order_relaxed); }
 
@@ -663,16 +206,20 @@ public:
 
     // Intra-segment speaker change detection: re-check speaker identity
     // within long segments to detect speaker transitions missed by VAD.
-    void set_spk_recheck_sec(float s) { spk_recheck_samples_.store(std::max(16000, (int)(s * 16000)), std::memory_order_relaxed); }
-    float spk_recheck_sec() const { return spk_recheck_samples_.load(std::memory_order_relaxed) / 16000.0f; }
-    void set_spk_recheck_enabled(bool e) { enable_spk_recheck_.store(e, std::memory_order_relaxed); }
-    bool spk_recheck_enabled() const { return enable_spk_recheck_.load(std::memory_order_relaxed); }
+    // Legacy accessors — now delegate to SpeakerStream.
+    void set_spk_recheck_sec(float s) { spk_stream_.set_stride_sec(s); }
+    float spk_recheck_sec() const { return spk_stream_.stride_sec(); }
+    void set_spk_recheck_enabled(bool) { /* always enabled via SpeakerStream */ }
+    bool spk_recheck_enabled() const { return true; }
     // Cosine similarity threshold below which we declare a speaker change.
-    void set_spk_change_threshold(float t) { spk_change_threshold_.store(t, std::memory_order_relaxed); }
-    float spk_change_threshold() const { return spk_change_threshold_.load(std::memory_order_relaxed); }
+    void set_spk_change_threshold(float t) { spk_stream_.set_change_threshold(t); }
+    float spk_change_threshold() const { return spk_stream_.change_threshold(); }
     // Window size (seconds) for the re-check embedding extraction.
-    void set_spk_recheck_window_sec(float s) { spk_recheck_window_samples_.store(std::max(8000, (int)(s * 16000)), std::memory_order_relaxed); }
-    float spk_recheck_window_sec() const { return spk_recheck_window_samples_.load(std::memory_order_relaxed) / 16000.0f; }
+    void set_spk_recheck_window_sec(float s) { spk_stream_.set_window_sec(s); }
+    float spk_recheck_window_sec() const { return spk_stream_.window_sec(); }
+
+    // SpeakerStream Bayesian parameters.
+    SpeakerStream& spk_stream() { return spk_stream_; }
 
     // ASR (Qwen3-ASR) enable/disable and tunable parameters.
     void set_asr_enabled(bool e) { enable_asr_.store(e, std::memory_order_relaxed); }
@@ -728,15 +275,16 @@ public:
     void set_asr_min_speech_ratio(float r) { asr_min_speech_ratio_.store(std::max(0.0f, std::min(1.0f, r)), std::memory_order_relaxed); }
     float asr_min_speech_ratio() const { return asr_min_speech_ratio_.load(std::memory_order_relaxed); }
 
+    // VAD gap split: when speech resumes after a pause >= this threshold (ms),
+    // force an ASR segment boundary at the gap. This decouples ASR segmentation
+    // from speaker identification — natural pauses become ASR boundaries regardless
+    // of whether speaker changed. 0 = disabled. Default 200ms.
+    void set_asr_vad_gap_ms(int ms) { asr_vad_gap_ms_.store(std::max(0, ms), std::memory_order_relaxed); }
+    int  asr_vad_gap_ms() const { return asr_vad_gap_ms_.load(std::memory_order_relaxed); }
+
     // Per-backend speaker database access.
     SpeakerDb& speaker_db() { return speaker_db_; }
-    SpeakerDb& wavlm_db() { return wavlm_db_; }
-    SpeakerDb& unispeech_db() { return unispeech_db_; }
     SpeakerVectorStore& wlecapa_db() { return wlecapa_db_; }
-
-    // Speaker Tracker (independent pipeline for comparison).
-    SpeakerTracker& tracker() { return tracker_; }
-    const SpeakerTracker& tracker() const { return tracker_; }
 
     // Per-backend clear and name.
     void clear_speaker_db() {
@@ -745,20 +293,6 @@ public:
         stats_.speaker_new = false; stats_.speaker_count = 0;
         stats_.speaker_active = true;  // trigger UI refresh
         stats_.speaker_name[0] = '\0';
-    }
-    void clear_wavlm_db() {
-        wavlm_db_.clear();
-        stats_.wavlm_id = -1; stats_.wavlm_sim = 0;
-        stats_.wavlm_new = false; stats_.wavlm_count = 0;
-        stats_.wavlm_active = true;  // trigger UI refresh
-        stats_.wavlm_name[0] = '\0';
-    }
-    void clear_unispeech_db() {
-        unispeech_db_.clear();
-        stats_.unispeech_id = -1; stats_.unispeech_sim = 0;
-        stats_.unispeech_new = false; stats_.unispeech_count = 0;
-        stats_.unispeech_active = true;  // trigger UI refresh
-        stats_.unispeech_name[0] = '\0';
     }
     void clear_wlecapa_db() {
         wlecapa_db_.clear();
@@ -769,8 +303,6 @@ public:
         stats_.wlecapa_name[0] = '\0';
     }
     void set_speaker_name(int id, const std::string& name) { speaker_db_.set_name(id, name); }
-    void set_wavlm_name(int id, const std::string& name) { wavlm_db_.set_name(id, name); }
-    void set_unispeech_name(int id, const std::string& name) { unispeech_db_.set_name(id, name); }
     void set_wlecapa_name(int id, const std::string& name) { wlecapa_db_.set_name(id, name); }
     bool remove_wlecapa_speaker(int id) { return wlecapa_db_.remove_speaker(id); }
     bool merge_wlecapa_speakers(int dst_id, int src_id) { return wlecapa_db_.merge_speakers(dst_id, src_id); }
@@ -804,12 +336,9 @@ private:
     SpeakerEncoder speaker_enc_;
     SpeakerDb speaker_db_{"CAM++Db"};
     FsmnFbankGpu speaker_fbank_;  // 80-dim fbank for CAM++
-    OnnxSpeakerEncoder wavlm_enc_;
-    SpeakerDb wavlm_db_{"WavLMDb", 0.1f};       // low EMA to resist centroid contamination
-    OnnxSpeakerEncoder unispeech_enc_;
-    SpeakerDb unispeech_db_{"ECAPADb", 0.15f};  // ECAPA-TDNN: higher EMA for stable centroids
     WavLMEcapaEncoder wlecapa_enc_;
-    SpeakerVectorStore wlecapa_db_{"WLEcapaDb", 192, 0.15f};
+    SpeakerVectorStore wlecapa_db_{"WLEcapaDb", 384, 0.15f, 8};
+    SpeakerStream spk_stream_;  // Independent speaker identification stream
 
     AudioPipelineStats stats_{};
     std::atomic<float> gain_{1.0f};
@@ -819,21 +348,12 @@ private:
     std::atomic<bool> enable_fsmn_{false};
     std::atomic<bool> enable_ten_{false};
     std::atomic<bool> enable_speaker_{false};
-    std::atomic<bool> enable_wavlm_{false};
-    std::atomic<bool> enable_unispeech_{false};
     std::atomic<bool> enable_wlecapa_{true};
     std::atomic<float> speaker_threshold_{0.50f};
-    std::atomic<float> wavlm_threshold_{0.80f};
-    std::atomic<float> unispeech_threshold_{0.55f};
     std::atomic<float> wlecapa_threshold_{0.55f};
-    std::atomic<int>   early_trigger_samples_{27200};  // 1.7s default
+    std::atomic<int>   early_trigger_samples_{27200};  // 1.7s default (used by SpeakerStream stride)
     std::atomic<bool>  enable_early_{true};              // early trigger on/off
     std::atomic<int>   min_speech_samples_{16000};       // 1.0s default for full-segment ID
-    // Intra-segment speaker change detection.
-    std::atomic<int>   spk_recheck_samples_{48000};      // re-check every 3.0s of speech
-    std::atomic<bool>  enable_spk_recheck_{true};         // on by default
-    std::atomic<float> spk_change_threshold_{0.35f};      // cosine sim below this = different speaker
-    std::atomic<int>   spk_recheck_window_samples_{24000}; // 1.5s window for re-check embedding
     std::atomic<bool>  enable_asr_{true};                // ASR on/off
     std::atomic<int>   asr_post_silence_ms_{300};         // post-silence trigger (ms) — base value
     std::atomic<int>   asr_max_buf_samples_{480000};      // max buffer (30s @ 16kHz)
@@ -851,32 +371,21 @@ private:
     std::atomic<float> asr_min_energy_{0.008f};           // min avg energy for ASR segment
     std::atomic<int>   asr_partial_samples_{32000};       // streaming partial interval (2s default)
     std::atomic<float> asr_min_speech_ratio_{0.15f};      // min speech / buffer ratio for trigger
+    std::atomic<int>   asr_vad_gap_ms_{200};              // VAD gap split threshold (ms). 0=disabled
 
     // ASR engine (Qwen3-ASR).
     std::unique_ptr<asr::ASREngine> asr_engine_;
 
-    // PCM buffer for speech segments (accumulated for speaker embedding).
+    // PCM buffer for speech segments (accumulated for CAM++ speaker encoder).
     std::vector<int16_t> speech_pcm_buf_;
     bool in_speech_segment_ = false;
-    bool early_extracted_   = false;   // true after early extraction during speech
-    // Intra-segment speaker change detection state.
-    std::vector<float> seg_ref_emb_;     // reference embedding for current segment's speaker
-    int seg_ref_speaker_id_ = -1;        // speaker ID from early/full extraction
-    std::string seg_ref_speaker_name_;   // speaker name from early/full extraction
-    float seg_ref_speaker_sim_ = 0.0f;   // speaker similarity from early/full extraction
-    int seg_last_recheck_at_ = 0;        // sample position of last re-check
-    bool seg_has_ref_ = false;           // true after initial speaker identified
 
-    // SAAS: short-segment speaker inheritance state.
-    int prev_seg_speaker_id_ = -1;       // speaker ID from the previous segment
-    std::string prev_seg_speaker_name_;  // speaker name from the previous segment
-    float prev_seg_speaker_sim_ = 0.0f;  // speaker similarity from the previous segment
-    int64_t prev_seg_end_sample_ = 0;    // sample counter at end of previous segment
-    int64_t total_samples_in_ = 0;       // monotonic sample counter for gap measurement
+    // Total samples received (monotonic counter for timeline sample positions).
+    int64_t total_samples_in_ = 0;
 
-    // SAAS: speaker-change ASR split flag.
-    bool asr_spk_change_pending_ = false;   // speaker change detected, trigger ASR split
-    int  asr_spk_change_split_at_ = 0;      // sample position in asr_pcm_buf_ to split at
+    // VAD gap split: triggered when speech resumes after a non-trivial silence.
+    bool asr_vad_gap_pending_ = false;      // VAD gap detected, trigger ASR split
+    int  asr_vad_gap_split_at_ = 0;         // sample position in asr_pcm_buf_ to split at
 
     // ASR buffer absolute sample tracking for timeline resolution.
     int64_t asr_buf_start_sample_ = 0;      // absolute sample position of asr_pcm_buf_[0]
@@ -907,11 +416,7 @@ private:
         std::string speaker_name;       // resolved speaker name
         float speaker_sim = 0.0f;       // similarity from best-authority source
         float speaker_confidence = 0.0f; // timeline fusion confidence (weighted vote)
-        std::string speaker_source;      // source name ("SAAS_FULL", "TRACKER", etc.)
-        // SpeakerTracker snapshot (independent pipeline for A/B comparison).
-        int tracker_id = -1;
-        std::string tracker_name;
-        float tracker_sim = 0.0f;
+        std::string speaker_source;      // source name ("SPK_FULL", etc.)
     };
     std::thread asr_thread_;
     std::mutex asr_mutex_;
@@ -919,15 +424,10 @@ private:
     std::queue<ASRJob> asr_queue_;
     std::atomic<bool> asr_busy_{false};
 
-    // Change detection: previous segment embedding for inter-segment cosine similarity.
-    std::vector<float> prev_wlecapa_emb_;  // 192-dim, empty if first segment
-
-    // Speaker Tracker (independent pipeline for A/B comparison with SAAS).
-    SpeakerTracker tracker_;
-
     OnVadEvent on_vad_;
     OnStats    on_stats_;
     OnSpeaker  on_speaker_;
+    OnSpkEvent on_spk_event_;
     OnTranscript on_transcript_;
     OnAsrLog   on_asr_log_;
     OnAsrPartial on_asr_partial_;

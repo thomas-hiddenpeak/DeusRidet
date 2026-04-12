@@ -8,7 +8,8 @@
 //   {"t":"header", ...}
 //   {"t":"stats",  "s":<stream_sec>, ...}
 //   {"t":"asr",    "s":<stream_start>, ...}
-//   {"t":"vad",    ...}
+//   {"t":"spk",    "s":<stream_start>, ...}   — speaker extraction event
+//   {"t":"vad",    "s":<stream_sec>, ...}
 //   {"t":"footer", ...}
 
 #pragma once
@@ -25,7 +26,6 @@ namespace deusridet {
 // Forward declarations — avoid pulling in heavy headers.
 struct AudioPipelineStats;
 struct VadResult;
-struct TrackerStats;
 
 class TimelineLogger {
 public:
@@ -99,8 +99,8 @@ public:
                  tm.tm_hour, tm.tm_min, tm.tm_sec);
 
         fprintf(fp_,
-            R"({"t":"footer","ended":"%s","duration_sec":%.1f,"counts":{"stats":%u,"asr":%u,"vad":%u}})"
-            "\n", iso, dur, stats_count_, asr_count_, vad_count_);
+            R"({"t":"footer","ended":"%s","duration_sec":%.1f,"counts":{"stats":%u,"asr":%u,"spk":%u,"vad":%u}})"
+            "\n", iso, dur, stats_count_, asr_count_, spk_count_, vad_count_);
         fclose(fp_);
         fp_ = nullptr;
     }
@@ -113,7 +113,6 @@ public:
 
     // Log pipeline stats tick — compact subset relevant for timeline analysis.
     void log_stats(const AudioPipelineStats& st,
-                   const TrackerStats& ts,
                    float wlecapa_margin,
                    float change_sim, bool change_valid);
 
@@ -122,12 +121,17 @@ public:
                  float latency_ms, float audio_sec,
                  const char* trigger,
                  int spk_id, const char* spk_name, float spk_sim,
-                 float spk_conf, const char* spk_src,
-                 int trk_id, const char* trk_name, float trk_sim);
+                 float spk_conf, const char* spk_src);
+
+    // Log speaker extraction event (SPK_EARLY / SPK_FULL / SPK_CHANGE).
+    void log_spk(float stream_start, float stream_end,
+                 const char* source,
+                 int spk_id, const char* spk_name, float spk_sim,
+                 bool is_new);
 
     // Log VAD event (start/end only — not every frame).
-    void log_vad(bool is_speech, bool segment_start, bool segment_end,
-                 int frame_idx, float energy);
+    void log_vad(float stream_sec, bool segment_start, bool segment_end,
+                 float energy);
 
 private:
     FILE* fp_ = nullptr;
@@ -136,6 +140,7 @@ private:
     struct timespec t0_ = {};
     unsigned stats_count_ = 0;
     unsigned asr_count_ = 0;
+    unsigned spk_count_ = 0;
     unsigned vad_count_ = 0;
 };
 

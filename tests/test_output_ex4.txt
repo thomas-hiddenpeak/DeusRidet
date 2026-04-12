@@ -1,0 +1,2245 @@
+Decoding /home/rm01/DeusRidet/tests/test.mp3 ...
+  57841920 samples, 3615.1s
+--- WebSocket connected ---
+Streaming 112973 chunks (512 samples each, speed=8.0x) ...
+============================================================
+  ... 5.0s / 3615.1s
+  ASR [spk0] (3.2-4.7s sim=0.00 conf=0.10 src=SNAPSHOT trigger=post_silence) 比较理想化那个人嘛。
+  ... 10.0s / 3615.1s
+  ASR [spk0] (5.4-7.1s sim=0.00 conf=0.10 src=SNAPSHOT trigger=post_silence) 其实是这样的，就说。
+  ASR [spk0] (7.0-8.1s sim=0.00 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。嗯。
+  ... 15.0s / 3615.1s
+  ASR [spk0] (8.0-8.8s sim=0.00 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。
+  ASR [spk0] (10.5-11.6s sim=0.00 conf=0.10 src=SNAPSHOT trigger=post_silence) 我是。是。
+  ... 20.0s / 3615.1s
+  ASR [spk0] (11.7-13.9s sim=0.00 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯，我是是。
+  ASR [spk0] (14.4-15.8s sim=0.00 conf=0.10 src=SNAPSHOT trigger=post_silence) 我是觉得。
+  ASR(partial, 2.0s): 从预期角度来说，我是在。
+  ... 25.0s / 3615.1s
+  ASR [spk0] (15.7-18.2s sim=0.00 conf=0.10 src=SNAPSHOT trigger=post_silence) 从预期角度来说，我是在。
+  ASR [spk0] (19.3-21.0s sim=0.00 conf=0.10 src=SNAPSHOT trigger=post_silence) 我当时肯定是在十五哈。
+  ... 30.0s / 3615.1s
+  SPK: NEW spk0 (id=0 sim=1.000)
+  STATS: spk0 id=0 sim=1.000 lat=0ms EARLY
+  ASR [spk0] (22.1-23.9s sim=1.00 conf=0.78 src=SPK_FULL trigger=post_silence) 因为那个。
+  SPK: spk0 (id=0 sim=0.571)
+  STATS: spk0 id=0 sim=0.571 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.576)
+  STATS: spk0 id=0 sim=0.576 lat=0ms EARLY
+  ... 35.0s / 3615.1s
+  ASR(partial, 2.0s): 因为我能想象到，就是后面。
+  ASR [spk0] (25.8-28.6s sim=0.58 conf=1.18 src=SPK_FULL trigger=post_silence) 因为我能想象到，就是后面会在。
+  SPK: spk0 (id=0 sim=0.561)
+  STATS: spk0 id=0 sim=0.561 lat=0ms EARLY
+  ASR [spk0] (28.7-29.8s sim=0.58 conf=0.20 src=SPK_FULL trigger=post_silence) 这个。
+  ... 40.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.653)
+  STATS: spk0 id=0 sim=0.653 lat=0ms EARLY
+  ASR(partial, 2.4s): 就是C的这一段，不是C啊，杭州这一段。
+  SPK: spk0 (id=0 sim=0.676)
+  STATS: spk0 id=0 sim=0.676 lat=0ms EARLY
+  ... 45.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.680)
+  STATS: spk0 id=0 sim=0.680 lat=0ms EARLY
+  ASR(partial, 4.4s): 就是C的这一段，不是C，杭州这一段的产品和成都这一段产品。
+  ... 50.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.436)
+  STATS: spk0 id=0 sim=0.436 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.477)
+  STATS: spk0 id=0 sim=0.477 lat=0ms EARLY
+  ASR [spk0] (30.7-35.4s sim=0.68 conf=1.53 src=SPK_FULL trigger=post_silence) 就是C的这一段，不是C，杭州这一段的产品和成都这一段产品。
+  ... 54.9s / 3615.1s
+  ASR [spk0] (35.5-36.8s sim=0.68 conf=0.20 src=SPK_FULL trigger=vad_gap) 都要去做。
+  SPK: spk0 (id=0 sim=0.456)
+  STATS: spk0 id=0 sim=0.456 lat=0ms EARLY
+  ASR [spk0] (36.8-37.6s sim=0.68 conf=0.20 src=SPK_FULL trigger=post_silence) 因为。
+  SPK: spk0 (id=0 sim=0.510)
+  STATS: spk0 id=0 sim=0.510 lat=0ms EARLY
+  ... 59.9s / 3615.1s
+  ASR [spk0] (38.3-39.1s sim=0.90 conf=0.10 src=SNAPSHOT trigger=vad_gap) 我。
+  SPK: spk0 (id=0 sim=0.616)
+  STATS: spk0 id=0 sim=0.616 lat=0ms EARLY
+  ... 64.9s / 3615.1s
+  SPK: spk0 (id=0 sim=0.589)
+  STATS: spk0 id=0 sim=0.589 lat=0ms EARLY
+  ASR [spk0] (39.1-44.8s sim=0.62 conf=1.68 src=SPK_FULL trigger=post_silence) 嗯，我是M1这件事情的迭代，以及往后的推演，以及它的生产。
+  SPK: spk0 (id=0 sim=0.725)
+  STATS: spk0 id=0 sim=0.725 lat=0ms EARLY
+  ASR [spk0] (45.1-46.1s sim=0.62 conf=0.20 src=SPK_FULL trigger=post_silence) 就是说。
+  ... 69.9s / 3615.1s
+  SPK: spk0 (id=0 sim=0.726)
+  STATS: spk0 id=0 sim=0.726 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.521)
+  STATS: spk0 id=0 sim=0.521 lat=0ms EARLY
+  ASR [spk0] (46.0-49.2s sim=0.73 conf=1.49 src=SPK_FULL trigger=post_silence) 可能你们三个是没有时间了，但是我会全力以赴。
+  SPK: spk0 (id=0 sim=0.595)
+  STATS: spk0 id=0 sim=0.595 lat=0ms EARLY
+  ... 74.9s / 3615.1s
+  ASR [spk0] (49.3-51.6s sim=0.59 conf=1.22 src=SPK_FULL trigger=post_silence) 拿不出百分之四十的精力把它。
+  SPK: spk0 (id=0 sim=0.604)
+  STATS: spk0 id=0 sim=0.604 lat=0ms EARLY
+  ASR [spk0] (51.5-52.6s sim=0.59 conf=0.20 src=SPK_FULL trigger=post_silence) 去做的。
+  ... 79.9s / 3615.1s
+  ASR [spk0] (52.9-54.6s sim=0.60 conf=0.71 src=SPK_FULL trigger=post_silence) 嗯，因为我觉得。
+  ASR [spk0] (56.3-57.5s sim=0.60 conf=0.20 src=SPK_FULL trigger=vad_gap) 就是不会。
+  ASR [spk0] (57.5-58.4s sim=0.60 conf=0.10 src=SNAPSHOT trigger=post_silence) 不是啊。
+  ... 84.9s / 3615.1s
+  SPK: spk0 (id=0 sim=0.636)
+  STATS: spk0 id=0 sim=0.636 lat=0ms EARLY
+  ASR [spk0] (58.5-60.0s sim=0.78 conf=0.10 src=SNAPSHOT trigger=vad_gap) 不会那个，所以说。
+  ... 89.9s / 3615.1s
+  ASR(partial, 2.0s): 我觉得跟做这件事情，我觉得15。
+  SPK: spk0 (id=0 sim=0.549)
+  STATS: spk0 id=0 sim=0.549 lat=0ms EARLY
+  ASR [spk0] (60.0-62.6s sim=0.64 conf=0.35 src=SPK_EARLY trigger=post_silence) 我觉得可能做这件事情，我觉得15是。
+  SPK: spk0 (id=0 sim=0.619)
+  STATS: spk0 id=0 sim=0.619 lat=0ms EARLY
+  ... 94.9s / 3615.1s
+  ASR [spk0] (62.9-64.8s sim=0.62 conf=1.22 src=SPK_FULL trigger=post_silence) 是，差不多的。
+  SPK: spk0 (id=0 sim=0.321)
+  STATS: spk0 id=0 sim=0.321 lat=0ms EARLY
+  ASR(partial, 2.0s): 先说的是就是传统肉嘛，是吧？
+  ... 99.9s / 3615.1s
+  SPK: spk0 (id=0 sim=0.386)
+  STATS: spk0 id=0 sim=0.386 lat=0ms EARLY
+  ASR [spk0] (65.3-67.7s sim=0.32 conf=0.38 src=SPK_EARLY trigger=post_silence) 先说的是就是传统行业嘛，是吧？
+  SPK: spk0 (id=0 sim=0.657)
+  STATS: spk0 id=0 sim=0.657 lat=0ms EARLY
+  ... 104.9s / 3615.1s
+  SPK: spk0 (id=0 sim=0.742)
+  STATS: spk0 id=0 sim=0.742 lat=0ms EARLY
+  ASR(partial, 2.8s): 就是我，我我只说我，我我拿。
+  SPK: spk0 (id=0 sim=0.780)
+  STATS: spk0 id=0 sim=0.780 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.413)
+  STATS: spk0 id=0 sim=0.413 lat=0ms EARLY
+  ... 109.9s / 3615.1s
+  ASR [spk0] (67.8-72.7s sim=0.78 conf=1.51 src=SPK_FULL trigger=post_silence) 就是我只说我拿十五这件事的这个价值哈。
+  SPK: spk0 (id=0 sim=0.632)
+  STATS: spk0 id=0 sim=0.632 lat=0ms EARLY
+  ... 114.8s / 3615.1s
+  ASR(partial, 2.7s): 就是杭州嘛，啊，就是杭州嘛。
+  ... 119.8s / 3615.1s
+  ASR [spk0] (72.6-76.8s sim=0.63 conf=0.47 src=SPK_EARLY trigger=post_silence) 就是杭州嘛，啊，就是杭州嘛。对，跟像就现在跟什么没关系嘛。
+  ASR [spk0] (78.4-80.6s sim=0.63 conf=0.10 src=SNAPSHOT trigger=post_silence) 对，跟车开的也经常有。
+  ... 124.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.284)
+  STATS: spk0 id=0 sim=0.284 lat=0ms EARLY
+  ASR [spk0] (81.5-82.5s sim=0.69 conf=0.10 src=SNAPSHOT trigger=vad_gap) 然后呢？
+  ASR [spk0] (82.5-83.9s sim=0.63 conf=0.10 src=SNAPSHOT trigger=post_silence) 之后的话。
+  ... 129.8s / 3615.1s
+  ASR [spk0] (84.4-86.1s sim=0.69 conf=0.10 src=SNAPSHOT trigger=vad_gap) 上我百分之5，我可以的。
+  ... 134.8s / 3615.1s
+  ASR [spk0] (86.1-89.4s sim=0.28 conf=0.28 src=SPK_EARLY trigger=post_silence) 只要超过三点一四，我就可以接受。我还没说完。
+  ASR [spk0] (90.5-91.7s sim=0.28 conf=0.10 src=SNAPSHOT trigger=post_silence) 然后呢？
+  SPK: spk0 (id=0 sim=0.277)
+  STATS: spk0 id=0 sim=0.277 lat=0ms EARLY
+  ASR [spk0] (91.6-92.7s sim=0.28 conf=0.10 src=SNAPSHOT trigger=post_silence) 呃。
+  ... 139.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.578)
+  STATS: spk0 id=0 sim=0.578 lat=0ms EARLY
+  ASR [spk0] (93.2-94.2s sim=0.28 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。嗯。
+  ASR [spk0] (94.9-95.9s sim=0.28 conf=0.10 src=SNAPSHOT trigger=post_silence) 就这么定了。
+  ... 144.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.665)
+  STATS: spk0 id=0 sim=0.665 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.520)
+  STATS: spk0 id=0 sim=0.520 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.514)
+  STATS: spk0 id=0 sim=0.514 lat=0ms EARLY
+  ... 149.8s / 3615.1s
+  ASR(partial, 3.6s): 不是，不能犹豫！我跟你说，不，我还没说完嘛！你。
+  SPK: spk0 (id=0 sim=0.248)
+  STATS: spk0 id=0 sim=0.248 lat=0ms EARLY
+  ASR [spk0] (95.8-99.3s sim=0.67 conf=1.30 src=SPK_FULL trigger=vad_gap) 不是，不能犹豫，我跟你说，不，我还没说完呢。
+  ... 154.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.476)
+  STATS: spk0 id=0 sim=0.476 lat=0ms EARLY
+  ASR [spk0] (99.3-101.0s sim=0.51 conf=1.36 src=SPK_FULL trigger=post_silence) 你知道我说话喜欢铺垫吗？
+  ... 159.8s / 3615.1s
+  ASR [spk0] (100.9-101.9s sim=0.51 conf=0.20 src=SPK_FULL trigger=post_silence) 不要铺垫。
+  SPK: spk0 (id=0 sim=0.503)
+  STATS: spk0 id=0 sim=0.503 lat=0ms EARLY
+  ... 164.8s / 3615.1s
+  ASR [spk0] (101.8-105.7s sim=0.48 conf=0.47 src=SPK_EARLY trigger=post_silence) 有话直说。你要是以后敷衍，或者是当你随便说的话，我。
+  SPK: spk0 (id=0 sim=0.384)
+  STATS: spk0 id=0 sim=0.384 lat=0ms EARLY
+  ASR [spk0] (105.6-107.4s sim=0.50 conf=0.51 src=SPK_EARLY trigger=post_silence) 反正咋说呢，就是。
+  ... 169.8s / 3615.1s
+  ASR [spk0] (107.9-110.0s sim=0.38 conf=0.43 src=SPK_EARLY trigger=post_silence) 今天下午的这个事儿。
+  SPK: spk0 (id=0 sim=0.341)
+  STATS: spk0 id=0 sim=0.341 lat=0ms EARLY
+  ... 174.8s / 3615.1s
+  ASR(partial, 2.0s): 我说，我们融资之后，其他。
+  SPK: spk0 (id=0 sim=0.496)
+  STATS: spk0 id=0 sim=0.496 lat=0ms EARLY
+  ASR [spk0] (109.9-112.7s sim=0.34 conf=0.33 src=SPK_EARLY trigger=post_silence) 我说，我们融资之后，其他什么？
+  ... 179.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.425)
+  STATS: spk0 id=0 sim=0.425 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.527)
+  STATS: spk0 id=0 sim=0.527 lat=0ms EARLY
+  ASR(partial, 2.7s): 我们拿钱过来，就是以最快的速度把。
+  SPK: spk0 (id=0 sim=0.488)
+  STATS: spk0 id=0 sim=0.488 lat=0ms EARLY
+  ... 184.7s / 3615.1s
+  ASR [spk0] (112.6-116.0s sim=0.53 conf=1.46 src=SPK_FULL trigger=post_silence) 我们拿钱过来，就是以最快的速度把事儿给。
+  SPK: spk0 (id=0 sim=0.581)
+  STATS: spk0 id=0 sim=0.581 lat=0ms EARLY
+  ... 189.7s / 3615.1s
+  ASR [spk0] (115.9-118.7s sim=0.58 conf=1.15 src=SPK_FULL trigger=post_silence) 不管是干成了也好，是干错了也好。
+  ASR [spk0] (118.6-120.0s sim=0.58 conf=0.20 src=SPK_FULL trigger=post_silence) 你最快速度去弄。
+  ... 194.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.487)
+  STATS: spk0 id=0 sim=0.487 lat=0ms EARLY
+  ASR [spk0] (120.3-121.1s sim=0.58 conf=0.20 src=SPK_FULL trigger=post_silence) 见了。
+  ASR [spk0] (121.6-122.4s sim=0.58 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。
+  ... 199.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.435)
+  STATS: spk0 id=0 sim=0.435 lat=0ms EARLY
+  ASR [spk0] (122.5-124.8s sim=0.49 conf=0.40 src=SPK_EARLY trigger=post_silence) 你要是铺垫的话，我就当你。
+  ... 204.7s / 3615.1s
+  ASR [spk0] (124.7-126.7s sim=0.43 conf=0.46 src=SPK_EARLY trigger=post_silence) 最开始说出来那句话为准。
+  ASR [spk0] (132.0-132.7s sim=0.86 conf=0.10 src=SNAPSHOT trigger=vad_gap) 嗯。
+  ... 209.7s / 3615.1s
+  ASR [spk0] (132.7-134.5s sim=0.43 conf=0.10 src=SNAPSHOT trigger=post_silence) 行业很重要，必须，然后。
+  SPK: spk0 (id=0 sim=0.582)
+  STATS: spk0 id=0 sim=0.582 lat=0ms EARLY
+  ... 214.7s / 3615.1s
+  ASR [spk0] (134.4-135.7s sim=0.43 conf=0.10 src=SNAPSHOT trigger=post_silence) 那个。哎。
+  ASR [spk0] (136.0-136.9s sim=0.43 conf=0.10 src=SNAPSHOT trigger=post_silence) 从这种。
+  SPK: spk0 (id=0 sim=0.695)
+  STATS: spk0 id=0 sim=0.695 lat=0ms EARLY
+  ... 219.7s / 3615.1s
+  ASR [spk0] (136.8-139.4s sim=0.69 conf=1.20 src=SPK_FULL trigger=post_silence) 就回到了我十一嘛十。
+  SPK: spk0 (id=0 sim=0.596)
+  STATS: spk0 id=0 sim=0.596 lat=0ms EARLY
+  ASR [spk0] (139.5-140.1s sim=0.69 conf=0.20 src=SPK_FULL trigger=vad_gap) 其实是。
+  ... 224.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.347)
+  STATS: spk0 id=0 sim=0.347 lat=0ms EARLY
+  ASR(partial, 2.9s): 都都，好像你是280000是吧？
+  SPK: spk0 (id=0 sim=0.681)
+  STATS: spk0 id=0 sim=0.681 lat=0ms EARLY
+  ... 229.7s / 3615.1s
+  ASR(partial, 4.9s): 这多多，好像你是280000是吧？我们俩。
+  ... 234.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.268)
+  STATS: spk0 id=0 sim=0.268 lat=0ms EARLY
+  ASR [spk0] (140.1-145.7s sim=0.68 conf=0.81 src=SPK_FULL trigger=post_silence) 多多，好像你是280000是吧？我们俩。
+  ASR [spk0] (146.0-147.7s sim=0.35 conf=0.20 src=SPK_EARLY trigger=post_silence) 你原谅我吗？
+  ... 239.6s / 3615.1s
+  ASR [spk0] (147.8-149.7s sim=0.27 conf=0.48 src=SPK_EARLY trigger=post_silence) 十一可以，可以拿到7。
+  ... 244.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.427)
+  STATS: spk0 id=0 sim=0.427 lat=0ms EARLY
+  ASR [spk0] (150.6-151.7s sim=0.27 conf=0.20 src=SPK_EARLY trigger=post_silence) 跟他1起讲。
+  SPK: spk0 (id=0 sim=0.621)
+  STATS: spk0 id=0 sim=0.621 lat=0ms EARLY
+  ASR(partial, 2.0s): 我退回到就这个，我和老。
+  ... 249.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.616)
+  STATS: spk0 id=0 sim=0.616 lat=0ms EARLY
+  ASR [spk0] (152.4-155.2s sim=0.62 conf=1.18 src=SPK_FULL trigger=post_silence) 说退回到之前的，我和老唐。
+  ASR [spk0] (155.1-156.1s sim=0.62 conf=0.20 src=SPK_FULL trigger=post_silence) 1样。
+  SPK: spk0 (id=0 sim=0.559)
+  STATS: spk0 id=0 sim=0.559 lat=0ms EARLY
+  ... 254.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.276)
+  STATS: spk0 id=0 sim=0.276 lat=0ms EARLY
+  ASR(partial, 2.7s): 然后，厂做是最核心的骨干，国家感觉。
+  SPK: spk0 (id=0 sim=0.643)
+  STATS: spk0 id=0 sim=0.643 lat=0ms EARLY
+  ... 259.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.571)
+  STATS: spk0 id=0 sim=0.571 lat=0ms EARLY
+  ASR [spk0] (156.4-161.7s sim=0.64 conf=1.51 src=SPK_FULL trigger=post_silence) 然后唐总是最核心的骨干，大家觉得再把这事情往后拖一个小时。
+  ... 264.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.648)
+  STATS: spk0 id=0 sim=0.648 lat=0ms EARLY
+  ASR [spk0] (162.0-162.7s sim=0.64 conf=0.20 src=SPK_FULL trigger=vad_gap) 我就。
+  ... 269.6s / 3615.1s
+  ASR [spk0] (162.7-165.5s sim=0.65 conf=1.00 src=SPK_FULL trigger=post_silence) 我就再往下面降，我就到百分之五了。
+  ASR [spk0] (165.8-167.3s sim=0.65 conf=0.20 src=SPK_FULL trigger=post_silence) 再往后拖。
+  ... 274.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.439)
+  STATS: spk0 id=0 sim=0.439 lat=0ms EARLY
+  ASR [spk0] (167.2-168.6s sim=0.65 conf=0.20 src=SPK_FULL trigger=post_silence) 我就百分之4。
+  SPK: spk0 (id=0 sim=0.429)
+  STATS: spk0 id=0 sim=0.429 lat=0ms EARLY
+  ... 279.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.523)
+  STATS: spk0 id=0 sim=0.523 lat=0ms EARLY
+  ASR(partial, 2.8s): 拖到三点三点一四一五九二六。
+  SPK: spk0 (id=0 sim=0.403)
+  STATS: spk0 id=0 sim=0.403 lat=0ms EARLY
+  ... 284.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.567)
+  STATS: spk0 id=0 sim=0.567 lat=0ms EARLY
+  ASR [spk0] (168.5-172.8s sim=0.52 conf=1.34 src=SPK_FULL trigger=post_silence) 拖到三点三点一四一五九二六，因为这事儿。
+  ... 289.6s / 3615.1s
+  ASR [spk0] (172.9-174.8s sim=0.57 conf=1.27 src=SPK_FULL trigger=post_silence) 这这事儿没办法这么玩儿。
+  ASR [spk0] (174.7-175.5s sim=0.57 conf=0.20 src=SPK_FULL trigger=post_silence) 是。
+  ... 294.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.542)
+  STATS: spk0 id=0 sim=0.542 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.478)
+  STATS: spk0 id=0 sim=0.478 lat=0ms EARLY
+  ASR(partial, 2.6s): 都是你的，赶紧说，把自己的想法预。
+  SPK: spk0 (id=0 sim=0.438)
+  STATS: spk0 id=0 sim=0.438 lat=0ms EARLY
+  ... 299.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.656)
+  STATS: spk0 id=0 sim=0.656 lat=0ms EARLY
+  ASR(partial, 4.6s): 都是你们赶紧说，把自己的想法、预期讲出来。我们大家经过这么。
+  ... 304.5s / 3615.1s
+  SPK: spk0 (id=0 sim=0.672)
+  STATS: spk0 id=0 sim=0.672 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.530)
+  STATS: spk0 id=0 sim=0.530 lat=0ms EARLY
+  ASR [spk0] (176.0-181.6s sim=0.66 conf=1.27 src=SPK_FULL trigger=post_silence) 都是几个，赶紧说，把自己的想法、预期讲出来。我们大家经过这么多事情了。
+  ... 309.5s / 3615.1s
+  SPK: spk0 (id=0 sim=0.704)
+  STATS: spk0 id=0 sim=0.704 lat=0ms EARLY
+  ASR [spk0] (182.5-185.7s sim=0.70 conf=1.46 src=SPK_FULL trigger=post_silence) 呃，如果让我重新说，我就说我和。
+  ... 314.5s / 3615.1s
+  SPK: spk0 (id=0 sim=0.547)
+  STATS: spk0 id=0 sim=0.547 lat=0ms EARLY
+  ASR [spk0] (185.6-186.9s sim=0.70 conf=0.20 src=SPK_FULL trigger=post_silence) 呃，老太阳。
+  SPK: spk0 (id=0 sim=0.519)
+  STATS: spk0 id=0 sim=0.519 lat=0ms EARLY
+  ... 319.5s / 3615.1s
+  ASR [spk0] (186.8-187.6s sim=0.70 conf=0.20 src=SPK_FULL trigger=vad_gap) 然后。
+  ASR [spk0] (187.6-189.2s sim=0.52 conf=1.38 src=SPK_FULL trigger=post_silence) 60000，两210000。
+  ... 324.5s / 3615.1s
+  ASR [spk0] (190.9-191.7s sim=0.55 conf=0.20 src=SPK_EARLY trigger=post_silence) 嗯。
+  ASR [spk0] (191.6-192.2s sim=0.55 conf=0.20 src=SPK_EARLY trigger=vad_gap) 我。的
+  ... 329.5s / 3615.1s
+  ASR [spk0] (192.2-193.5s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 我不能。
+  ... 334.5s / 3615.1s
+  ASR [spk0] (201.6-202.4s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。嗯。
+  SPK: spk0 (id=0 sim=0.546)
+  STATS: spk0 id=0 sim=0.546 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.519)
+  STATS: spk0 id=0 sim=0.519 lat=0ms EARLY
+  ASR(partial, 2.0s): 是，我想要的是100000。
+  ... 339.5s / 3615.1s
+  ASR [spk0] (202.3-205.0s sim=0.52 conf=1.15 src=SPK_FULL trigger=post_silence) 是，我想要的是100000，不是15。
+  ASR [spk0] (205.3-206.1s sim=0.52 conf=0.20 src=SPK_FULL trigger=post_silence) 我。
+  ... 344.5s / 3615.1s
+  ASR [spk0] (207.0-207.9s sim=0.52 conf=0.20 src=SPK_FULL trigger=post_silence) 我就。哎。
+  ... 349.5s / 3615.1s
+  ASR [spk0] (208.0-209.0s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 我们。
+  ASR [spk0] (208.9-210.4s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 说的是15，而。
+  ... 354.5s / 3615.1s
+  ASR [spk0] (211.1-211.9s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 啊。
+  ASR [spk0] (213.8-214.6s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 我现在。
+  ... 359.5s / 3615.1s
+  ASR [spk0] (214.5-215.6s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 我是烟。
+  ASR [spk0] (216.3-217.1s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 28。
+  ... 364.4s / 3615.1s
+  ASR [spk0] (217.2-218.1s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 收我。
+  ... 369.4s / 3615.1s
+  ASR [spk0] (220.7-221.5s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 没关系。哎。
+  ASR [spk0] (223.2-224.0s sim=0.78 conf=0.10 src=SNAPSHOT trigger=vad_gap) 嗯。
+  ... 374.4s / 3615.1s
+  ASR [spk0] (224.0-225.4s sim=0.59 conf=0.10 src=SNAPSHOT trigger=vad_gap) 是这样的吧？我觉得。
+  SPK: spk0 (id=0 sim=0.138)
+  STATS: spk0 id=0 sim=0.138 lat=0ms EARLY
+  ASR [spk0] (225.4-226.2s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。嗯。
+  ... 379.4s / 3615.1s
+  ASR [spk0] (226.1-227.9s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 这个首先。
+  SPK: spk0 (id=0 sim=0.225)
+  STATS: spk0 id=0 sim=0.225 lat=0ms EARLY
+  ... 384.4s / 3615.1s
+  ASR [spk0] (227.8-229.0s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 就是。哎。
+  ... 389.4s / 3615.1s
+  SPK: spk0 (id=0 sim=0.279)
+  STATS: spk0 id=0 sim=0.279 lat=0ms EARLY
+  ASR [spk0] (230.7-233.7s sim=0.23 conf=0.65 src=SPK_EARLY trigger=post_silence) 土生土生形式土鳖技术移植过来了。
+  ... 394.4s / 3615.1s
+  SPK: spk0 (id=0 sim=0.163)
+  STATS: spk0 id=0 sim=0.163 lat=0ms EARLY
+  ASR [spk0] (233.8-236.1s sim=0.28 conf=0.40 src=SPK_EARLY trigger=post_silence) 对吧？这是第一个，然后第二个就是。
+  SPK: NEW spk1 (id=1 sim=1.000)
+  STATS: spk1 id=1 sim=1.000 lat=0ms EARLY
+  ... 399.4s / 3615.1s
+  ASR(partial, 2.0s): 当然，这个经济分配问题，因为。
+  SPK: spk1 (id=1 sim=0.442)
+  STATS: spk1 id=1 sim=0.442 lat=0ms EARLY
+  ASR [spk1] (236.2-238.6s sim=1.00 conf=0.83 src=SPK_FULL trigger=post_silence) 当然，这个经济分配问题，因为。
+  ... 404.4s / 3615.1s
+  SPK: spk1 (id=1 sim=0.693)
+  STATS: spk1 id=1 sim=0.693 lat=0ms EARLY
+  ASR [spk1] (238.7-240.5s sim=0.69 conf=1.28 src=SPK_FULL trigger=post_silence) 啊，你不可能说。
+  ... 409.4s / 3615.1s
+  SPK: spk1 (id=1 sim=0.449)
+  STATS: spk1 id=1 sim=0.449 lat=0ms EARLY
+  ASR [spk1] (240.4-241.4s sim=0.69 conf=0.20 src=SPK_FULL trigger=post_silence) 就是。
+  SPK: spk1 (id=1 sim=0.452)
+  STATS: spk1 id=1 sim=0.452 lat=0ms EARLY
+  ... 414.4s / 3615.1s
+  ASR(partial, 2.0s): 很很重的一个活去干，但是呢，咱。
+  SPK: spk1 (id=1 sim=0.711)
+  STATS: spk1 id=1 sim=0.711 lat=0ms EARLY
+  SPK: spk1 (id=1 sim=0.442)
+  STATS: spk1 id=1 sim=0.442 lat=0ms EARLY
+  ... 419.4s / 3615.1s
+  ASR [spk1] (241.9-245.7s sim=0.71 conf=1.41 src=SPK_FULL trigger=post_silence) 有很很重的一个活去干，但是呢，大家又没有得到相应的这个。
+  SPK: spk1 (id=1 sim=0.578)
+  STATS: spk1 id=1 sim=0.578 lat=0ms EARLY
+  ... 424.4s / 3615.1s
+  SPK: spk1 (id=1 sim=0.561)
+  STATS: spk1 id=1 sim=0.561 lat=0ms EARLY
+  ASR(partial, 2.7s): 那这里了，或者去干干那个，特别是不。
+  SPK: spk1 (id=1 sim=0.398)
+  STATS: spk1 id=1 sim=0.398 lat=0ms EARLY
+  ... 429.3s / 3615.1s
+  SPK: spk1 (id=1 sim=0.546)
+  STATS: spk1 id=1 sim=0.546 lat=0ms EARLY
+  ASR [spk1] (245.6-249.1s sim=0.56 conf=1.45 src=SPK_FULL trigger=post_silence) 那肯定有啦！我说改改这个裤子，根本是不合适了。
+  ... 434.3s / 3615.1s
+  SPK: spk1 (id=1 sim=0.585)
+  STATS: spk1 id=1 sim=0.585 lat=0ms EARLY
+  ASR [spk1] (249.2-252.2s sim=0.55 conf=0.90 src=SPK_FULL trigger=post_silence) 所以说，不能走那种理想的选选道。
+  SPK: spk1 (id=1 sim=0.479)
+  STATS: spk1 id=1 sim=0.479 lat=0ms EARLY
+  ... 439.3s / 3615.1s
+  ASR(partial, 2.4s): 那这样，这种情况下的话。
+  SPK: spk1 (id=1 sim=0.729)
+  STATS: spk1 id=1 sim=0.729 lat=0ms EARLY
+  ASR [spk1] (252.3-256.5s sim=0.73 conf=1.23 src=SPK_FULL trigger=vad_gap) 那这样这种情况下的话，其实肯定还是要有些变化。
+  ... 444.3s / 3615.1s
+  ASR [spk1] (256.5-257.6s sim=0.73 conf=0.20 src=SPK_FULL trigger=post_silence) 那比如说。
+  ... 449.3s / 3615.1s
+  ASR [spk1] (258.1-259.2s sim=0.73 conf=0.20 src=SPK_FULL trigger=post_silence) 李永全。
+  SPK: spk1 (id=1 sim=0.461)
+  STATS: spk1 id=1 sim=0.461 lat=0ms EARLY
+  ASR [spk1] (259.1-260.9s sim=0.73 conf=0.20 src=SPK_FULL trigger=vad_gap) 对吧？其实他做了。
+  ... 454.3s / 3615.1s
+  SPK: spk1 (id=1 sim=0.499)
+  STATS: spk1 id=1 sim=0.499 lat=0ms EARLY
+  ASR [spk1] (260.9-262.5s sim=0.73 conf=0.10 src=SNAPSHOT trigger=post_silence) 可能在这种。
+  SPK: spk1 (id=1 sim=0.639)
+  STATS: spk1 id=1 sim=0.639 lat=0ms EARLY
+  ... 459.3s / 3615.1s
+  ASR [spk1] (262.4-265.5s sim=0.64 conf=1.47 src=SPK_FULL trigger=post_silence) 战略决策上，我能就是有这么一个资本。
+  ... 464.3s / 3615.1s
+  SPK: spk1 (id=1 sim=0.560)
+  STATS: spk1 id=1 sim=0.560 lat=0ms EARLY
+  ASR [spk1] (265.6-266.6s sim=0.50 conf=0.20 src=SPK_EARLY trigger=post_silence) 长发法师。
+  SPK: spk1 (id=1 sim=0.269)
+  STATS: spk1 id=1 sim=0.269 lat=0ms EARLY
+  ... 469.3s / 3615.1s
+  ASR(partial, 2.7s): 当然，这个百分之五十一就不需要一直。
+  SPK: spk1 (id=1 sim=0.507)
+  STATS: spk1 id=1 sim=0.507 lat=0ms EARLY
+  SPK: spk1 (id=1 sim=0.577)
+  STATS: spk1 id=1 sim=0.577 lat=0ms EARLY
+  ... 474.3s / 3615.1s
+  ASR [spk1] (267.3-272.0s sim=0.58 conf=1.53 src=SPK_FULL trigger=post_silence) 当然，这个百分之五十一就不需要一次性投入。对，我们。
+  ASR [spk1] (271.9-273.4s sim=0.58 conf=0.20 src=SPK_FULL trigger=post_silence) 自然性啊。
+  ... 479.3s / 3615.1s
+  SPK: spk1 (id=1 sim=0.436)
+  STATS: spk1 id=1 sim=0.436 lat=0ms EARLY
+  SPK: spk1 (id=1 sim=0.503)
+  STATS: spk1 id=1 sim=0.503 lat=0ms EARLY
+  ... 484.3s / 3615.1s
+  ASR(partial, 2.0s): 做到百分之，这个我一开始想的是百分之。
+  SPK: spk1 (id=1 sim=0.612)
+  STATS: spk1 id=1 sim=0.612 lat=0ms EARLY
+  SPK: spk1 (id=1 sim=0.495)
+  STATS: spk1 id=1 sim=0.495 lat=0ms EARLY
+  ASR [spk1] (277.3-280.6s sim=0.61 conf=1.47 src=SPK_FULL trigger=post_silence) 做到百分之，这个我一开始想的是百分之大概四十一点二。
+  ... 489.2s / 3615.1s
+  SPK: spk1 (id=1 sim=0.540)
+  STATS: spk1 id=1 sim=0.540 lat=0ms EARLY
+  ASR [spk1] (280.7-281.4s sim=0.61 conf=0.20 src=SPK_FULL trigger=vad_gap) 然后。
+  ... 494.2s / 3615.1s
+  ASR [spk1] (281.4-283.2s sim=0.54 conf=1.34 src=SPK_FULL trigger=post_silence) 交了那个十二十万的。
+  SPK: spk1 (id=1 sim=0.264)
+  STATS: spk1 id=1 sim=0.264 lat=0ms EARLY
+  ... 499.2s / 3615.1s
+  ASR [spk1] (284.5-286.3s sim=0.26 conf=0.51 src=SPK_EARLY trigger=post_silence) 是吧？
+  SPK: spk1 (id=1 sim=0.233)
+  STATS: spk1 id=1 sim=0.233 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.515)
+  STATS: spk0 id=0 sim=0.515 lat=0ms EARLY
+  ... 504.2s / 3615.1s
+  ASR [spk0] (286.2-288.3s sim=0.52 conf=0.76 src=SPK_FULL trigger=post_silence) 嗯，其实我也是，我看了两遍。
+  ASR [spk0] (288.8-289.8s sim=0.52 conf=0.20 src=SPK_FULL trigger=post_silence) 真可以嘛？
+  ... 509.2s / 3615.1s
+  ASR [spk0] (294.5-295.5s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。嗯。
+  ... 514.2s / 3615.1s
+  ASR [spk0] (297.8-298.4s sim=0.80 conf=0.10 src=SNAPSHOT trigger=vad_gap) 嗯。对。
+  SPK: spk0 (id=0 sim=0.157)
+  STATS: spk0 id=0 sim=0.157 lat=0ms EARLY
+  ... 519.2s / 3615.1s
+  ASR(partial, 2.6s): 对，六十六，二十八。
+  ASR [spk0] (298.4-301.8s sim=0.16 conf=0.27 src=SPK_EARLY trigger=post_silence) 对，六十六，二十八点七。
+  ... 524.2s / 3615.1s
+  ASR [spk0] (301.9-302.9s sim=0.16 conf=0.20 src=SPK_EARLY trigger=vad_gap) 28。
+  ... 529.2s / 3615.1s
+  ASR [spk0] (302.9-303.5s sim=0.16 conf=0.20 src=SPK_EARLY trigger=vad_gap) 过的问题。
+  ASR [spk0] (303.5-304.3s sim=0.16 conf=0.20 src=SPK_EARLY trigger=post_silence) 嗯嗯。
+  ... 534.2s / 3615.1s
+  SPK: spk0 (id=0 sim=0.296)
+  STATS: spk0 id=0 sim=0.296 lat=0ms EARLY
+  ASR [spk0] (304.8-305.6s sim=0.16 conf=0.10 src=SNAPSHOT trigger=post_silence) 对。language Chinese
+  ... 539.2s / 3615.1s
+  ASR [spk0] (306.1-307.3s sim=0.16 conf=0.10 src=SNAPSHOT trigger=post_silence) 就你们俩。
+  ASR [spk0] (307.2-308.4s sim=0.16 conf=0.10 src=SNAPSHOT trigger=post_silence) 可以绝对突破。
+  ... 544.2s / 3615.1s
+  ASR [spk0] (309.1-310.5s sim=0.16 conf=0.10 src=SNAPSHOT trigger=post_silence) 收完断。
+  ... 549.2s / 3615.1s
+  SPK: spk0 (id=0 sim=0.390)
+  STATS: spk0 id=0 sim=0.390 lat=0ms EARLY
+  ASR [spk0] (310.6-312.9s sim=0.30 conf=0.40 src=SPK_EARLY trigger=post_silence) 我那可能66，差一点点。
+  ... 554.1s / 3615.1s
+  ASR [spk0] (313.0-313.8s sim=0.30 conf=0.20 src=SPK_EARLY trigger=post_silence) 有些。
+  ASR [spk0] (315.3-316.5s sim=0.30 conf=0.10 src=SNAPSHOT trigger=post_silence) 在什么？
+  ... 559.1s / 3615.1s
+  ASR [spk0] (316.4-318.7s sim=0.39 conf=0.40 src=SPK_EARLY trigger=post_silence) 有，那你可以否决啊？
+  ... 564.1s / 3615.1s
+  SPK: spk0 (id=0 sim=0.211)
+  STATS: spk0 id=0 sim=0.211 lat=0ms EARLY
+  ASR [spk0] (318.6-319.7s sim=0.39 conf=0.20 src=SPK_EARLY trigger=post_silence) 现在能上学吗？
+  ... 569.1s / 3615.1s
+  ASR [spk0] (320.0-321.4s sim=0.39 conf=0.20 src=SPK_EARLY trigger=post_silence) 你给我拿二十八。
+  ... 574.1s / 3615.1s
+  ASR [spk0] (321.3-323.0s sim=0.68 conf=0.10 src=SNAPSHOT trigger=vad_gap) 这才多少？这才三十四。
+  ASR [spk0] (323.0-324.8s sim=0.21 conf=0.51 src=SPK_EARLY trigger=post_silence) 没事，咱走可以啊。
+  ... 579.1s / 3615.1s
+  ASR [spk0] (324.7-326.6s sim=0.21 conf=0.20 src=SPK_EARLY trigger=post_silence) 合理的安全。
+  ... 584.1s / 3615.1s
+  ASR [spk0] (328.7-329.8s sim=0.21 conf=0.10 src=SNAPSHOT trigger=post_silence) 那没了，没上。
+  SPK: spk1 (id=1 sim=0.253)
+  STATS: spk1 id=1 sim=0.253 lat=0ms EARLY
+  ... 589.1s / 3615.1s
+  ASR(partial, 2.6s): 要不然这样吧，那个老板十五万。
+  SPK: spk1 (id=1 sim=0.218)
+  STATS: spk1 id=1 sim=0.218 lat=0ms EARLY
+  ASR [spk1] (329.7-332.7s sim=0.25 conf=0.30 src=SPK_EARLY trigger=vad_gap) 或者，要不然这样吧，那个老板十五嘛。
+  ... 594.1s / 3615.1s
+  ASR [spk1] (332.7-333.6s sim=0.25 conf=0.20 src=SPK_EARLY trigger=post_silence) 没问题啊。
+  SPK: NEW spk2 (id=2 sim=1.000)
+  STATS: spk2 id=2 sim=1.000 lat=0ms EARLY
+  ... 599.1s / 3615.1s
+  SPK: spk2 (id=2 sim=0.440)
+  STATS: spk2 id=2 sim=0.440 lat=0ms EARLY
+  ASR [spk2] (333.7-335.9s sim=1.00 conf=0.77 src=SPK_FULL trigger=post_silence) 好啊！他15，我五十一嘛。
+  ... 604.1s / 3615.1s
+  SPK: spk2 (id=2 sim=0.581)
+  STATS: spk2 id=2 sim=0.581 lat=0ms EARLY
+  ASR [spk2] (336.0-337.9s sim=0.58 conf=1.27 src=SPK_FULL trigger=post_silence) 然后我到2手的生产站。
+  ... 609.1s / 3615.1s
+  ASR [spk2] (338.2-339.6s sim=0.58 conf=0.20 src=SPK_FULL trigger=post_silence) 我这儿我也聊。
+  ... 614.0s / 3615.1s
+  ASR [spk2] (339.9-341.4s sim=0.58 conf=0.20 src=SPK_FULL trigger=vad_gap) 但是你调了之后。
+  ... 619.0s / 3615.1s
+  ASR [spk2] (341.4-342.9s sim=0.58 conf=0.10 src=SNAPSHOT trigger=post_silence) 刚刚说的那些。
+  SPK: spk2 (id=2 sim=0.380)
+  STATS: spk2 id=2 sim=0.380 lat=0ms EARLY
+  ... 624.0s / 3615.1s
+  SPK: spk2 (id=2 sim=0.540)
+  STATS: spk2 id=2 sim=0.540 lat=0ms EARLY
+  ASR(partial, 2.0s): 总量不变，能保障吗？
+  ASR [spk2] (343.0-345.7s sim=0.54 conf=1.19 src=SPK_FULL trigger=post_silence) 总量不变，能保障吗？15。
+  ... 629.0s / 3615.1s
+  ASR [spk2] (345.8-346.6s sim=0.54 conf=0.20 src=SPK_FULL trigger=post_silence) 嗯。
+  ... 634.0s / 3615.1s
+  SPK: spk2 (id=2 sim=0.518)
+  STATS: spk2 id=2 sim=0.518 lat=0ms EARLY
+  ASR [spk2] (350.5-352.2s sim=0.54 conf=0.10 src=SNAPSHOT trigger=post_silence) 哪？我在哪吗？这里有点事儿。
+  ... 639.0s / 3615.1s
+  SPK: spk2 (id=2 sim=0.600)
+  STATS: spk2 id=2 sim=0.600 lat=0ms EARLY
+  ASR(partial, 2.3s): 那个二十万可能也不准，因为老师后来同。
+  SPK: spk2 (id=2 sim=0.676)
+  STATS: spk2 id=2 sim=0.676 lat=0ms EARLY
+  ... 644.0s / 3615.1s
+  SPK: spk2 (id=2 sim=0.742)
+  STATS: spk2 id=2 sim=0.742 lat=0ms EARLY
+  ... 649.0s / 3615.1s
+  ASR(partial, 4.3s): 那个二十万块也不准，因为老徐后来通过一遍，那个钱没有算，没有吸收。
+  SPK: spk2 (id=2 sim=0.636)
+  STATS: spk2 id=2 sim=0.636 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.620)
+  STATS: spk2 id=2 sim=0.620 lat=0ms EARLY
+  ... 654.0s / 3615.1s
+  SPK: spk2 (id=2 sim=0.711)
+  STATS: spk2 id=2 sim=0.711 lat=0ms EARLY
+  ASR [spk2] (352.1-357.1s sim=0.74 conf=1.52 src=SPK_FULL trigger=post_silence) 那个二十二万块也不准，因为老徐后来通过一遍，那个钱没有算，没有稀释工地。
+  ... 659.0s / 3615.1s
+  ASR [spk2] (357.6-359.2s sim=0.74 conf=0.20 src=SPK_FULL trigger=post_silence) 嗯，实际上也对吧？
+  ... 664.0s / 3615.1s
+  ASR [spk2] (359.1-363.1s sim=0.71 conf=1.39 src=SPK_FULL trigger=post_silence) 一百的话呢，就是幺七二八，其实应该是20。
+  ... 669.0s / 3615.1s
+  ASR [spk2] (363.0-364.2s sim=0.71 conf=0.20 src=SPK_FULL trigger=post_silence) 八点。
+  ... 674.0s / 3615.1s
+  SPK: spk2 (id=2 sim=0.553)
+  STATS: spk2 id=2 sim=0.553 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.648)
+  STATS: spk2 id=2 sim=0.648 lat=0ms EARLY
+  ASR(partial, 2.0s): 有谁家？如果你家。
+  ... 678.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.446)
+  STATS: spk2 id=2 sim=0.446 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.589)
+  STATS: spk2 id=2 sim=0.589 lat=0ms EARLY
+  ASR(partial, 4.0s): 你五十一加，如果你家老板的话，五十一加15。
+  ASR [spk2] (383.5-384.8s sim=0.59 conf=0.20 src=SPK_FULL trigger=post_silence) 对呀，我是要的。
+  ... 683.9s / 3615.1s
+  ASR [spk2] (387.1-388.1s sim=0.59 conf=0.10 src=SNAPSHOT trigger=post_silence) 比如说。
+  ... 688.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.365)
+  STATS: spk2 id=2 sim=0.365 lat=0ms EARLY
+  ASR(partial, 2.1s): 就没有股票，就是绝对说。
+  ... 693.9s / 3615.1s
+  ASR [spk2] (388.4-391.6s sim=0.36 conf=0.28 src=SPK_EARLY trigger=post_silence) 就没有股票的，绝对没有没有啊，绝对没有。
+  ... 698.9s / 3615.1s
+  ASR [spk2] (395.8-396.7s sim=0.68 conf=0.10 src=SNAPSHOT trigger=vad_gap) 是吧？
+  ASR [spk2] (396.7-397.3s sim=0.68 conf=0.10 src=SNAPSHOT trigger=vad_gap) 家庭。
+  ... 703.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.294)
+  STATS: spk2 id=2 sim=0.294 lat=0ms EARLY
+  ASR [spk2] (398.4-400.4s sim=0.29 conf=0.46 src=SPK_EARLY trigger=post_silence) 哦，打咩啊？
+  ... 708.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.216)
+  STATS: spk2 id=2 sim=0.216 lat=0ms EARLY
+  ASR(partial, 2.0s): 对吧？
+  ASR [spk2] (400.3-403.5s sim=0.22 conf=0.28 src=SPK_EARLY trigger=vad_gap) 哈！
+  ... 713.9s / 3615.1s
+  ASR [spk2] (403.5-404.8s sim=0.22 conf=0.20 src=SPK_EARLY trigger=vad_gap) 就咁样就咁啦。
+  ... 718.9s / 3615.1s
+  ASR [spk2] (404.8-405.6s sim=0.22 conf=0.10 src=SNAPSHOT trigger=post_silence) 呃。
+  ... 723.9s / 3615.1s
+  ... 728.9s / 3615.1s
+  ... 733.9s / 3615.1s
+  ... 738.8s / 3615.1s
+  ... 743.8s / 3615.1s
+  ... 748.8s / 3615.1s
+  ASR [spk2] (472.1-472.9s sim=0.22 conf=0.10 src=SNAPSHOT trigger=post_silence) 我们商量。
+  ... 753.8s / 3615.1s
+  ASR [spk2] (473.0-473.8s sim=0.22 conf=0.10 src=SNAPSHOT trigger=post_silence) 我。
+  ... 758.8s / 3615.1s
+  SPK: spk2 (id=2 sim=0.509)
+  STATS: spk2 id=2 sim=0.509 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.571)
+  STATS: spk2 id=2 sim=0.571 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.085)
+  STATS: spk2 id=2 sim=0.085 lat=0ms EARLY
+  ASR(partial, 2.1s): 在等着接嘛，没事儿。
+  ... 763.8s / 3615.1s
+  ASR [spk2] (474.9-479.0s sim=0.57 conf=0.88 src=SPK_FULL trigger=post_silence) 你就等着接嘛，没事。对，我不能低于三点一四。
+  ... 768.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.249)
+  STATS: spk0 id=0 sim=0.249 lat=0ms EARLY
+  ASR [spk2] (480.6-481.4s sim=0.09 conf=0.20 src=SPK_EARLY trigger=post_silence) 来做。
+  ... 773.8s / 3615.1s
+  ASR(partial, 2.1s): 因为在这一次，我立马不干了。
+  ... 778.8s / 3615.1s
+  ASR [spk0] (481.9-483.9s sim=0.25 conf=0.46 src=SPK_EARLY trigger=vad_gap) 因为在这里受累了，立马不干了。
+  SPK: spk0 (id=0 sim=0.384)
+  STATS: spk0 id=0 sim=0.384 lat=0ms EARLY
+  ASR [spk0] (483.9-485.0s sim=0.25 conf=0.20 src=SPK_EARLY trigger=post_silence) 老大。嗯。
+  ... 783.8s / 3615.1s
+  SPK: spk2 (id=2 sim=0.527)
+  STATS: spk2 id=2 sim=0.527 lat=0ms EARLY
+  ... 788.8s / 3615.1s
+  ASR [spk2] (488.7-491.3s sim=0.53 conf=0.81 src=SPK_FULL trigger=post_silence) 老板，你是幺四十五是吧？反正是。
+  SPK: spk2 (id=2 sim=0.336)
+  STATS: spk2 id=2 sim=0.336 lat=0ms EARLY
+  ... 793.8s / 3615.1s
+  SPK: spk2 (id=2 sim=0.408)
+  STATS: spk2 id=2 sim=0.408 lat=0ms EARLY
+  ASR(partial, 2.0s): 40，你你是就是你。
+  SPK: spk0 (id=0 sim=0.541)
+  STATS: spk0 id=0 sim=0.541 lat=0ms EARLY
+  ... 798.8s / 3615.1s
+  ASR [spk0] (492.8-496.2s sim=0.54 conf=0.88 src=SPK_FULL trigger=post_silence) 45，你你是就是你底薪十五嘛，对吧？
+  ... 803.7s / 3615.1s
+  ASR [spk0] (496.5-497.8s sim=0.54 conf=0.20 src=SPK_FULL trigger=post_silence) 我的底线是10。
+  ... 808.7s / 3615.1s
+  ASR [spk0] (498.7-500.9s sim=0.54 conf=0.20 src=SPK_FULL trigger=post_silence) 你叫我试试啦，到底是多少？
+  ASR [spk0] (502.8-503.6s sim=0.54 conf=0.10 src=SNAPSHOT trigger=post_silence) 是这样。
+  ... 813.7s / 3615.1s
+  ASR [spk0] (503.9-505.2s sim=0.54 conf=0.10 src=SNAPSHOT trigger=post_silence) 跟别人说话。
+  SPK: spk0 (id=0 sim=0.473)
+  STATS: spk0 id=0 sim=0.473 lat=0ms EARLY
+  ... 818.7s / 3615.1s
+  ASR [spk0] (506.7-507.8s sim=0.54 conf=0.10 src=SNAPSHOT trigger=post_silence) 你算一算。
+  ... 823.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.412)
+  STATS: spk0 id=0 sim=0.412 lat=0ms EARLY
+  ASR(partial, 2.2s): 那你为什么要讲生活的道理？那如果。
+  SPK: spk2 (id=2 sim=0.504)
+  STATS: spk2 id=2 sim=0.504 lat=0ms EARLY
+  ... 828.7s / 3615.1s
+  SPK: spk2 (id=2 sim=0.648)
+  STATS: spk2 id=2 sim=0.648 lat=0ms EARLY
+  ASR(partial, 4.2s): 那你为什么要讲十五的道理？那如果你10，你把那5000转给他，我再给他。
+  ... 833.7s / 3615.1s
+  SPK: spk2 (id=2 sim=0.558)
+  STATS: spk2 id=2 sim=0.558 lat=0ms EARLY
+  ... 838.7s / 3615.1s
+  ASR [spk2] (508.1-513.6s sim=0.65 conf=0.81 src=SPK_FULL trigger=post_silence) 那你为什么要讲十五的道理？那如果你10，你把那五切出来给他，我再给他，他他十四了。
+  ... 843.7s / 3615.1s
+  ASR [spk2] (513.9-514.7s sim=0.65 conf=0.20 src=SPK_FULL trigger=post_silence) 好啊。
+  ... 848.7s / 3615.1s
+  ASR [spk2] (516.4-517.5s sim=0.65 conf=0.10 src=SNAPSHOT trigger=post_silence) 那你要加钱。
+  SPK: spk2 (id=2 sim=0.532)
+  STATS: spk2 id=2 sim=0.532 lat=0ms EARLY
+  ASR [spk2] (517.6-518.4s sim=0.65 conf=0.10 src=SNAPSHOT trigger=post_silence) 对吧？
+  ... 853.7s / 3615.1s
+  SPK: spk2 (id=2 sim=0.543)
+  STATS: spk2 id=2 sim=0.543 lat=0ms EARLY
+  ... 858.7s / 3615.1s
+  ASR [spk2] (518.7-520.7s sim=0.56 conf=0.46 src=SPK_EARLY trigger=vad_gap) 我给你签三，他给你签五。
+  SPK: spk2 (id=2 sim=0.266)
+  STATS: spk2 id=2 sim=0.266 lat=0ms EARLY
+  ... 863.6s / 3615.1s
+  ASR [spk2] (520.7-522.9s sim=0.54 conf=1.32 src=SPK_FULL trigger=vad_gap) 八加8，八加6，十加三问进去了。
+  ... 868.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.605)
+  STATS: spk2 id=2 sim=0.605 lat=0ms EARLY
+  ASR [spk2] (522.9-524.7s sim=0.27 conf=0.51 src=SPK_EARLY trigger=post_silence) 那为什么要讲事物的道理？
+  ... 873.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.520)
+  STATS: spk2 id=2 sim=0.520 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.605)
+  STATS: spk2 id=2 sim=0.605 lat=0ms EARLY
+  ... 878.6s / 3615.1s
+  ASR(partial, 2.7s): 我也不知道，那说明那些还是想要食物嘛？对啊。
+  SPK: spk2 (id=2 sim=0.432)
+  STATS: spk2 id=2 sim=0.432 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.373)
+  STATS: spk2 id=2 sim=0.373 lat=0ms EARLY
+  ... 883.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.556)
+  STATS: spk0 id=0 sim=0.556 lat=0ms EARLY
+  ASR [spk2] (524.6-529.1s sim=0.60 conf=1.24 src=SPK_FULL trigger=post_silence) 我也不知道，那说明那些还是想要食物嘛？对啊，对啊，说到死就是想要食物嘛。
+  ... 888.6s / 3615.1s
+  ASR [spk0] (529.2-532.1s sim=0.56 conf=0.86 src=SPK_FULL trigger=post_silence) 而且，其实我已经讲清楚了我的道理。
+  ... 893.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.501)
+  STATS: spk0 id=0 sim=0.501 lat=0ms EARLY
+  ASR [spk0] (533.0-534.3s sim=0.56 conf=0.20 src=SPK_FULL trigger=post_silence) 我的目标就是。
+  ... 898.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.570)
+  STATS: spk0 id=0 sim=0.570 lat=0ms EARLY
+  ASR [spk0] (534.4-536.3s sim=0.57 conf=1.27 src=SPK_FULL trigger=post_silence) 在3轮融，三轮融资。
+  ... 903.6s / 3615.1s
+  ASR [spk0] (536.4-537.5s sim=0.57 conf=0.20 src=SPK_FULL trigger=post_silence) 十号。
+  ... 908.6s / 3615.1s
+  ASR [spk0] (537.8-538.9s sim=0.57 conf=0.20 src=SPK_FULL trigger=vad_gap) 你不订阅。
+  ... 913.6s / 3615.1s
+  ASR [spk0] (538.9-539.7s sim=0.57 conf=0.20 src=SPK_FULL trigger=vad_gap) 我不是。哎。
+  ASR [spk0] (539.7-541.1s sim=0.57 conf=0.10 src=SNAPSHOT trigger=post_silence) 3轮融资之后。
+  ... 918.6s / 3615.1s
+  ASR [spk0] (541.6-542.9s sim=0.57 conf=0.10 src=SNAPSHOT trigger=post_silence) 这个公司的。
+  ... 923.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.225)
+  STATS: spk0 id=0 sim=0.225 lat=0ms EARLY
+  ASR [spk0] (542.8-545.7s sim=0.57 conf=0.10 src=SNAPSHOT trigger=post_silence) 从可负债、嗯，估值影响。
+  SPK: spk0 (id=0 sim=0.158)
+  STATS: spk0 id=0 sim=0.158 lat=0ms EARLY
+  ... 928.5s / 3615.1s
+  ... 933.5s / 3615.1s
+  ASR(partial, 2.7s): 你照这样3楼，如果我们3楼七十百分之50。
+  SPK: spk0 (id=0 sim=0.460)
+  STATS: spk0 id=0 sim=0.460 lat=0ms EARLY
+  ... 938.5s / 3615.1s
+  ASR(partial, 4.7s): 你要这样操作，如果我们操作稀释百分之50，整体啊，但是我的要求就是。
+  SPK: spk0 (id=0 sim=0.256)
+  STATS: spk0 id=0 sim=0.256 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.591)
+  STATS: spk2 id=2 sim=0.591 lat=0ms EARLY
+  ... 943.5s / 3615.1s
+  ASR [spk0] (547.2-552.3s sim=0.46 conf=0.56 src=SPK_EARLY trigger=post_silence) 你照这样操作，如果我们操作稀释百分之50，整体啊，但是我的要求就是。
+  ... 948.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.375)
+  STATS: spk2 id=2 sim=0.375 lat=0ms EARLY
+  ASR [spk0] (552.4-553.1s sim=0.46 conf=0.20 src=SPK_EARLY trigger=vad_gap) 嗯。
+  ... 953.5s / 3615.1s
+  ASR [spk0] (553.1-553.9s sim=0.46 conf=0.20 src=SPK_EARLY trigger=post_silence) 后面。
+  SPK: spk2 (id=2 sim=0.283)
+  STATS: spk2 id=2 sim=0.283 lat=0ms EARLY
+  ... 958.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.605)
+  STATS: spk2 id=2 sim=0.605 lat=0ms EARLY
+  ASR [spk2] (554.0-556.3s sim=0.59 conf=0.78 src=SPK_FULL trigger=post_silence) 啊，你的意思啊，一万支74。
+  ... 963.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.330)
+  STATS: spk2 id=2 sim=0.330 lat=0ms EARLY
+  ... 968.5s / 3615.1s
+  ASR [spk2] (556.8-560.5s sim=0.60 conf=1.37 src=SPK_FULL trigger=post_silence) 因为这样牺牲的不止百分之五十嘛，有有那可能啊，他们生的。
+  ... 973.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.300)
+  STATS: spk2 id=2 sim=0.300 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.537)
+  STATS: spk2 id=2 sim=0.537 lat=0ms EARLY
+  ASR(partial, 3.3s): 因为我其实这个算盘打的挺响的，也就是说，如果
+  ... 978.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.606)
+  STATS: spk2 id=2 sim=0.606 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.645)
+  STATS: spk2 id=2 sim=0.645 lat=0ms EARLY
+  ASR [spk2] (560.8-565.6s sim=0.54 conf=1.20 src=SPK_FULL trigger=post_silence) 因为我其实这个算盘打得挺响的，那也就是说，如果3轮算一家。
+  ... 983.5s / 3615.1s
+  ... 988.4s / 3615.1s
+  ASR [spk2] (565.5-568.1s sim=0.65 conf=1.20 src=SPK_FULL trigger=post_silence) 就是老老徐，老徐还剩二十五点五。
+  ... 993.4s / 3615.1s
+  ASR [spk2] (568.2-569.1s sim=0.65 conf=0.20 src=SPK_FULL trigger=post_silence) 啊，对吧？
+  SPK: spk2 (id=2 sim=0.532)
+  STATS: spk2 id=2 sim=0.532 lat=0ms EARLY
+  ... 998.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.559)
+  STATS: spk2 id=2 sim=0.559 lat=0ms EARLY
+  ASR(partial, 2.8s): 我在给自己挣退休，对养老嘛，养老对。
+  ... 1003.4s / 3615.1s
+  ASR [spk2] (569.0-572.5s sim=0.56 conf=0.66 src=SPK_FULL trigger=post_silence) 我在给自己挣退休，对养老嘛，养老对对。
+  ... 1008.4s / 3615.1s
+  ASR [spk2] (573.6-574.9s sim=0.56 conf=0.20 src=SPK_FULL trigger=post_silence) 收我一点零头。
+  ... 1013.4s / 3615.1s
+  ASR [spk2] (575.0-576.2s sim=0.56 conf=0.10 src=SNAPSHOT trigger=post_silence) 就是那种那种。
+  ... 1018.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.393)
+  STATS: spk2 id=2 sim=0.393 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.329)
+  STATS: spk2 id=2 sim=0.329 lat=0ms EARLY
+  ASR(partial, 2.0s): 那这银行肯定三个月后才能实施。
+  SPK: spk2 (id=2 sim=0.369)
+  STATS: spk2 id=2 sim=0.369 lat=0ms EARLY
+  ... 1023.4s / 3615.1s
+  ASR(partial, 4.0s): 那个疫苗肯定三个月后才能实施，现在。哎，对对。
+  ASR [spk2] (578.7-583.3s sim=0.39 conf=0.65 src=SPK_EARLY trigger=vad_gap) 那个领导肯定三个月后才能实施，现在。
+  ... 1028.4s / 3615.1s
+  ... 1033.4s / 3615.1s
+  ASR [spk2] (583.3-585.0s sim=0.37 conf=0.20 src=SPK_EARLY trigger=post_silence) 面积十点二万。
+  ASR [spk2] (587.3-588.2s sim=0.37 conf=0.10 src=SNAPSHOT trigger=post_silence) 合理吧？
+  ... 1038.4s / 3615.1s
+  ASR [spk2] (588.1-589.1s sim=0.37 conf=0.10 src=SNAPSHOT trigger=post_silence) 推销的东西。
+  ... 1043.4s / 3615.1s
+  ASR [spk2] (591.2-593.0s sim=0.51 conf=0.10 src=SNAPSHOT trigger=vad_gap) 是30，三十一。
+  ... 1048.4s / 3615.1s
+  ASR [spk2] (593.0-594.2s sim=0.37 conf=0.10 src=SNAPSHOT trigger=post_silence) 51。
+  ... 1053.3s / 3615.1s
+  SPK: spk2 (id=2 sim=0.290)
+  STATS: spk2 id=2 sim=0.290 lat=0ms EARLY
+  ASR [spk2] (594.1-594.9s sim=0.37 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。对。
+  ... 1058.3s / 3615.1s
+  SPK: spk2 (id=2 sim=0.444)
+  STATS: spk2 id=2 sim=0.444 lat=0ms EARLY
+  ASR [spk2] (598.8-600.0s sim=0.37 conf=0.10 src=SNAPSHOT trigger=post_silence) 30002，过七十万。
+  ... 1063.3s / 3615.1s
+  SPK: spk2 (id=2 sim=0.494)
+  STATS: spk2 id=2 sim=0.494 lat=0ms EARLY
+  ... 1068.3s / 3615.1s
+  ASR(partial, 3.4s): 我如果稍微先转给我是，刚讲的这个。
+  SPK: spk2 (id=2 sim=0.259)
+  STATS: spk2 id=2 sim=0.259 lat=0ms EARLY
+  ASR [spk2] (599.9-604.0s sim=0.49 conf=1.36 src=SPK_FULL trigger=post_silence) 我如果稍微宣传就是，刚讲的这个我的。
+  ... 1073.3s / 3615.1s
+  ASR [spk2] (604.1-605.0s sim=0.49 conf=0.20 src=SPK_FULL trigger=post_silence) 和我的。
+  ... 1078.3s / 3615.1s
+  SPK: spk0 (id=0 sim=0.550)
+  STATS: spk0 id=0 sim=0.550 lat=0ms EARLY
+  ASR [spk2] (604.9-605.7s sim=0.49 conf=0.20 src=SPK_FULL trigger=post_silence) 都好。
+  ... 1083.3s / 3615.1s
+  SPK: spk0 (id=0 sim=0.204)
+  STATS: spk0 id=0 sim=0.204 lat=0ms EARLY
+  ASR [spk0] (606.6-610.2s sim=0.55 conf=0.64 src=SPK_FULL trigger=post_silence) 那不然我们花这个心思和精力干嘛呢？
+  ... 1088.3s / 3615.1s
+  ... 1093.3s / 3615.1s
+  ASR [spk0] (610.1-613.1s sim=0.20 conf=0.30 src=SPK_EARLY trigger=post_silence) 我还有人，我还有人照干。
+  ... 1098.3s / 3615.1s
+  ASR [spk0] (613.8-615.1s sim=0.20 conf=0.20 src=SPK_EARLY trigger=vad_gap) 说人家。
+  ... 1103.3s / 3615.1s
+  ASR [spk0] (615.1-616.2s sim=0.20 conf=0.10 src=SNAPSHOT trigger=post_silence) 哎，炸哎，炸哎，炸吧！
+  ... 1108.3s / 3615.1s
+  ASR [spk0] (617.9-619.2s sim=0.20 conf=0.10 src=SNAPSHOT trigger=post_silence) 嘉兴南路。
+  SPK: spk0 (id=0 sim=0.547)
+  STATS: spk0 id=0 sim=0.547 lat=0ms EARLY
+  ... 1113.2s / 3615.1s
+  SPK: spk0 (id=0 sim=0.249)
+  STATS: spk0 id=0 sim=0.249 lat=0ms EARLY
+  ASR(partial, 2.2s): 两栋楼，但是干不到80，我又。
+  SPK: spk0 (id=0 sim=0.193)
+  STATS: spk0 id=0 sim=0.193 lat=0ms EARLY
+  ... 1118.2s / 3615.1s
+  ASR(partial, 4.4s): 俩都没有，但是你干不到80，我又不会把你们怎么样，知道吧？
+  ... 1123.2s / 3615.1s
+  SPK: spk0 (id=0 sim=0.208)
+  STATS: spk0 id=0 sim=0.208 lat=0ms EARLY
+  ASR [spk0] (620.6-625.8s sim=0.55 conf=0.58 src=SPK_EARLY trigger=post_silence) 俩都没有，但是干不到80，我又不会把你们怎么样，知道吧？对，我知道。
+  ... 1128.2s / 3615.1s
+  ASR [spk0] (626.3-627.4s sim=0.19 conf=0.20 src=SPK_EARLY trigger=post_silence) 就是参加那个。
+  ... 1133.2s / 3615.1s
+  ASR [spk0] (628.1-629.1s sim=0.19 conf=0.20 src=SPK_EARLY trigger=post_silence) 我就可以不参与。
+  ... 1138.2s / 3615.1s
+  ... 1143.2s / 3615.1s
+  ASR [spk0] (629.4-632.2s sim=0.21 conf=0.33 src=SPK_EARLY trigger=vad_gap) 你是你是啥？你是俩哥们在那玩吵架是吧？
+  ... 1148.2s / 3615.1s
+  SPK: spk0 (id=0 sim=0.461)
+  STATS: spk0 id=0 sim=0.461 lat=0ms EARLY
+  ASR [spk0] (633.3-635.6s sim=0.21 conf=0.20 src=SPK_EARLY trigger=post_silence) 因为事情。
+  ... 1153.2s / 3615.1s
+  SPK: spk0 (id=0 sim=0.610)
+  STATS: spk0 id=0 sim=0.610 lat=0ms EARLY
+  ASR [spk0] (635.7-636.3s sim=0.50 conf=0.10 src=SNAPSHOT trigger=vad_gap) 做。
+  ... 1158.2s / 3615.1s
+  ASR [spk0] (636.3-637.1s sim=0.21 conf=0.10 src=SNAPSHOT trigger=post_silence) 就是1。
+  ... 1163.2s / 3615.1s
+  SPK: spk0 (id=0 sim=0.178)
+  STATS: spk0 id=0 sim=0.178 lat=0ms EARLY
+  ASR [spk0] (637.0-639.7s sim=0.61 conf=1.15 src=SPK_FULL trigger=post_silence) 人是控制不住自己的心心气的。
+  ... 1168.2s / 3615.1s
+  ASR [spk0] (639.6-640.3s sim=0.61 conf=0.20 src=SPK_FULL trigger=vad_gap) 什么呢？
+  ... 1173.2s / 3615.1s
+  ASR [spk0] (640.3-641.1s sim=0.61 conf=0.20 src=SPK_FULL trigger=post_silence) 各位。哎。
+  ... 1178.1s / 3615.1s
+  ASR [spk0] (641.2-642.1s sim=0.61 conf=0.20 src=SPK_FULL trigger=vad_gap) 所以。
+  SPK: spk0 (id=0 sim=0.436)
+  STATS: spk0 id=0 sim=0.436 lat=0ms EARLY
+  ... 1183.1s / 3615.1s
+  SPK: spk0 (id=0 sim=0.552)
+  STATS: spk0 id=0 sim=0.552 lat=0ms EARLY
+  ASR(partial, 3.3s): 就驾驭，或者说掌握，或者说更多。希望我们希望这种。
+  SPK: spk0 (id=0 sim=0.429)
+  STATS: spk0 id=0 sim=0.429 lat=0ms EARLY
+  ... 1188.1s / 3615.1s
+  ASR(partial, 5.6s): 就夏涵宇，我跟你说，两回事儿，我更希望，我不希望这种事情在我内部，至少我我没亲眼。
+  SPK: spk0 (id=0 sim=0.317)
+  STATS: spk0 id=0 sim=0.317 lat=0ms EARLY
+  ... 1193.1s / 3615.1s
+  ... 1198.1s / 3615.1s
+  ASR [spk0] (642.1-648.2s sim=0.55 conf=0.81 src=SPK_FULL trigger=post_silence) 就夏涵宇，我跟你说，两个人说更可能。希望我不希望这种事情在我内部至少我我没亲眼我不知道。
+  ... 1203.1s / 3615.1s
+  SPK: spk0 (id=0 sim=0.332)
+  STATS: spk0 id=0 sim=0.332 lat=0ms EARLY
+  ASR [spk0] (648.1-649.6s sim=0.43 conf=0.20 src=SPK_EARLY trigger=post_silence) 百分之六十的出售。
+  ... 1208.1s / 3615.1s
+  SPK: spk2 (id=2 sim=0.505)
+  STATS: spk2 id=2 sim=0.505 lat=0ms EARLY
+  ASR [spk0] (650.1-651.1s sim=0.43 conf=0.20 src=SPK_EARLY trigger=post_silence) 嗯。
+  ... 1213.1s / 3615.1s
+  SPK: spk2 (id=2 sim=0.112)
+  STATS: spk2 id=2 sim=0.112 lat=0ms EARLY
+  ASR [spk0] (651.2-653.1s sim=0.32 conf=0.48 src=SPK_EARLY trigger=vad_gap) 好，最好的情况，四十五同学。
+  ... 1218.1s / 3615.1s
+  ASR [spk0] (653.1-654.6s sim=0.32 conf=0.20 src=SPK_EARLY trigger=post_silence) 差点情况都是成功。
+  ... 1223.1s / 3615.1s
+  ASR [spk0] (654.5-655.7s sim=0.32 conf=0.20 src=SPK_EARLY trigger=post_silence) 我刚说。
+  ... 1228.1s / 3615.1s
+  SPK: spk2 (id=2 sim=0.278)
+  STATS: spk2 id=2 sim=0.278 lat=0ms EARLY
+  ASR [spk2] (656.6-658.4s sim=0.51 conf=0.78 src=SPK_FULL trigger=vad_gap) 二十多万就支持多少？
+  ... 1233.1s / 3615.1s
+  ASR [spk2] (658.4-660.5s sim=0.11 conf=0.43 src=SPK_EARLY trigger=post_silence) 我就只剩两两了。
+  ... 1238.0s / 3615.1s
+  ... 1243.0s / 3615.1s
+  ASR [spk2] (660.4-661.7s sim=0.11 conf=0.20 src=SPK_EARLY trigger=post_silence) 还没你多呢。
+  ASR [spk2] (662.0-663.1s sim=0.11 conf=0.20 src=SPK_EARLY trigger=vad_gap) 哈。
+  ... 1248.0s / 3615.1s
+  ASR [spk2] (663.1-665.4s sim=0.28 conf=0.40 src=SPK_EARLY trigger=post_silence) 这不合理。
+  ... 1253.0s / 3615.1s
+  SPK: spk2 (id=2 sim=0.413)
+  STATS: spk2 id=2 sim=0.413 lat=0ms EARLY
+  ASR [spk2] (665.5-667.1s sim=0.28 conf=0.20 src=SPK_EARLY trigger=vad_gap) 就做得好点的。
+  ... 1258.0s / 3615.1s
+  ASR [spk2] (667.1-668.2s sim=0.28 conf=0.20 src=SPK_EARLY trigger=vad_gap) 大家都知道。
+  SPK: spk2 (id=2 sim=0.348)
+  STATS: spk2 id=2 sim=0.348 lat=0ms EARLY
+  ... 1263.0s / 3615.1s
+  SPK: spk2 (id=2 sim=0.510)
+  STATS: spk2 id=2 sim=0.510 lat=0ms EARLY
+  ... 1268.0s / 3615.1s
+  ASR(partial, 2.6s): 做的好点，跟1起做的好，然后我就。
+  SPK: spk2 (id=2 sim=0.372)
+  STATS: spk2 id=2 sim=0.372 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.390)
+  STATS: spk2 id=2 sim=0.390 lat=0ms EARLY
+  ASR [spk2] (668.2-671.9s sim=0.51 conf=1.48 src=SPK_FULL trigger=vad_gap) 做得好点，跟做做得好，然后我就得的多。
+  ... 1273.0s / 3615.1s
+  ... 1278.0s / 3615.1s
+  ASR [spk2] (671.9-674.9s sim=0.39 conf=0.65 src=SPK_EARLY trigger=post_silence) 做得好，刚好完美符合，很少。
+  SPK: spk2 (id=2 sim=0.298)
+  STATS: spk2 id=2 sim=0.298 lat=0ms EARLY
+  ... 1283.0s / 3615.1s
+  ASR(partial, 2.0s): 二十六秒20。
+  ... 1288.0s / 3615.1s
+  SPK: spk2 (id=2 sim=0.237)
+  STATS: spk2 id=2 sim=0.237 lat=0ms EARLY
+  ASR [spk2] (675.4-678.2s sim=0.30 conf=0.33 src=SPK_EARLY trigger=vad_gap) 二十二十秒2，十六秒。
+  ... 1293.0s / 3615.1s
+  ASR [spk2] (678.2-679.1s sim=0.30 conf=0.20 src=SPK_EARLY trigger=post_silence) 半天呀。
+  ... 1298.0s / 3615.1s
+  SPK: spk2 (id=2 sim=0.338)
+  STATS: spk2 id=2 sim=0.338 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.462)
+  STATS: spk2 id=2 sim=0.462 lat=0ms EARLY
+  ASR(partial, 2.9s): 啥人啊！你让我让你等多久啊？
+  SPK: spk2 (id=2 sim=0.302)
+  STATS: spk2 id=2 sim=0.302 lat=0ms EARLY
+  ... 1302.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.316)
+  STATS: spk2 id=2 sim=0.316 lat=0ms EARLY
+  ASR(partial, 5.0s): 十个问题啊！十个问题，十个问题，十个问题，十个问题。
+  SPK: spk2 (id=2 sim=0.353)
+  STATS: spk2 id=2 sim=0.353 lat=0ms EARLY
+  ... 1307.9s / 3615.1s
+  ASR(partial, 7.5s): 啥问题啊？学历就很重要，学历就很重要，学历就那不行，我干什么？
+  SPK: spk2 (id=2 sim=0.415)
+  STATS: spk2 id=2 sim=0.415 lat=0ms EARLY
+  ... 1312.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.422)
+  STATS: spk2 id=2 sim=0.422 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.555)
+  STATS: spk2 id=2 sim=0.555 lat=0ms EARLY
+  ... 1317.9s / 3615.1s
+  ASR [spk2] (679.0-686.8s sim=0.46 conf=0.95 src=SPK_FULL trigger=post_silence) 啥困难啊？学历就一点作用啊？学历就一点作用啊？学历就那不行，我那什么？
+  ... 1322.9s / 3615.1s
+  ASR [spk2] (686.7-688.2s sim=0.35 conf=0.20 src=SPK_EARLY trigger=post_silence) 少什么？
+  ... 1327.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.435)
+  STATS: spk2 id=2 sim=0.435 lat=0ms EARLY
+  ... 1332.9s / 3615.1s
+  ASR [spk2] (688.1-692.3s sim=0.56 conf=1.11 src=SPK_FULL trigger=post_silence) 十个问题啊，十个问题啊，三千万，到时候出还没出呢。
+  ... 1337.9s / 3615.1s
+  ASR [spk2] (692.2-694.6s sim=0.43 conf=0.38 src=SPK_EARLY trigger=post_silence) 对呀，嗯，想要达到那个去而已。
+  ... 1342.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.584)
+  STATS: spk2 id=2 sim=0.584 lat=0ms EARLY
+  ASR [spk2] (698.0-699.3s sim=0.43 conf=0.10 src=SNAPSHOT trigger=post_silence) 水平差一点。
+  ... 1347.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.638)
+  STATS: spk2 id=2 sim=0.638 lat=0ms EARLY
+  ... 1352.9s / 3615.1s
+  ASR [spk2] (699.2-701.1s sim=0.64 conf=1.22 src=SPK_FULL trigger=post_silence) 北大荒亮亮，我们两个。
+  ... 1357.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.287)
+  STATS: spk2 id=2 sim=0.287 lat=0ms EARLY
+  ASR(partial, 2.0s): 嗯，刚好。
+  ASR [spk2] (701.4-703.3s sim=0.29 conf=0.48 src=SPK_EARLY trigger=vad_gap) 那个，当还好。
+  ... 1362.8s / 3615.1s
+  ASR [spk2] (703.3-704.1s sim=0.29 conf=0.20 src=SPK_EARLY trigger=post_silence) 嗯，对呀。
+  ... 1367.8s / 3615.1s
+  ASR [spk2] (708.2-709.0s sim=0.29 conf=0.10 src=SNAPSHOT trigger=post_silence) 怎么样？
+  ... 1372.8s / 3615.1s
+  ASR [spk2] (709.9-710.9s sim=0.37 conf=0.10 src=SNAPSHOT trigger=vad_gap) 十五啊。
+  ... 1377.8s / 3615.1s
+  SPK: spk2 (id=2 sim=0.462)
+  STATS: spk2 id=2 sim=0.462 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.562)
+  STATS: spk2 id=2 sim=0.562 lat=0ms EARLY
+  ASR(partial, 2.8s): 切五十一，但是不歧视到他们。
+  ... 1382.8s / 3615.1s
+  ASR [spk2] (710.9-714.0s sim=0.56 conf=0.71 src=SPK_FULL trigger=post_silence) 切五十一，但是不歧视到他们。
+  ... 1387.8s / 3615.1s
+  ASR [spk2] (714.5-716.4s sim=0.46 conf=0.20 src=SPK_EARLY trigger=post_silence) 有意见没？
+  ... 1392.8s / 3615.1s
+  ASR [spk2] (716.3-717.8s sim=0.46 conf=0.20 src=SPK_EARLY trigger=post_silence) 我没有，我没有烟。
+  ... 1397.8s / 3615.1s
+  ASR [spk2] (717.7-719.1s sim=0.42 conf=0.10 src=SNAPSHOT trigger=vad_gap) 有意见赶紧说。
+  ... 1402.8s / 3615.1s
+  ASR [spk2] (719.1-719.9s sim=0.56 conf=0.10 src=SNAPSHOT trigger=post_silence) 快！有一点。
+  ... 1407.8s / 3615.1s
+  ASR [spk2] (721.6-722.8s sim=0.56 conf=0.10 src=SNAPSHOT trigger=post_silence) 有没有意见嘛？
+  ... 1412.8s / 3615.1s
+  ... 1417.8s / 3615.1s
+  ASR [spk2] (724.1-725.0s sim=0.56 conf=0.10 src=SNAPSHOT trigger=post_silence) 老汉。
+  SPK: spk2 (id=2 sim=0.418)
+  STATS: spk2 id=2 sim=0.418 lat=0ms EARLY
+  ... 1422.8s / 3615.1s
+  ASR(partial, 2.3s): 那恭喜，我就合理了。
+  SPK: spk2 (id=2 sim=0.386)
+  STATS: spk2 id=2 sim=0.386 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.571)
+  STATS: spk0 id=0 sim=0.571 lat=0ms EARLY
+  ASR(partial, 4.3s): 那估计我就合理了，我呢？事业能不能做得？
+  ... 1427.7s / 3615.1s
+  ASR [spk0] (726.3-731.6s sim=0.57 conf=0.41 src=SPK_FULL trigger=post_silence) 那估计我就可以了，我的事业能不能做得起来？嗯。
+  ... 1432.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.379)
+  STATS: spk0 id=0 sim=0.379 lat=0ms EARLY
+  ASR [spk0] (731.7-733.2s sim=0.57 conf=0.20 src=SPK_FULL trigger=post_silence) 我其实就是把。
+  ... 1437.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.415)
+  STATS: spk0 id=0 sim=0.415 lat=0ms EARLY
+  ... 1442.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.242)
+  STATS: spk0 id=0 sim=0.242 lat=0ms EARLY
+  ASR(partial, 3.2s): 就是我，我过去百分之三十的，三十多点出去。
+  SPK: spk2 (id=2 sim=0.590)
+  STATS: spk2 id=2 sim=0.590 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.433)
+  STATS: spk2 id=2 sim=0.433 lat=0ms EARLY
+  ... 1447.7s / 3615.1s
+  SPK: spk1 (id=1 sim=0.619)
+  STATS: spk1 id=1 sim=0.619 lat=0ms EARLY
+  ASR(partial, 5.2s): 就是我，我估计百分之三十内，三十内出去。完之后，那那批销量是怎么样？对。
+  ... 1452.7s / 3615.1s
+  SPK: spk1 (id=1 sim=0.192)
+  STATS: spk1 id=1 sim=0.192 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.643)
+  STATS: spk2 id=2 sim=0.643 lat=0ms EARLY
+  ... 1457.7s / 3615.1s
+  SPK: spk2 (id=2 sim=0.518)
+  STATS: spk2 id=2 sim=0.518 lat=0ms EARLY
+  ASR [spk2] (733.1-740.4s sim=0.59 conf=0.70 src=SPK_FULL trigger=post_silence) 就是我估计百分之三十内，三十内出去。完之后，那那批销量做的怎么样？对，销量做的话能控制百分之十应该。
+  ... 1462.7s / 3615.1s
+  ... 1467.7s / 3615.1s
+  SPK: spk2 (id=2 sim=0.653)
+  STATS: spk2 id=2 sim=0.653 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.525)
+  STATS: spk2 id=2 sim=0.525 lat=0ms EARLY
+  ... 1472.7s / 3615.1s
+  SPK: spk2 (id=2 sim=0.669)
+  STATS: spk2 id=2 sim=0.669 lat=0ms EARLY
+  ASR [spk2] (740.5-745.8s sim=0.65 conf=1.02 src=SPK_FULL trigger=post_silence) 下1轮百分之十嘛，那也就百分之十五钱出去了。百分之三十出去以后，你上了45。
+  ... 1477.7s / 3615.1s
+  ... 1482.7s / 3615.1s
+  SPK: spk2 (id=2 sim=0.533)
+  STATS: spk2 id=2 sim=0.533 lat=0ms EARLY
+  ASR [spk2] (746.3-749.0s sim=0.67 conf=1.15 src=SPK_FULL trigger=post_silence) 他那儿是7，他那刚好是10。
+  ... 1487.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.671)
+  STATS: spk2 id=2 sim=0.671 lat=0ms EARLY
+  ASR [spk2] (748.9-750.7s sim=0.67 conf=1.23 src=SPK_FULL trigger=post_silence) 啊，就比如35、二十。
+  ... 1492.6s / 3615.1s
+  ... 1497.6s / 3615.1s
+  ASR [spk2] (750.6-752.2s sim=0.53 conf=0.20 src=SPK_EARLY trigger=post_silence) 到下一个地方，我暂停了。
+  ... 1502.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.451)
+  STATS: spk2 id=2 sim=0.451 lat=0ms EARLY
+  ASR [spk2] (752.3-753.6s sim=0.53 conf=0.20 src=SPK_EARLY trigger=post_silence) 你是刘什么？
+  ... 1507.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.321)
+  STATS: spk2 id=2 sim=0.321 lat=0ms EARLY
+  ASR(partial, 2.6s): 对，在下面给你照顾。
+  SPK: spk2 (id=2 sim=0.445)
+  STATS: spk2 id=2 sim=0.445 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.310)
+  STATS: spk2 id=2 sim=0.310 lat=0ms EARLY
+  ... 1512.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.626)
+  STATS: spk2 id=2 sim=0.626 lat=0ms EARLY
+  ASR(partial, 4.6s): 对，在家里面可以干了。等会儿我上，如果到那个我。
+  ... 1517.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.646)
+  STATS: spk2 id=2 sim=0.646 lat=0ms EARLY
+  ASR [spk2] (753.5-759.1s sim=0.63 conf=1.65 src=SPK_FULL trigger=post_silence) 对，在下面跟你讲了。等会儿我算下，如果到内额，我两个7。
+  ... 1522.6s / 3615.1s
+  ... 1527.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.569)
+  STATS: spk2 id=2 sim=0.569 lat=0ms EARLY
+  ASR [spk2] (760.4-761.8s sim=0.31 conf=0.20 src=SPK_EARLY trigger=post_silence) 我们是100，就那个。
+  ... 1532.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.172)
+  STATS: spk2 id=2 sim=0.172 lat=0ms EARLY
+  ASR [spk2] (761.9-764.1s sim=0.57 conf=1.28 src=SPK_FULL trigger=vad_gap) 如果你是那不现实的话，你。
+  ... 1537.6s / 3615.1s
+  ... 1542.6s / 3615.1s
+  ASR [spk2] (764.1-765.3s sim=0.57 conf=0.20 src=SPK_FULL trigger=post_silence) 基本上差不太多。
+  ... 1547.6s / 3615.1s
+  ASR [spk2] (765.6-767.3s sim=0.17 conf=0.54 src=SPK_EARLY trigger=post_silence) 蛋鸡壳的那个。
+  ... 1552.5s / 3615.1s
+  ASR [spk2] (768.7-769.7s sim=0.17 conf=0.20 src=SPK_EARLY trigger=post_silence) 这个。
+  ... 1557.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.279)
+  STATS: spk2 id=2 sim=0.279 lat=0ms EARLY
+  ASR [spk2] (769.8-770.6s sim=0.17 conf=0.20 src=SPK_EARLY trigger=post_silence) 因为他。
+  ... 1562.5s / 3615.1s
+  ASR [spk2] (771.9-772.7s sim=0.17 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。对。
+  ... 1567.5s / 3615.1s
+  SPK: spk1 (id=1 sim=0.532)
+  STATS: spk1 id=1 sim=0.532 lat=0ms EARLY
+  ASR [spk1] (773.2-775.4s sim=0.53 conf=0.77 src=SPK_FULL trigger=post_silence) 当然，他那个故事可以啊，那个。
+  ... 1572.5s / 3615.1s
+  SPK: spk1 (id=1 sim=0.340)
+  STATS: spk1 id=1 sim=0.340 lat=0ms EARLY
+  ASR [spk1] (775.5-776.6s sim=0.53 conf=0.20 src=SPK_FULL trigger=post_silence) 我说你上。
+  ... 1577.5s / 3615.1s
+  ... 1582.5s / 3615.1s
+  ASR [spk1] (776.9-778.7s sim=0.34 conf=0.51 src=SPK_EARLY trigger=post_silence) 哦，大概。
+  ... 1587.5s / 3615.1s
+  ASR [spk1] (778.8-779.9s sim=0.34 conf=0.20 src=SPK_EARLY trigger=vad_gap) 两三台吧。
+  ... 1592.5s / 3615.1s
+  SPK: spk1 (id=1 sim=0.340)
+  STATS: spk1 id=1 sim=0.340 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.520)
+  STATS: spk2 id=2 sim=0.520 lat=0ms EARLY
+  ASR(partial, 2.0s): 两30009是。
+  SPK: spk2 (id=2 sim=0.667)
+  STATS: spk2 id=2 sim=0.667 lat=0ms EARLY
+  ASR [spk2] (779.9-783.2s sim=0.67 conf=1.23 src=SPK_FULL trigger=post_silence) 两30000，就是两两万块钱。
+  ... 1597.5s / 3615.1s
+  ... 1602.5s / 3615.1s
+  ASR [spk2] (785.4-786.2s sim=0.67 conf=0.20 src=SPK_FULL trigger=post_silence) 然后。哎。
+  SPK: spk2 (id=2 sim=0.418)
+  STATS: spk2 id=2 sim=0.418 lat=0ms EARLY
+  ... 1607.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.491)
+  STATS: spk2 id=2 sim=0.491 lat=0ms EARLY
+  ASR(partial, 2.0s): 最长两家投资机构，一家叫天地的。
+  SPK: spk2 (id=2 sim=0.620)
+  STATS: spk2 id=2 sim=0.620 lat=0ms EARLY
+  ... 1612.4s / 3615.1s
+  ASR [spk2] (786.1-789.1s sim=0.62 conf=1.52 src=SPK_FULL trigger=post_silence) 最长两家投资机构，一家叫天地的是吧？
+  ... 1617.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.449)
+  STATS: spk2 id=2 sim=0.449 lat=0ms EARLY
+  ASR [spk2] (789.0-790.3s sim=0.49 conf=0.20 src=SPK_EARLY trigger=post_silence) lighthouse。
+  ... 1622.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.268)
+  STATS: spk2 id=2 sim=0.268 lat=0ms EARLY
+  ASR [spk2] (790.4-792.8s sim=0.45 conf=0.38 src=SPK_EARLY trigger=post_silence) 原和原点，记得他啊。
+  ... 1627.4s / 3615.1s
+  ... 1632.4s / 3615.1s
+  ASR(partial, 2.0s): 措施，让我们措施两。
+  SPK: spk2 (id=2 sim=0.272)
+  STATS: spk2 id=2 sim=0.272 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.520)
+  STATS: spk0 id=0 sim=0.520 lat=0ms EARLY
+  ASR [spk0] (792.7-796.0s sim=0.52 conf=0.85 src=SPK_FULL trigger=post_silence) 错失，让我们错失良机，真的。
+  ... 1637.4s / 3615.1s
+  ... 1642.4s / 3615.1s
+  ASR [spk0] (795.9-797.0s sim=0.52 conf=0.20 src=SPK_FULL trigger=post_silence) 我党员是呢。
+  ... 1647.4s / 3615.1s
+  ASR [spk0] (796.9-797.7s sim=0.52 conf=0.20 src=SPK_FULL trigger=post_silence) 嗯。
+  ... 1652.4s / 3615.1s
+  ASR [spk0] (798.6-800.1s sim=0.52 conf=0.20 src=SPK_FULL trigger=post_silence) 见到他以后。
+  ... 1657.4s / 3615.1s
+  ASR [spk0] (805.5-806.4s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 这样。的
+  ... 1662.4s / 3615.1s
+  ASR [spk0] (806.9-808.3s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 安全特性。
+  ... 1667.4s / 3615.1s
+  SPK: spk0 (id=0 sim=0.311)
+  STATS: spk0 id=0 sim=0.311 lat=0ms EARLY
+  ASR [spk0] (808.2-809.0s sim=0.52 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。
+  ... 1672.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.596)
+  STATS: spk2 id=2 sim=0.596 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.309)
+  STATS: spk2 id=2 sim=0.309 lat=0ms EARLY
+  ASR(partial, 2.3s): 然后，另外再抽百分之十出来。
+  ... 1677.3s / 3615.1s
+  SPK: spk2 (id=2 sim=0.451)
+  STATS: spk2 id=2 sim=0.451 lat=0ms EARLY
+  ASR [spk2] (809.1-811.3s sim=0.60 conf=0.86 src=SPK_FULL trigger=vad_gap) 然后，另外再抽百分之十出来。
+  ... 1682.3s / 3615.1s
+  SPK: spk2 (id=2 sim=0.203)
+  STATS: spk2 id=2 sim=0.203 lat=0ms EARLY
+  ... 1687.3s / 3615.1s
+  SPK: spk2 (id=2 sim=0.552)
+  STATS: spk2 id=2 sim=0.552 lat=0ms EARLY
+  ASR(partial, 3.8s): 是吧？也有可能，我觉得未来我们这边能分给员工的，值得给。
+  SPK: spk2 (id=2 sim=0.463)
+  STATS: spk2 id=2 sim=0.463 lat=0ms EARLY
+  ... 1692.3s / 3615.1s
+  ASR [spk2] (811.3-815.5s sim=0.55 conf=1.65 src=SPK_FULL trigger=post_silence) 也有可能，我觉得未来我们这边能分给员工的值得给出去。
+  ... 1697.3s / 3615.1s
+  ASR [spk2] (815.6-816.4s sim=0.20 conf=0.20 src=SPK_EARLY trigger=post_silence) 对吧？
+  ... 1702.3s / 3615.1s
+  SPK: spk2 (id=2 sim=0.613)
+  STATS: spk2 id=2 sim=0.613 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.604)
+  STATS: spk2 id=2 sim=0.604 lat=0ms EARLY
+  ... 1707.3s / 3615.1s
+  ASR(partial, 2.7s): 除了我们真的是干不了的事儿，就是我们是骨子呀。
+  SPK: spk2 (id=2 sim=0.355)
+  STATS: spk2 id=2 sim=0.355 lat=0ms EARLY
+  ASR [spk2] (818.2-821.3s sim=0.60 conf=1.50 src=SPK_FULL trigger=post_silence) 除了我们真的是干不了的事儿，就是我们是骨子呀。
+  ... 1712.3s / 3615.1s
+  ... 1717.3s / 3615.1s
+  ASR [spk2] (821.4-822.6s sim=0.60 conf=0.20 src=SPK_FULL trigger=post_silence) 是。嗯。
+  ... 1722.3s / 3615.1s
+  SPK: spk2 (id=2 sim=0.275)
+  STATS: spk2 id=2 sim=0.275 lat=0ms EARLY
+  ASR [spk2] (825.3-827.3s sim=0.35 conf=0.46 src=SPK_EARLY trigger=vad_gap) 我听起，我起主要还起啥？
+  ... 1727.3s / 3615.1s
+  ... 1732.3s / 3615.1s
+  ASR(partial, 2.0s): 这个吃过，老板。
+  ASR [spk2] (827.3-829.6s sim=0.28 conf=0.40 src=SPK_EARLY trigger=post_silence) 这个吃过，老板。
+  ... 1737.2s / 3615.1s
+  ASR [spk2] (829.7-830.5s sim=0.28 conf=0.20 src=SPK_EARLY trigger=post_silence) 好嘞。
+  ... 1742.2s / 3615.1s
+  ASR [spk2] (834.5-836.1s sim=0.28 conf=0.10 src=SNAPSHOT trigger=post_silence) 是四点八个亿了。
+  ... 1747.2s / 3615.1s
+  ... 1752.2s / 3615.1s
+  ASR [spk0] (836.4-837.3s sim=0.43 conf=0.10 src=SNAPSHOT trigger=vad_gap) 嗯，也是。
+  ... 1757.2s / 3615.1s
+  ASR [spk2] (837.3-838.1s sim=0.28 conf=0.10 src=SNAPSHOT trigger=post_silence) 对吧？
+  ... 1762.2s / 3615.1s
+  SPK: spk0 (id=0 sim=0.462)
+  STATS: spk0 id=0 sim=0.462 lat=0ms EARLY
+  ASR [spk2] (838.0-839.0s sim=0.28 conf=0.10 src=SNAPSHOT trigger=post_silence) 四点八个0。
+  ... 1767.2s / 3615.1s
+  SPK: spk0 (id=0 sim=0.230)
+  STATS: spk0 id=0 sim=0.230 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.620)
+  STATS: spk2 id=2 sim=0.620 lat=0ms EARLY
+  ASR(partial, 2.8s): 到时候我一定。我那财务自由，我那打算。
+  ... 1772.2s / 3615.1s
+  ASR [spk2] (841.0-844.2s sim=0.62 conf=0.84 src=SPK_FULL trigger=post_silence) 到时候我一定。我那财务自由的目标是咋算的？
+  ... 1777.2s / 3615.1s
+  ASR [spk2] (845.1-845.9s sim=0.62 conf=0.20 src=SPK_FULL trigger=post_silence) 啊。
+  ... 1782.2s / 3615.1s
+  SPK: spk0 (id=0 sim=0.549)
+  STATS: spk0 id=0 sim=0.549 lat=0ms EARLY
+  ... 1787.2s / 3615.1s
+  ASR [spk2] (846.8-848.2s sim=0.62 conf=0.20 src=SPK_FULL trigger=post_silence) 我说，我要是。
+  ... 1792.2s / 3615.1s
+  ASR [spk2] (849.5-850.5s sim=0.62 conf=0.10 src=SNAPSHOT trigger=post_silence) 驼。
+  ... 1797.2s / 3615.1s
+  SPK: spk0 (id=0 sim=0.320)
+  STATS: spk0 id=0 sim=0.320 lat=0ms EARLY
+  ASR [spk0] (851.0-852.5s sim=0.55 conf=0.73 src=SPK_FULL trigger=post_silence) 草泥马！那个帽子。
+  ... 1802.1s / 3615.1s
+  ASR [spk0] (852.6-853.4s sim=0.55 conf=0.20 src=SPK_FULL trigger=post_silence) 嗯。
+  ... 1807.1s / 3615.1s
+  ASR [spk0] (853.5-856.0s sim=0.32 conf=0.36 src=SPK_EARLY trigger=post_silence) 但是，我觉得我钱少了，我。
+  ... 1812.1s / 3615.1s
+  ... 1817.1s / 3615.1s
+  SPK: spk0 (id=0 sim=0.415)
+  STATS: spk0 id=0 sim=0.415 lat=0ms EARLY
+  ASR [spk0] (855.9-857.0s sim=0.32 conf=0.20 src=SPK_EARLY trigger=post_silence) 我不好意思。
+  ... 1822.1s / 3615.1s
+  SPK: spk0 (id=0 sim=0.317)
+  STATS: spk0 id=0 sim=0.317 lat=0ms EARLY
+  ASR(partial, 2.6s): 你说六百美金啊，花18000000。
+  SPK: spk0 (id=0 sim=0.453)
+  STATS: spk0 id=0 sim=0.453 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.529)
+  STATS: spk2 id=2 sim=0.529 lat=0ms EARLY
+  ... 1827.1s / 3615.1s
+  ASR(partial, 4.6s): 你说六百美金啊，花千八百万去买那个一个东西。
+  SPK: spk2 (id=2 sim=0.478)
+  STATS: spk2 id=2 sim=0.478 lat=0ms EARLY
+  ... 1832.1s / 3615.1s
+  SPK: spk2 (id=2 sim=0.523)
+  STATS: spk2 id=2 sim=0.523 lat=0ms EARLY
+  ASR [spk2] (857.3-862.6s sim=0.53 conf=0.81 src=SPK_FULL trigger=post_silence) 你说六百美金啊，花很多千八百万去买那个一个东西。
+  ... 1837.1s / 3615.1s
+  ... 1842.1s / 3615.1s
+  SPK: spk2 (id=2 sim=0.589)
+  STATS: spk2 id=2 sim=0.589 lat=0ms EARLY
+  ASR [spk2] (864.7-865.8s sim=0.53 conf=0.10 src=SNAPSHOT trigger=post_silence) 那就是他家的。
+  ... 1847.1s / 3615.1s
+  ASR [spk2] (865.9-867.8s sim=0.52 conf=1.22 src=SPK_FULL trigger=post_silence) 啊，玩不下来了吗？
+  ... 1852.1s / 3615.1s
+  ASR [spk2] (867.7-868.9s sim=0.52 conf=0.20 src=SPK_FULL trigger=vad_gap) 老两。
+  ... 1857.1s / 3615.1s
+  SPK: spk2 (id=2 sim=0.254)
+  STATS: spk2 id=2 sim=0.254 lat=0ms EARLY
+  ASR [spk2] (868.9-871.4s sim=0.59 conf=0.48 src=SPK_FULL trigger=post_silence) 那如果这样的话，那投资公司呢？
+  ... 1862.0s / 3615.1s
+  ... 1867.0s / 3615.1s
+  ASR [spk2] (871.7-873.1s sim=0.59 conf=0.20 src=SPK_FULL trigger=post_silence) 就直接全场打。
+  ... 1872.0s / 3615.1s
+  SPK: spk2 (id=2 sim=0.359)
+  STATS: spk2 id=2 sim=0.359 lat=0ms EARLY
+  ASR [spk2] (873.8-874.4s sim=0.77 conf=0.10 src=SNAPSHOT trigger=vad_gap) 哎。
+  ... 1877.0s / 3615.1s
+  SPK: spk2 (id=2 sim=0.312)
+  STATS: spk2 id=2 sim=0.312 lat=0ms EARLY
+  ASR [spk2] (874.4-876.6s sim=0.25 conf=0.41 src=SPK_EARLY trigger=vad_gap) 老板，老板，老板。
+  ... 1882.0s / 3615.1s
+  ... 1887.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.558)
+  STATS: spk0 id=0 sim=0.558 lat=0ms EARLY
+  ASR(partial, 3.1s): 是老板吗？对啊，我们老板决定啊。
+  SPK: spk0 (id=0 sim=0.255)
+  STATS: spk0 id=0 sim=0.255 lat=0ms EARLY
+  ... 1892.0s / 3615.1s
+  ASR [spk0] (876.6-880.5s sim=0.56 conf=0.92 src=SPK_FULL trigger=post_silence) 是老板吗？对啊，两位老板决定啊，就是。
+  ... 1897.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.334)
+  STATS: spk0 id=0 sim=0.334 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.420)
+  STATS: spk0 id=0 sim=0.420 lat=0ms EARLY
+  ... 1902.0s / 3615.1s
+  ASR(partial, 2.7s): 我俩是已经没事儿了，是吧？对，其实其实我。
+  SPK: spk0 (id=0 sim=0.589)
+  STATS: spk0 id=0 sim=0.589 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.529)
+  STATS: spk0 id=0 sim=0.529 lat=0ms EARLY
+  ... 1907.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.536)
+  STATS: spk0 id=0 sim=0.536 lat=0ms EARLY
+  ASR [spk0] (880.8-885.7s sim=0.59 conf=1.53 src=SPK_FULL trigger=post_silence) 我俩是已经没事儿了，是吧？对，其实其实我们俩就是在这儿听戏，然后就是。
+  ... 1912.0s / 3615.1s
+  ... 1917.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.553)
+  STATS: spk0 id=0 sim=0.553 lat=0ms EARLY
+  ASR [spk0] (885.8-887.4s sim=0.54 conf=1.38 src=SPK_FULL trigger=vad_gap) 那我们那个。
+  ... 1922.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.574)
+  STATS: spk0 id=0 sim=0.574 lat=0ms EARLY
+  ASR(partial, 2.4s): 我们那，因为站长，你看。我我不插话。
+  ... 1926.9s / 3615.1s
+  ASR [spk0] (887.4-890.2s sim=0.57 conf=1.11 src=SPK_FULL trigger=post_silence) 我们那，因为站长，你看，我我不插话。
+  ... 1931.9s / 3615.1s
+  ... 1936.9s / 3615.1s
+  ASR [spk0] (890.1-890.9s sim=0.57 conf=0.20 src=SPK_FULL trigger=post_silence) 所以，讲。
+  ... 1941.9s / 3615.1s
+  SPK: spk0 (id=0 sim=0.460)
+  STATS: spk0 id=0 sim=0.460 lat=0ms EARLY
+  ASR [spk0] (891.2-892.0s sim=0.57 conf=0.20 src=SPK_FULL trigger=post_silence) 是的。
+  ... 1946.9s / 3615.1s
+  ASR [spk0] (892.1-893.7s sim=0.57 conf=0.20 src=SPK_FULL trigger=post_silence) 说你。
+  ... 1951.9s / 3615.1s
+  ASR [spk0] (894.5-896.0s sim=0.57 conf=0.10 src=SNAPSHOT trigger=post_silence) 说心里还是挺好的。
+  ... 1956.9s / 3615.1s
+  ASR [spk0] (896.3-897.1s sim=0.57 conf=0.10 src=SNAPSHOT trigger=post_silence) 第1。
+  ... 1961.9s / 3615.1s
+  ASR [spk0] (897.4-899.9s sim=0.46 conf=0.36 src=SPK_EARLY trigger=vad_gap) 就是，我是觉得这帮就是。
+  ... 1966.9s / 3615.1s
+  ... 1971.9s / 3615.1s
+  SPK: spk0 (id=0 sim=0.385)
+  STATS: spk0 id=0 sim=0.385 lat=0ms EARLY
+  ASR [spk0] (899.9-902.0s sim=0.46 conf=0.20 src=SPK_EARLY trigger=post_silence) 就是现在，确实只有国央企了。
+  ... 1976.9s / 3615.1s
+  ... 1981.9s / 3615.1s
+  SPK: spk0 (id=0 sim=0.317)
+  STATS: spk0 id=0 sim=0.317 lat=0ms EARLY
+  ASR(partial, 3.1s): 民间看不强，就是不太强，在他们那边。
+  ASR [spk0] (901.9-904.9s sim=0.39 conf=0.30 src=SPK_EARLY trigger=vad_gap) 民间抗争强，就是不太强，在他们那儿。
+  ... 1986.8s / 3615.1s
+  ... 1991.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.262)
+  STATS: spk0 id=0 sim=0.262 lat=0ms EARLY
+  ASR [spk0] (904.9-906.9s sim=0.32 conf=0.46 src=SPK_EARLY trigger=vad_gap) 然后说这个产品，嗯。
+  ... 1996.8s / 3615.1s
+  SPK: spk2 (id=2 sim=0.502)
+  STATS: spk2 id=2 sim=0.502 lat=0ms EARLY
+  ASR [spk0] (906.9-907.7s sim=0.32 conf=0.20 src=SPK_EARLY trigger=post_silence) 嗯。对。
+  ... 2001.8s / 3615.1s
+  ... 2006.8s / 3615.1s
+  ASR [spk0] (907.8-909.0s sim=0.32 conf=0.20 src=SPK_EARLY trigger=post_silence) 但是呢，那个。
+  ... 2011.8s / 3615.1s
+  SPK: spk2 (id=2 sim=0.323)
+  STATS: spk2 id=2 sim=0.323 lat=0ms EARLY
+  ASR [spk0] (908.9-909.7s sim=0.32 conf=0.20 src=SPK_EARLY trigger=post_silence) 现。
+  ... 2016.8s / 3615.1s
+  SPK: spk2 (id=2 sim=0.226)
+  STATS: spk2 id=2 sim=0.226 lat=0ms EARLY
+  ASR [spk2] (909.6-912.2s sim=0.50 conf=0.89 src=SPK_FULL trigger=vad_gap) 人员是可以进香港的财务，它很基础。
+  ... 2021.8s / 3615.1s
+  ... 2026.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.620)
+  STATS: spk0 id=0 sim=0.620 lat=0ms EARLY
+  ASR [spk0] (912.2-915.3s sim=0.62 conf=0.90 src=SPK_FULL trigger=post_silence) 好，我们自己没好，就没事。
+  SPK: spk0 (id=0 sim=0.198)
+  STATS: spk0 id=0 sim=0.198 lat=0ms EARLY
+  ... 2031.8s / 3615.1s
+  ... 2036.8s / 3615.1s
+  SPK: spk2 (id=2 sim=0.519)
+  STATS: spk2 id=2 sim=0.519 lat=0ms EARLY
+  ASR(partial, 2.0s): 成都泛林公司服务，我们跟人家签。
+  SPK: spk2 (id=2 sim=0.636)
+  STATS: spk2 id=2 sim=0.636 lat=0ms EARLY
+  ... 2041.8s / 3615.1s
+  ASR(partial, 4.0s): 成都泛林公司服务，我们跟人家签了没地儿，给人家做的就是支持。
+  SPK: spk2 (id=2 sim=0.332)
+  STATS: spk2 id=2 sim=0.332 lat=0ms EARLY
+  ... 2046.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.554)
+  STATS: spk0 id=0 sim=0.554 lat=0ms EARLY
+  ASR [spk2] (916.2-921.1s sim=0.64 conf=0.93 src=SPK_FULL trigger=post_silence) 成都泛林公司服务，我们跟人家签了没地儿，给人家做个技术支持，各种方式。
+  ... 2051.7s / 3615.1s
+  ... 2056.7s / 3615.1s
+  ASR [spk2] (921.2-922.2s sim=0.64 conf=0.20 src=SPK_FULL trigger=post_silence) 哎。那。
+  ... 2061.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.208)
+  STATS: spk0 id=0 sim=0.208 lat=0ms EARLY
+  ... 2066.7s / 3615.1s
+  ASR [spk2] (922.3-923.6s sim=0.64 conf=0.20 src=SPK_FULL trigger=vad_gap) 不存在啊，相当于。
+  ... 2071.7s / 3615.1s
+  SPK: spk1 (id=1 sim=0.546)
+  STATS: spk1 id=1 sim=0.546 lat=0ms EARLY
+  ASR [spk2] (923.6-924.6s sim=0.64 conf=0.10 src=SNAPSHOT trigger=post_silence) 你们还没事。
+  ... 2076.7s / 3615.1s
+  ASR [spk0] (924.7-926.8s sim=0.55 conf=0.67 src=SPK_FULL trigger=vad_gap) 啊，这个就不存在嘛。是。
+  ... 2081.7s / 3615.1s
+  ... 2086.7s / 3615.1s
+  ASR [spk0] (926.8-928.2s sim=0.55 conf=0.20 src=SPK_FULL trigger=post_silence) 在前两天啊。
+  ... 2091.7s / 3615.1s
+  SPK: spk1 (id=1 sim=0.408)
+  STATS: spk1 id=1 sim=0.408 lat=0ms EARLY
+  ASR [spk1] (928.5-930.5s sim=0.55 conf=0.80 src=SPK_FULL trigger=vad_gap) 会说这个里面的技术是哪来的？
+  ... 2096.7s / 3615.1s
+  ... 2101.7s / 3615.1s
+  ASR [spk1] (930.5-931.1s sim=0.55 conf=0.20 src=SPK_FULL trigger=vad_gap) 嗯。是。
+  ... 2106.7s / 3615.1s
+  ASR [spk1] (931.1-932.2s sim=0.55 conf=0.20 src=SPK_FULL trigger=post_silence) 所以说，属于啊。
+  ... 2111.6s / 3615.1s
+  SPK: spk1 (id=1 sim=0.233)
+  STATS: spk1 id=1 sim=0.233 lat=0ms EARLY
+  ASR [spk1] (933.1-935.6s sim=0.41 conf=0.36 src=SPK_EARLY trigger=vad_gap) 然后这个照片，我就说的是这个。
+  ... 2116.6s / 3615.1s
+  ... 2121.6s / 3615.1s
+  ASR [spk1] (936.9-937.8s sim=0.41 conf=0.20 src=SPK_EARLY trigger=post_silence) 甘肃。
+  ... 2126.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.388)
+  STATS: spk0 id=0 sim=0.388 lat=0ms EARLY
+  ASR(partial, 2.7s): 笑什么？
+  ASR [spk0] (938.9-941.9s sim=0.39 conf=0.35 src=SPK_EARLY trigger=post_silence) 笑什么？
+  ... 2131.6s / 3615.1s
+  ASR [spk0] (943.2-944.2s sim=0.39 conf=0.20 src=SPK_EARLY trigger=post_silence) 住在这。
+  ... 2136.6s / 3615.1s
+  ASR [spk0] (944.7-946.0s sim=0.39 conf=0.10 src=SNAPSHOT trigger=post_silence) 哈尔滨的，对吧？
+  ... 2141.6s / 3615.1s
+  ... 2146.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.311)
+  STATS: spk0 id=0 sim=0.311 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.618)
+  STATS: spk2 id=2 sim=0.618 lat=0ms EARLY
+  ASR(partial, 2.0s): 嗯，说实话，我我实在是因为。
+  ... 2151.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.205)
+  STATS: spk2 id=2 sim=0.205 lat=0ms EARLY
+  ASR [spk2] (948.1-950.8s sim=0.62 conf=0.81 src=SPK_FULL trigger=vad_gap) 啊，说实话，我我实在是因为你说的。
+  ... 2156.6s / 3615.1s
+  ASR [spk2] (950.8-951.9s sim=0.62 conf=0.20 src=SPK_FULL trigger=vad_gap) 因为也没问题。
+  ... 2161.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.556)
+  STATS: spk0 id=0 sim=0.556 lat=0ms EARLY
+  ... 2166.6s / 3615.1s
+  ASR [spk0] (951.9-954.3s sim=0.56 conf=0.88 src=SPK_FULL trigger=post_silence) 价格下面，它就是个C。
+  ... 2171.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.529)
+  STATS: spk0 id=0 sim=0.529 lat=0ms EARLY
+  ASR [spk0] (954.8-955.9s sim=0.56 conf=0.20 src=SPK_FULL trigger=post_silence) 那肯定的。
+  ... 2176.5s / 3615.1s
+  SPK: spk0 (id=0 sim=0.535)
+  STATS: spk0 id=0 sim=0.535 lat=0ms EARLY
+  ... 2181.5s / 3615.1s
+  ASR(partial, 2.0s): 对，降维要三个，就是降维。
+  SPK: spk0 (id=0 sim=0.562)
+  STATS: spk0 id=0 sim=0.562 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.395)
+  STATS: spk0 id=0 sim=0.395 lat=0ms EARLY
+  ASR [spk0] (956.0-959.1s sim=0.56 conf=1.17 src=SPK_FULL trigger=vad_gap) 对，价格要上，就是价格上来了，就是个。
+  ... 2186.5s / 3615.1s
+  ... 2191.5s / 3615.1s
+  ASR(partial, 2.7s): 让谁买他的东西？对，让谁买？
+  SPK: spk0 (id=0 sim=0.252)
+  STATS: spk0 id=0 sim=0.252 lat=0ms EARLY
+  ... 2196.5s / 3615.1s
+  ASR [spk0] (959.1-961.7s sim=0.40 conf=0.35 src=SPK_EARLY trigger=vad_gap) 让谁买他的东西？对，让谁买？
+  ... 2201.5s / 3615.1s
+  SPK: spk0 (id=0 sim=0.251)
+  STATS: spk0 id=0 sim=0.251 lat=0ms EARLY
+  ASR [spk0] (961.7-963.4s sim=0.40 conf=0.20 src=SPK_EARLY trigger=post_silence) 你啥？
+  ... 2206.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.609)
+  STATS: spk2 id=2 sim=0.609 lat=0ms EARLY
+  ... 2211.5s / 3615.1s
+  ASR [spk0] (963.3-964.1s sim=0.40 conf=0.20 src=SPK_EARLY trigger=vad_gap) 我们来这个。
+  ... 2216.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.348)
+  STATS: spk2 id=2 sim=0.348 lat=0ms EARLY
+  ASR [spk2] (964.1-967.7s sim=0.61 conf=0.86 src=SPK_FULL trigger=post_silence) 或者充电器，或者怎么充电器，绝对不是电池问题。
+  SPK: spk2 (id=2 sim=0.584)
+  STATS: spk2 id=2 sim=0.584 lat=0ms EARLY
+  ... 2221.5s / 3615.1s
+  ... 2226.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.326)
+  STATS: spk2 id=2 sim=0.326 lat=0ms EARLY
+  ASR(partial, 2.8s): 成都饭店贵，是飞全子总公司在那边啊。
+  ... 2231.5s / 3615.1s
+  ASR [spk2] (967.6-970.7s sim=0.58 conf=1.10 src=SPK_FULL trigger=post_silence) 成都分公是非全资子公司，但未盈利啊。
+  ... 2236.4s / 3615.1s
+  ... 2241.4s / 3615.1s
+  ASR(partial, 3.7s): 那并表另外呢？那还那剩下，另外把并表。
+  ... 2246.4s / 3615.1s
+  ASR [spk2] (971.0-974.6s sim=0.33 conf=0.25 src=SPK_EARLY trigger=vad_gap) 那并表另外呢？那还那剩下，另外把并表。
+  ... 2251.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.394)
+  STATS: spk2 id=2 sim=0.394 lat=0ms EARLY
+  ... 2256.4s / 3615.1s
+  ASR [spk2] (974.6-975.4s sim=0.33 conf=0.20 src=SPK_EARLY trigger=post_silence) 我们。哎。
+  ... 2261.4s / 3615.1s
+  ASR [spk2] (975.5-976.9s sim=0.33 conf=0.10 src=SNAPSHOT trigger=post_silence) 上百分之二十给谁呢？
+  ... 2266.4s / 3615.1s
+  ASR [spk2] (979.3-980.1s sim=0.33 conf=0.10 src=SNAPSHOT trigger=post_silence) 有钱。
+  ... 2271.4s / 3615.1s
+  ... 2276.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.485)
+  STATS: spk2 id=2 sim=0.485 lat=0ms EARLY
+  ASR [spk2] (983.0-985.0s sim=0.39 conf=0.46 src=SPK_EARLY trigger=post_silence) 有限的一个L.P。
+  ... 2281.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.501)
+  STATS: spk2 id=2 sim=0.501 lat=0ms EARLY
+  ASR [spk2] (986.7-988.5s sim=0.50 conf=1.28 src=SPK_FULL trigger=vad_gap) 觉得现在如果情感有影响。
+  ... 2286.4s / 3615.1s
+  ... 2291.4s / 3615.1s
+  ASR [spk2] (989.7-990.4s sim=0.50 conf=0.20 src=SPK_FULL trigger=vad_gap) 脱贫。哎。
+  ... 2296.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.260)
+  STATS: spk2 id=2 sim=0.260 lat=0ms EARLY
+  SPK: spk1 (id=1 sim=0.502)
+  STATS: spk1 id=1 sim=0.502 lat=0ms EARLY
+  ASR [spk1] (990.4-992.1s sim=0.50 conf=0.82 src=SPK_FULL trigger=post_silence) 刚才这个说话。
+  ... 2301.3s / 3615.1s
+  SPK: spk1 (id=1 sim=0.528)
+  STATS: spk1 id=1 sim=0.528 lat=0ms EARLY
+  ... 2306.3s / 3615.1s
+  SPK: spk1 (id=1 sim=0.596)
+  STATS: spk1 id=1 sim=0.596 lat=0ms EARLY
+  ASR(partial, 2.0s): 而且现在聊开始聊的也不会特别什么。
+  SPK: spk1 (id=1 sim=0.637)
+  STATS: spk1 id=1 sim=0.637 lat=0ms EARLY
+  ... 2311.3s / 3615.1s
+  SPK: spk1 (id=1 sim=0.425)
+  STATS: spk1 id=1 sim=0.425 lat=0ms EARLY
+  ASR(partial, 4.0s): 而且现在聊开始聊的也不会特别什么，然后下再下手会一力全什么。
+  ... 2316.3s / 3615.1s
+  ASR [spk1] (992.4-996.7s sim=0.64 conf=1.34 src=SPK_FULL trigger=post_silence) 而且现在聊开始聊的也不会特别什么，然后下再下手会一力全什么。
+  ... 2321.3s / 3615.1s
+  ... 2326.3s / 3615.1s
+  SPK: spk1 (id=1 sim=0.299)
+  STATS: spk1 id=1 sim=0.299 lat=0ms EARLY
+  ASR [spk1] (997.2-999.6s sim=0.42 conf=0.38 src=SPK_EARLY trigger=post_silence) 嗯，所以说一开始咱咱几个也还好。
+  ... 2331.3s / 3615.1s
+  ... 2336.3s / 3615.1s
+  ASR [spk1] (999.9-1003.4s sim=0.30 conf=0.26 src=SPK_EARLY trigger=post_silence) 说全是怎么说啊？说其他的东西就是什么？
+  ... 2341.3s / 3615.1s
+  ... 2346.3s / 3615.1s
+  ASR [spk1] (1004.9-1005.7s sim=0.30 conf=0.20 src=SPK_EARLY trigger=vad_gap) 出资。
+  ... 2351.3s / 3615.1s
+  SPK: spk1 (id=1 sim=0.173)
+  STATS: spk1 id=1 sim=0.173 lat=0ms EARLY
+  ASR [spk1] (1005.7-1006.3s sim=0.30 conf=0.20 src=SPK_EARLY trigger=vad_gap) 主任。主任。
+  ... 2356.3s / 3615.1s
+  ASR [spk1] (1006.3-1008.1s sim=0.17 conf=0.51 src=SPK_EARLY trigger=post_silence) 怎么来确定成都公司法律关系？
+  ... 2361.2s / 3615.1s
+  ... 2366.2s / 3615.1s
+  SPK: spk2 (id=2 sim=0.334)
+  STATS: spk2 id=2 sim=0.334 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.383)
+  STATS: spk2 id=2 sim=0.383 lat=0ms EARLY
+  ASR(partial, 2.0s): 你要把它变成公司，那我们。
+  SPK: spk0 (id=0 sim=0.600)
+  STATS: spk0 id=0 sim=0.600 lat=0ms EARLY
+  ... 2371.2s / 3615.1s
+  ASR(partial, 4.0s): 你要把它变成公司，那我们现在的所有股东就要出让。
+  SPK: spk0 (id=0 sim=0.582)
+  STATS: spk0 id=0 sim=0.582 lat=0ms EARLY
+  ASR [spk0] (1008.2-1012.7s sim=0.60 conf=0.62 src=SPK_FULL trigger=vad_gap) 你要把它变成公司，那我们现在的所有股东就要出让股权。
+  ... 2376.2s / 3615.1s
+  ... 2381.2s / 3615.1s
+  ASR [spk0] (1012.7-1013.5s sim=0.60 conf=0.20 src=SPK_FULL trigger=post_silence) 嗯。嗯。
+  ... 2386.2s / 3615.1s
+  ASR [spk0] (1013.6-1014.4s sim=0.60 conf=0.20 src=SPK_FULL trigger=post_silence) 对吧？
+  ... 2391.2s / 3615.1s
+  ... 2396.2s / 3615.1s
+  ASR [spk0] (1016.0-1017.8s sim=0.58 conf=0.67 src=SPK_FULL trigger=post_silence) 那以什么价格出这个？
+  ... 2401.2s / 3615.1s
+  ASR [spk0] (1018.1-1019.4s sim=0.58 conf=0.20 src=SPK_FULL trigger=post_silence) 是吧？这个这个是。
+  ... 2406.2s / 3615.1s
+  ... 2411.2s / 3615.1s
+  ASR [spk0] (1019.7-1020.5s sim=0.58 conf=0.20 src=SPK_FULL trigger=post_silence) 第1。
+  ... 2416.2s / 3615.1s
+  SPK: spk0 (id=0 sim=0.413)
+  STATS: spk0 id=0 sim=0.413 lat=0ms EARLY
+  ASR [spk0] (1020.8-1021.4s sim=0.57 conf=0.10 src=SNAPSHOT trigger=vad_gap) 我。
+  ... 2421.2s / 3615.1s
+  ASR [spk0] (1021.4-1022.6s sim=0.58 conf=0.10 src=SNAPSHOT trigger=post_silence) 那这个。
+  ... 2426.1s / 3615.1s
+  ASR [spk0] (1022.5-1024.2s sim=0.58 conf=0.10 src=SNAPSHOT trigger=post_silence) 作为全资子公司。
+  ... 2431.1s / 3615.1s
+  ... 2436.1s / 3615.1s
+  ASR [spk0] (1025.1-1026.6s sim=0.58 conf=0.10 src=SNAPSHOT trigger=post_silence) 哪件还受不起？
+  ... 2441.1s / 3615.1s
+  ASR [spk0] (1027.3-1029.8s sim=0.41 conf=0.36 src=SPK_EARLY trigger=post_silence) 成都的石油杆是多少？
+  ... 2446.1s / 3615.1s
+  SPK: spk0 (id=0 sim=0.485)
+  STATS: spk0 id=0 sim=0.485 lat=0ms EARLY
+  ASR [spk0] (1030.7-1031.8s sim=0.41 conf=0.20 src=SPK_EARLY trigger=post_silence) 这个形象。
+  ... 2451.1s / 3615.1s
+  ... 2456.1s / 3615.1s
+  ASR [spk0] (1031.7-1032.6s sim=0.41 conf=0.20 src=SPK_EARLY trigger=post_silence) 嗯。是。
+  ... 2461.1s / 3615.1s
+  SPK: spk0 (id=0 sim=0.562)
+  STATS: spk0 id=0 sim=0.562 lat=0ms EARLY
+  ASR [spk0] (1034.9-1036.2s sim=0.41 conf=0.10 src=SNAPSHOT trigger=post_silence) 不过。哎。
+  ... 2466.1s / 3615.1s
+  ... 2471.1s / 3615.1s
+  ASR [spk0] (1036.3-1039.2s sim=0.56 conf=1.18 src=SPK_FULL trigger=post_silence) 至少要要做一个技术服务的采购。
+  ... 2476.1s / 3615.1s
+  SPK: spk0 (id=0 sim=0.565)
+  STATS: spk0 id=0 sim=0.565 lat=0ms EARLY
+  ASR [spk0] (1040.4-1042.2s sim=0.56 conf=0.20 src=SPK_FULL trigger=vad_gap) 这边，因为如果要切割的话。
+  ... 2481.1s / 3615.1s
+  ... 2486.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.518)
+  STATS: spk0 id=0 sim=0.518 lat=0ms EARLY
+  ASR(partial, 2.0s): 那本身法人实体相互。
+  SPK: spk0 (id=0 sim=0.635)
+  STATS: spk0 id=0 sim=0.635 lat=0ms EARLY
+  ... 2491.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.693)
+  STATS: spk0 id=0 sim=0.693 lat=0ms EARLY
+  ASR [spk0] (1042.2-1046.1s sim=0.64 conf=1.43 src=SPK_FULL trigger=post_silence) 那本身法人实体相互对所有的股东都是1致的。
+  ... 2496.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.694)
+  STATS: spk0 id=0 sim=0.694 lat=0ms EARLY
+  ... 2501.0s / 3615.1s
+  ASR(partial, 2.3s): 一家法人主体侵犯另外一家法人。
+  SPK: spk0 (id=0 sim=0.784)
+  STATS: spk0 id=0 sim=0.784 lat=0ms EARLY
+  ASR [spk0] (1046.4-1050.3s sim=0.78 conf=1.40 src=SPK_FULL trigger=post_silence) 一家法人主体侵犯另外一家法人主体的财产所有权。
+  ... 2506.0s / 3615.1s
+  ... 2511.0s / 3615.1s
+  ASR [spk0] (1050.2-1051.5s sim=0.78 conf=0.20 src=SPK_FULL trigger=post_silence) 对吧？对。
+  ... 2516.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.344)
+  STATS: spk0 id=0 sim=0.344 lat=0ms EARLY
+  ASR [spk0] (1053.0-1054.9s sim=0.92 conf=0.10 src=SNAPSHOT trigger=vad_gap) 在看了杭州网。
+  ... 2521.0s / 3615.1s
+  ... 2526.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.586)
+  STATS: spk0 id=0 sim=0.586 lat=0ms EARLY
+  ASR(partial, 2.0s): 你现在十二点。
+  SPK: spk0 (id=0 sim=0.337)
+  STATS: spk0 id=0 sim=0.337 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.537)
+  STATS: spk0 id=0 sim=0.537 lat=0ms EARLY
+  ... 2531.0s / 3615.1s
+  ASR [spk0] (1054.9-1058.5s sim=0.59 conf=1.39 src=SPK_FULL trigger=post_silence) 你现在所有的用的，我们全部都开了源的。
+  ... 2536.0s / 3615.1s
+  ASR [spk0] (1058.8-1059.7s sim=0.54 conf=0.20 src=SPK_FULL trigger=post_silence) 是吧？
+  ... 2541.0s / 3615.1s
+  SPK: spk0 (id=0 sim=0.493)
+  STATS: spk0 id=0 sim=0.493 lat=0ms EARLY
+  ASR [spk0] (1060.4-1061.1s sim=0.54 conf=0.20 src=SPK_FULL trigger=vad_gap) 对。
+  ... 2546.0s / 3615.1s
+  ... 2550.9s / 3615.1s
+  ASR [spk0] (1061.1-1061.9s sim=0.54 conf=0.20 src=SPK_FULL trigger=post_silence) 嗯。
+  SPK: spk0 (id=0 sim=0.663)
+  STATS: spk0 id=0 sim=0.663 lat=0ms EARLY
+  ... 2555.9s / 3615.1s
+  ASR(partial, 2.6s): 那在那个美股投资者里面看，这算？
+  ... 2560.9s / 3615.1s
+  ASR [spk0] (1062.2-1065.8s sim=0.66 conf=0.89 src=SPK_FULL trigger=post_silence) 那在那个美股投资者里面看，这算？
+  ... 2565.9s / 3615.1s
+  ... 2570.9s / 3615.1s
+  ASR [spk0] (1066.1-1067.5s sim=0.66 conf=0.20 src=SPK_FULL trigger=post_silence) 我们不干那事。
+  ... 2575.9s / 3615.1s
+  SPK: spk0 (id=0 sim=0.270)
+  STATS: spk0 id=0 sim=0.270 lat=0ms EARLY
+  ASR [spk0] (1067.4-1068.2s sim=0.66 conf=0.20 src=SPK_FULL trigger=post_silence) 嗯。
+  ... 2580.9s / 3615.1s
+  ASR [spk0] (1068.1-1068.9s sim=0.66 conf=0.10 src=SNAPSHOT trigger=post_silence) 我。
+  ... 2585.9s / 3615.1s
+  ASR [spk0] (1069.4-1070.7s sim=0.66 conf=0.10 src=SNAPSHOT trigger=post_silence) 所以，当你。
+  ... 2590.9s / 3615.1s
+  ... 2595.9s / 3615.1s
+  SPK: spk0 (id=0 sim=0.341)
+  STATS: spk0 id=0 sim=0.341 lat=0ms EARLY
+  ASR [spk0] (1070.8-1072.7s sim=0.27 conf=0.48 src=SPK_EARLY trigger=post_silence) 需要现身的时候。
+  ... 2600.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.580)
+  STATS: spk2 id=2 sim=0.580 lat=0ms EARLY
+  ... 2605.9s / 3615.1s
+  ASR(partial, 2.7s): 俺那院儿说你，你他妈的叫你了。
+  SPK: spk2 (id=2 sim=0.236)
+  STATS: spk2 id=2 sim=0.236 lat=0ms EARLY
+  ... 2610.8s / 3615.1s
+  ASR [spk2] (1072.8-1076.5s sim=0.58 conf=0.65 src=SPK_FULL trigger=vad_gap) 俺那要说你，你把妈的教育了多好啊，是吧？
+  ... 2615.8s / 3615.1s
+  ... 2620.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.621)
+  STATS: spk0 id=0 sim=0.621 lat=0ms EARLY
+  ASR [spk2] (1077.6-1078.9s sim=0.58 conf=0.20 src=SPK_FULL trigger=vad_gap) 就是作为这个。
+  ... 2625.8s / 3615.1s
+  ASR [spk2] (1078.9-1080.1s sim=0.58 conf=0.10 src=SNAPSHOT trigger=post_silence) 独立公司。
+  ... 2630.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.655)
+  STATS: spk0 id=0 sim=0.655 lat=0ms EARLY
+  ASR [spk2] (1080.4-1081.8s sim=0.58 conf=0.10 src=SNAPSHOT trigger=post_silence) 你要切割的话。
+  ... 2635.8s / 3615.1s
+  ... 2640.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.658)
+  STATS: spk0 id=0 sim=0.658 lat=0ms EARLY
+  ASR [spk0] (1081.7-1084.9s sim=0.62 conf=0.72 src=SPK_FULL trigger=post_silence) 也不也不用在那，也不是我们去美国。
+  ... 2645.8s / 3615.1s
+  ... 2650.8s / 3615.1s
+  ASR [spk0] (1084.8-1086.7s sim=0.66 conf=1.27 src=SPK_FULL trigger=post_silence) 北美狮子座的这个影响啊。
+  ... 2655.8s / 3615.1s
+  ASR [spk0] (1087.4-1088.9s sim=0.66 conf=0.20 src=SPK_FULL trigger=post_silence) 哎，走路嘛。
+  ... 2660.8s / 3615.1s
+  ... 2665.8s / 3615.1s
+  ASR [spk0] (1089.0-1089.7s sim=0.66 conf=0.20 src=SPK_FULL trigger=vad_gap) 有。
+  ... 2670.8s / 3615.1s
+  ASR [spk0] (1090.8-1092.3s sim=0.66 conf=0.10 src=SNAPSHOT trigger=post_silence) 两0，两0。
+  ... 2675.7s / 3615.1s
+  ... 2680.7s / 3615.1s
+  ASR [spk0] (1092.8-1094.7s sim=0.66 conf=0.10 src=SNAPSHOT trigger=post_silence) 哎，你你给他妈两0。
+  ... 2685.7s / 3615.1s
+  ASR [spk0] (1095.0-1095.9s sim=0.66 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。
+  ... 2690.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.396)
+  STATS: spk0 id=0 sim=0.396 lat=0ms EARLY
+  ... 2695.7s / 3615.1s
+  ASR(partial, 2.0s): 是了，都是都是中国人。
+  ASR [spk0] (1096.8-1099.1s sim=0.40 conf=0.40 src=SPK_EARLY trigger=post_silence) 是了，都是都是中国人。
+  ... 2700.7s / 3615.1s
+  ... 2705.7s / 3615.1s
+  ASR [spk0] (1099.8-1100.6s sim=0.40 conf=0.20 src=SPK_EARLY trigger=post_silence) 嗯。嗯。
+  ... 2710.7s / 3615.1s
+  ASR [spk0] (1100.9-1102.3s sim=0.40 conf=0.20 src=SPK_EARLY trigger=post_silence) 属于全人类。
+  ... 2715.7s / 3615.1s
+  ... 2720.7s / 3615.1s
+  ASR [spk0] (1102.4-1103.8s sim=0.40 conf=0.10 src=SNAPSHOT trigger=post_silence) 我跟十一呢？
+  ... 2725.7s / 3615.1s
+  ASR [spk0] (1104.5-1105.7s sim=0.47 conf=0.10 src=SNAPSHOT trigger=vad_gap) 对不对？
+  ... 2730.7s / 3615.1s
+  ASR [spk0] (1105.7-1106.3s sim=0.47 conf=0.10 src=SNAPSHOT trigger=vad_gap) 而且。
+  ... 2735.6s / 3615.1s
+  ... 2740.6s / 3615.1s
+  ASR [spk0] (1106.3-1107.4s sim=0.40 conf=0.10 src=SNAPSHOT trigger=post_silence) 马老师。
+  SPK: spk0 (id=0 sim=0.151)
+  STATS: spk0 id=0 sim=0.151 lat=0ms EARLY
+  ... 2745.6s / 3615.1s
+  ASR(partial, 2.8s): 我本来就是卖书啊，这个创始人在中国。
+  ... 2750.6s / 3615.1s
+  ASR [spk0] (1107.3-1110.3s sim=0.15 conf=0.30 src=SPK_EARLY trigger=vad_gap) 我本来就是卖书啊！这个创始人在中国。
+  ... 2755.6s / 3615.1s
+  ... 2760.6s / 3615.1s
+  ASR [spk0] (1110.3-1112.0s sim=0.15 conf=0.20 src=SPK_EARLY trigger=post_silence) 第7淮南地区。
+  ... 2765.6s / 3615.1s
+  ASR [spk0] (1111.9-1113.2s sim=0.15 conf=0.20 src=SPK_EARLY trigger=post_silence) 很正常啊。
+  ... 2770.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.553)
+  STATS: spk2 id=2 sim=0.553 lat=0ms EARLY
+  ASR [spk0] (1114.1-1115.3s sim=0.15 conf=0.10 src=SNAPSHOT trigger=post_silence) 有什么问题？
+  ... 2775.6s / 3615.1s
+  ... 2780.6s / 3615.1s
+  ASR [spk0] (1115.2-1116.0s sim=0.15 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。
+  ... 2785.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.314)
+  STATS: spk2 id=2 sim=0.314 lat=0ms EARLY
+  ASR [spk0] (1116.1-1117.0s sim=0.15 conf=0.10 src=SNAPSHOT trigger=post_silence) 对啊。
+  ... 2790.6s / 3615.1s
+  SPK: spk2 (id=2 sim=0.587)
+  STATS: spk2 id=2 sim=0.587 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.471)
+  STATS: spk2 id=2 sim=0.471 lat=0ms EARLY
+  ... 2795.6s / 3615.1s
+  ASR(partial, 3.4s): 几个点了？第五了。再说吧，无聊。
+  ASR [spk2] (1118.1-1122.2s sim=0.59 conf=1.21 src=SPK_FULL trigger=post_silence) 你个电脑低了，别说话，别无聊。
+  ... 2800.5s / 3615.1s
+  ... 2805.5s / 3615.1s
+  ASR(partial, 3.2s): 没关系，这边联系你的同事啊。
+  SPK: spk2 (id=2 sim=0.412)
+  STATS: spk2 id=2 sim=0.412 lat=0ms EARLY
+  ... 2810.5s / 3615.1s
+  ASR [spk2] (1122.1-1126.3s sim=0.47 conf=0.22 src=SPK_EARLY trigger=post_silence) 没关系，这边联系你的同事。
+  ... 2815.5s / 3615.1s
+  ASR [spk2] (1126.2-1126.9s sim=0.47 conf=0.20 src=SPK_EARLY trigger=vad_gap) 不重要。
+  ... 2820.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.576)
+  STATS: spk2 id=2 sim=0.576 lat=0ms EARLY
+  ... 2825.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.548)
+  STATS: spk2 id=2 sim=0.548 lat=0ms EARLY
+  ASR(partial, 2.9s): 我操！你真他妈！我给你投50000000，就让你百分之10。
+  SPK: spk2 (id=2 sim=0.253)
+  STATS: spk2 id=2 sim=0.253 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.702)
+  STATS: spk2 id=2 sim=0.702 lat=0ms EARLY
+  ... 2830.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.508)
+  STATS: spk2 id=2 sim=0.508 lat=0ms EARLY
+  ... 2835.5s / 3615.1s
+  ASR(partial, 5.5s): 我操！你真他妈两0，我给你投50000000，就让你百分之10。我这我这天我要。怎么不回购啊？
+  SPK: spk2 (id=2 sim=0.271)
+  STATS: spk2 id=2 sim=0.271 lat=0ms EARLY
+  ... 2840.5s / 3615.1s
+  SPK: spk2 (id=2 sim=0.270)
+  STATS: spk2 id=2 sim=0.270 lat=0ms EARLY
+  ASR [spk2] (1126.9-1132.7s sim=0.70 conf=1.61 src=SPK_FULL trigger=post_silence) 我操！你真他妈两0，我给你投50000000，就让你百分之10。我这我这钱我要。怎么不回购啊？
+  ... 2845.5s / 3615.1s
+  ... 2850.5s / 3615.1s
+  ... 2855.5s / 3615.1s
+  SPK: spk0 (id=0 sim=0.578)
+  STATS: spk0 id=0 sim=0.578 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.251)
+  STATS: spk0 id=0 sim=0.251 lat=0ms EARLY
+  ASR [spk2] (1132.6-1134.3s sim=0.51 conf=0.54 src=SPK_EARLY trigger=vad_gap) 怀高5000，对的，五千。对。
+  ... 2860.4s / 3615.1s
+  ... 2865.4s / 3615.1s
+  ASR [spk2] (1134.3-1135.4s sim=0.51 conf=0.20 src=SPK_EARLY trigger=vad_gap) 对赌和回购。
+  ... 2870.4s / 3615.1s
+  ... 2875.4s / 3615.1s
+  ASR [spk2] (1135.4-1137.3s sim=0.27 conf=0.48 src=SPK_EARLY trigger=vad_gap) 不签，其他的。
+  ... 2880.4s / 3615.1s
+  SPK: spk0 (id=0 sim=0.325)
+  STATS: spk0 id=0 sim=0.325 lat=0ms EARLY
+  ... 2885.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.485)
+  STATS: spk2 id=2 sim=0.485 lat=0ms EARLY
+  ASR [spk0] (1137.3-1139.4s sim=0.58 conf=0.86 src=SPK_FULL trigger=post_silence) 这事还跟艾尔克可能。
+  ... 2890.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.407)
+  STATS: spk2 id=2 sim=0.407 lat=0ms EARLY
+  ... 2895.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.502)
+  STATS: spk2 id=2 sim=0.502 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.580)
+  STATS: spk2 id=2 sim=0.580 lat=0ms EARLY
+  ASR(partial, 5.0s): 不好意思，这个是谁聊？你你报价，我们千万不要买红木嘛，我们那黑，我们。
+  ... 2900.4s / 3615.1s
+  ... 2905.4s / 3615.1s
+  ASR [spk2] (1139.3-1146.9s sim=0.58 conf=0.92 src=SPK_FULL trigger=post_silence) 不好意思，这个是谁聊？你你爆炸！我们千万不能把项目嘛，我们那吹我们的，你这吹你们的，咱们到时候一大路帮咱那选。
+  ... 2910.4s / 3615.1s
+  ... 2915.4s / 3615.1s
+  ... 2920.4s / 3615.1s
+  SPK: spk2 (id=2 sim=0.337)
+  STATS: spk2 id=2 sim=0.337 lat=0ms EARLY
+  ASR [spk2] (1147.4-1148.2s sim=0.58 conf=0.20 src=SPK_FULL trigger=post_silence) 啊。对。
+  ... 2925.3s / 3615.1s
+  ASR [spk2] (1148.3-1149.1s sim=0.58 conf=0.20 src=SPK_FULL trigger=post_silence) 吹一吹。
+  ... 2930.3s / 3615.1s
+  ... 2935.3s / 3615.1s
+  SPK: spk0 (id=0 sim=0.549)
+  STATS: spk0 id=0 sim=0.549 lat=0ms EARLY
+  ASR [spk2] (1149.4-1150.6s sim=0.58 conf=0.20 src=SPK_FULL trigger=post_silence) 嗯。对。
+  ... 2940.3s / 3615.1s
+  ... 2945.3s / 3615.1s
+  ASR [spk2] (1151.1-1152.0s sim=0.58 conf=0.10 src=SNAPSHOT trigger=post_silence) 水产。哎。
+  SPK: spk0 (id=0 sim=0.498)
+  STATS: spk0 id=0 sim=0.498 lat=0ms EARLY
+  ... 2950.3s / 3615.1s
+  SPK: spk0 (id=0 sim=0.229)
+  STATS: spk0 id=0 sim=0.229 lat=0ms EARLY
+  ... 2955.3s / 3615.1s
+  ASR(partial, 6.4s): 签个单页，然后把。你觉得对，就按我们刚刚商量的那个，要怎么弄的就按我。
+  ... 2960.3s / 3615.1s
+  SPK: spk0 (id=0 sim=0.423)
+  STATS: spk0 id=0 sim=0.423 lat=0ms EARLY
+  SPK: spk1 (id=1 sim=0.503)
+  STATS: spk1 id=1 sim=0.503 lat=0ms EARLY
+  ... 2965.3s / 3615.1s
+  SPK: spk1 (id=1 sim=0.194)
+  STATS: spk1 id=1 sim=0.194 lat=0ms EARLY
+  ASR [spk0] (1151.9-1160.3s sim=0.55 conf=0.48 src=SPK_FULL trigger=post_silence) 签单单页，然后把，你这样对，就按我们刚刚商量的那个，要怎么弄的就按我，就是股权转让就就按杭州那些。
+  ... 2970.3s / 3615.1s
+  ... 2975.3s / 3615.1s
+  ... 2980.3s / 3615.1s
+  ASR [spk0] (1160.6-1161.3s sim=0.23 conf=0.20 src=SPK_EARLY trigger=vad_gap) 嗯。
+  ... 2985.2s / 3615.1s
+  ASR [spk0] (1161.3-1162.1s sim=0.23 conf=0.20 src=SPK_EARLY trigger=post_silence) 什么东西啊？
+  ... 2990.2s / 3615.1s
+  SPK: spk1 (id=1 sim=0.276)
+  STATS: spk1 id=1 sim=0.276 lat=0ms EARLY
+  ASR [spk1] (1163.0-1164.7s sim=0.50 conf=0.77 src=SPK_FULL trigger=post_silence) 那如果说我们爸爸他怎样？
+  ... 2995.2s / 3615.1s
+  ... 3000.2s / 3615.1s
+  ASR [spk1] (1164.8-1166.5s sim=0.19 conf=0.54 src=SPK_EARLY trigger=post_silence) 偏偏。哎呀！
+  ... 3005.2s / 3615.1s
+  ... 3010.2s / 3615.1s
+  ASR [spk1] (1166.4-1169.8s sim=0.28 conf=0.27 src=SPK_EARLY trigger=post_silence) 你什么？你只做个做个价啊，做个估值啊。
+  ... 3015.2s / 3615.1s
+  ... 3020.2s / 3615.1s
+  ASR [spk1] (1170.6-1172.2s sim=0.28 conf=0.20 src=SPK_EARLY trigger=post_silence) 徐总，这估值多少？
+  ... 3025.2s / 3615.1s
+  ... 3030.2s / 3615.1s
+  ASR [spk1] (1173.9-1174.7s sim=0.28 conf=0.10 src=SNAPSHOT trigger=post_silence) 对。
+  ... 3035.2s / 3615.1s
+  ASR [spk1] (1174.8-1175.5s sim=0.53 conf=0.10 src=SNAPSHOT trigger=vad_gap) 嗯。嗯。
+  ... 3040.2s / 3615.1s
+  ... 3045.2s / 3615.1s
+  SPK: spk1 (id=1 sim=0.248)
+  STATS: spk1 id=1 sim=0.248 lat=0ms EARLY
+  ASR [spk1] (1175.5-1176.3s sim=0.28 conf=0.10 src=SNAPSHOT trigger=post_silence) 啊。
+  ... 3050.1s / 3615.1s
+  ASR [spk1] (1176.6-1177.4s sim=0.28 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。对。
+  ... 3055.1s / 3615.1s
+  ... 3060.1s / 3615.1s
+  ASR [spk1] (1177.9-1179.5s sim=0.28 conf=0.10 src=SNAPSHOT trigger=post_silence) 再加上邓军。
+  ... 3065.1s / 3615.1s
+  ASR(partial, 2.9s): 我们俩是没办法的事。
+  ... 3070.1s / 3615.1s
+  SPK: spk1 (id=1 sim=0.277)
+  STATS: spk1 id=1 sim=0.277 lat=0ms EARLY
+  ASR [spk1] (1179.4-1182.6s sim=0.25 conf=0.28 src=SPK_EARLY trigger=post_silence) 我们俩是没办的事。
+  ... 3075.1s / 3615.1s
+  ASR [spk1] (1182.7-1183.8s sim=0.25 conf=0.20 src=SPK_EARLY trigger=post_silence) 不就是。
+  ... 3080.1s / 3615.1s
+  ... 3085.1s / 3615.1s
+  SPK: spk1 (id=1 sim=0.202)
+  STATS: spk1 id=1 sim=0.202 lat=0ms EARLY
+  ASR(partial, 2.6s): 是吧？这个这个就架这个架空是什么？
+  ... 3090.1s / 3615.1s
+  ASR [spk1] (1184.5-1187.0s sim=0.28 conf=0.36 src=SPK_EARLY trigger=vad_gap) 是吧？这个这个就架这个架空是什么？
+  ... 3095.1s / 3615.1s
+  ... 3100.1s / 3615.1s
+  ASR [spk1] (1187.0-1189.6s sim=0.20 conf=0.35 src=SPK_EARLY trigger=post_silence) 至于价格，到时候如果他真交500股权。
+  ... 3105.1s / 3615.1s
+  SPK: spk1 (id=1 sim=0.164)
+  STATS: spk1 id=1 sim=0.164 lat=0ms EARLY
+  ... 3110.0s / 3615.1s
+  ASR [spk1] (1190.1-1191.3s sim=0.20 conf=0.20 src=SPK_EARLY trigger=vad_gap) 都是家看的。
+  ... 3115.0s / 3615.1s
+  ASR [spk1] (1191.3-1192.9s sim=0.16 conf=0.57 src=SPK_EARLY trigger=post_silence) 干完我给他还一下。
+  ... 3120.0s / 3615.1s
+  ... 3125.0s / 3615.1s
+  SPK: spk1 (id=1 sim=0.310)
+  STATS: spk1 id=1 sim=0.310 lat=0ms EARLY
+  ASR [spk1] (1192.8-1193.7s sim=0.16 conf=0.20 src=SPK_EARLY trigger=post_silence) 没出现呀。
+  ... 3130.0s / 3615.1s
+  ... 3135.0s / 3615.1s
+  SPK: spk1 (id=1 sim=0.165)
+  STATS: spk1 id=1 sim=0.165 lat=0ms EARLY
+  ASR(partial, 2.4s): 所以说他那边有花，自然。
+  SPK: spk2 (id=2 sim=0.369)
+  STATS: spk2 id=2 sim=0.369 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.501)
+  STATS: spk2 id=2 sim=0.501 lat=0ms EARLY
+  ... 3140.0s / 3615.1s
+  ASR(partial, 4.4s): 然后你就先挖，你挖的没呛，等下一点也行。
+  ... 3145.0s / 3615.1s
+  ASR [spk2] (1194.2-1198.9s sim=0.50 conf=1.10 src=SPK_FULL trigger=post_silence) 对，所以说他这个嘛，然后你就先挖，你挖了没？先等下一点也行。
+  ... 3150.0s / 3615.1s
+  ... 3155.0s / 3615.1s
+  ASR [spk2] (1199.8-1201.4s sim=0.50 conf=0.20 src=SPK_FULL trigger=post_silence) 啊，那是骗。
+  ... 3160.0s / 3615.1s
+  ... 3165.0s / 3615.1s
+  ASR [spk2] (1201.3-1201.9s sim=0.50 conf=0.20 src=SPK_FULL trigger=vad_gap) 嗯。嗯。
+  ... 3170.0s / 3615.1s
+  ... 3174.9s / 3615.1s
+  ASR [spk2] (1201.9-1202.7s sim=0.50 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。嗯。
+  ... 3179.9s / 3615.1s
+  ASR [spk2] (1203.2-1204.0s sim=0.50 conf=0.10 src=SNAPSHOT trigger=post_silence) 对个。
+  ... 3184.9s / 3615.1s
+  ... 3189.9s / 3615.1s
+  ASR [spk2] (1204.5-1205.7s sim=0.50 conf=0.10 src=SNAPSHOT trigger=post_silence) 明白吗？
+  ... 3194.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.465)
+  STATS: spk2 id=2 sim=0.465 lat=0ms EARLY
+  ASR [spk2] (1205.8-1206.8s sim=0.36 conf=0.10 src=SNAPSHOT trigger=vad_gap) 有感觉吗？
+  ... 3199.9s / 3615.1s
+  ... 3204.9s / 3615.1s
+  ASR [spk2] (1206.8-1209.5s sim=0.46 conf=0.10 src=SNAPSHOT trigger=vad_gap) 啊，那个我是亏损嘛。
+  ... 3209.9s / 3615.1s
+  ASR [spk2] (1209.5-1210.6s sim=0.50 conf=0.10 src=SNAPSHOT trigger=post_silence) 有那屏障呀。
+  ... 3214.9s / 3615.1s
+  ... 3219.9s / 3615.1s
+  SPK: spk2 (id=2 sim=0.261)
+  STATS: spk2 id=2 sim=0.261 lat=0ms EARLY
+  ASR [spk2] (1210.7-1212.1s sim=0.50 conf=0.10 src=SNAPSHOT trigger=post_silence) 对啊，我我。
+  ... 3224.9s / 3615.1s
+  ... 3229.9s / 3615.1s
+  SPK: spk0 (id=0 sim=0.522)
+  STATS: spk0 id=0 sim=0.522 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.284)
+  STATS: spk0 id=0 sim=0.284 lat=0ms EARLY
+  ASR [spk2] (1212.0-1215.4s sim=0.47 conf=0.27 src=SPK_EARLY trigger=post_silence) 几0，几0，几0，几0，在什么地方？
+  ... 3234.8s / 3615.1s
+  ... 3239.8s / 3615.1s
+  ASR [spk2] (1215.7-1216.3s sim=0.47 conf=0.20 src=SPK_EARLY trigger=vad_gap) 嗯。是。
+  ... 3244.8s / 3615.1s
+  ... 3249.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.485)
+  STATS: spk0 id=0 sim=0.485 lat=0ms EARLY
+  SPK: spk2 (id=2 sim=0.532)
+  STATS: spk2 id=2 sim=0.532 lat=0ms EARLY
+  ASR [spk0] (1216.3-1218.0s sim=0.52 conf=0.88 src=SPK_FULL trigger=vad_gap) 母公司、项目公司，行吗？
+  ... 3254.8s / 3615.1s
+  ... 3259.8s / 3615.1s
+  SPK: spk2 (id=2 sim=0.473)
+  STATS: spk2 id=2 sim=0.473 lat=0ms EARLY
+  ASR [spk2] (1218.0-1221.1s sim=0.53 conf=0.90 src=SPK_FULL trigger=post_silence) 像国家讲，像国家讲，银行都讲了，都是这样的。
+  ... 3264.8s / 3615.1s
+  ... 3269.8s / 3615.1s
+  SPK: spk2 (id=2 sim=0.604)
+  STATS: spk2 id=2 sim=0.604 lat=0ms EARLY
+  ... 3274.8s / 3615.1s
+  SPK: spk2 (id=2 sim=0.347)
+  STATS: spk2 id=2 sim=0.347 lat=0ms EARLY
+  ASR(partial, 3.2s): 那个大公司喜欢收购那些特种表的。
+  SPK: spk0 (id=0 sim=0.506)
+  STATS: spk0 id=0 sim=0.506 lat=0ms EARLY
+  ... 3279.8s / 3615.1s
+  ASR [spk2] (1221.8-1224.9s sim=0.60 conf=0.91 src=SPK_FULL trigger=vad_gap) 那个大公司喜欢收购那些特种表的。
+  ... 3284.8s / 3615.1s
+  SPK: spk0 (id=0 sim=0.573)
+  STATS: spk0 id=0 sim=0.573 lat=0ms EARLY
+  ... 3289.8s / 3615.1s
+  ASR(partial, 3.8s): 不是说上一个话题就说是，如果说把它拆开了的。
+  ... 3294.8s / 3615.1s
+  ASR [spk0] (1224.9-1228.9s sim=0.51 conf=0.83 src=SPK_FULL trigger=vad_gap) 这样比较，不是说上一个话题就说是，如果说把它拆开了的。
+  ... 3299.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.512)
+  STATS: spk0 id=0 sim=0.512 lat=0ms EARLY
+  ... 3304.7s / 3615.1s
+  ASR [spk0] (1228.9-1229.6s sim=0.57 conf=0.20 src=SPK_EARLY trigger=vad_gap) 然后我。
+  ... 3309.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.573)
+  STATS: spk0 id=0 sim=0.573 lat=0ms EARLY
+  ASR [spk0] (1229.6-1230.4s sim=0.57 conf=0.20 src=SPK_EARLY trigger=post_silence) 可以。
+  ... 3314.7s / 3615.1s
+  ... 3319.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.557)
+  STATS: spk0 id=0 sim=0.557 lat=0ms EARLY
+  ASR [spk0] (1230.5-1231.8s sim=0.57 conf=0.20 src=SPK_EARLY trigger=post_silence) 对，然后把这。
+  ... 3324.7s / 3615.1s
+  ASR [spk0] (1231.7-1233.1s sim=0.57 conf=0.10 src=SNAPSHOT trigger=post_silence) 大家把声音大。
+  SPK: spk0 (id=0 sim=0.689)
+  STATS: spk0 id=0 sim=0.689 lat=0ms EARLY
+  ... 3329.7s / 3615.1s
+  ... 3334.7s / 3615.1s
+  ASR [spk0] (1233.0-1233.8s sim=0.57 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。
+  ... 3339.7s / 3615.1s
+  SPK: spk0 (id=0 sim=0.233)
+  STATS: spk0 id=0 sim=0.233 lat=0ms EARLY
+  ... 3344.7s / 3615.1s
+  ASR [spk0] (1233.9-1239.0s sim=0.69 conf=1.51 src=SPK_FULL trigger=post_silence) 因为确实没办法，二零现在谈的所有的合同和我们接触全，那都是国家写的。
+  ... 3349.7s / 3615.1s
+  ... 3354.7s / 3615.1s
+  ... 3359.6s / 3615.1s
+  SPK: spk0 (id=0 sim=0.346)
+  STATS: spk0 id=0 sim=0.346 lat=0ms EARLY
+  ASR [spk0] (1239.1-1241.9s sim=0.23 conf=0.33 src=SPK_EARLY trigger=post_silence) 那确实我们对，然后我们。
+  ... 3364.6s / 3615.1s
+  ... 3369.6s / 3615.1s
+  ASR(partial, 2.1s): 你宠物是要狗。
+  SPK: spk0 (id=0 sim=0.326)
+  STATS: spk0 id=0 sim=0.326 lat=0ms EARLY
+  ASR [spk0] (1242.0-1244.0s sim=0.35 conf=0.46 src=SPK_EARLY trigger=vad_gap) 你全部是要搞。
+  ... 3374.6s / 3615.1s
+  ... 3379.6s / 3615.1s
+  ASR(partial, 2.0s): 这样的话呢？
+  SPK: spk1 (id=1 sim=0.496)
+  STATS: spk1 id=1 sim=0.496 lat=0ms EARLY
+  ASR [spk0] (1244.0-1246.4s sim=0.33 conf=0.38 src=SPK_EARLY trigger=vad_gap) 这样的话呢？
+  ... 3384.6s / 3615.1s
+  ASR [spk1] (1246.4-1247.7s sim=0.50 conf=0.77 src=SPK_FULL trigger=post_silence) 我让我丈夫。
+  ... 3389.6s / 3615.1s
+  ... 3394.6s / 3615.1s
+  SPK: spk1 (id=1 sim=0.221)
+  STATS: spk1 id=1 sim=0.221 lat=0ms EARLY
+  ASR(partial, 2.0s): 我先把这个张秀珍在。
+  ... 3399.6s / 3615.1s
+  ASR [spk1] (1247.6-1250.2s sim=0.22 conf=0.35 src=SPK_EARLY trigger=post_silence) 然后我再把那个当兵证再拿进来。
+  ... 3404.6s / 3615.1s
+  ... 3409.6s / 3615.1s
+  SPK: spk1 (id=1 sim=0.178)
+  STATS: spk1 id=1 sim=0.178 lat=0ms EARLY
+  ASR(partial, 2.4s): 去复习。
+  ASR [spk1] (1251.9-1255.1s sim=0.18 conf=0.28 src=SPK_EARLY trigger=post_silence) 确实不行。
+  ... 3414.6s / 3615.1s
+  SPK: spk1 (id=1 sim=0.471)
+  STATS: spk1 id=1 sim=0.471 lat=0ms EARLY
+  ... 3419.6s / 3615.1s
+  ASR(partial, 2.0s): 然后，不大顺利，还没打。
+  SPK: spk1 (id=1 sim=0.216)
+  STATS: spk1 id=1 sim=0.216 lat=0ms EARLY
+  ... 3424.5s / 3615.1s
+  ASR [spk1] (1255.0-1258.8s sim=0.47 conf=0.48 src=SPK_EARLY trigger=post_silence) 不难吃啊！你还没打，还有点钱。
+  ... 3429.5s / 3615.1s
+  ... 3434.5s / 3615.1s
+  ASR [spk1] (1258.7-1259.8s sim=0.22 conf=0.20 src=SPK_EARLY trigger=post_silence) 张总。
+  ... 3439.5s / 3615.1s
+  ASR [spk1] (1259.7-1260.5s sim=0.22 conf=0.20 src=SPK_EARLY trigger=post_silence) 哎。哎。
+  ... 3444.5s / 3615.1s
+  ... 3449.5s / 3615.1s
+  ASR [spk1] (1266.2-1267.0s sim=0.22 conf=0.10 src=SNAPSHOT trigger=post_silence) 哦。哦。
+  ... 3454.5s / 3615.1s
+  SPK: spk1 (id=1 sim=0.215)
+  STATS: spk1 id=1 sim=0.215 lat=0ms EARLY
+  ... 3459.5s / 3615.1s
+  ASR(partial, 2.0s): 然后，然后做起来了。
+  ASR [spk1] (1270.1-1272.7s sim=0.21 conf=0.35 src=SPK_EARLY trigger=post_silence) 然后，然后做起来。
+  ... 3464.5s / 3615.1s
+  ... 3469.5s / 3615.1s
+  ASR [spk1] (1274.3-1276.3s sim=0.21 conf=0.20 src=SPK_EARLY trigger=post_silence) 后面聊就快一些了。
+  ... 3474.5s / 3615.1s
+  SPK: spk1 (id=1 sim=0.364)
+  STATS: spk1 id=1 sim=0.364 lat=0ms EARLY
+  ... 3479.5s / 3615.1s
+  ASR [spk1] (1276.2-1277.0s sim=0.21 conf=0.10 src=SNAPSHOT trigger=post_silence) 看清楚吗？
+  ... 3484.4s / 3615.1s
+  SPK: spk0 (id=0 sim=0.646)
+  STATS: spk0 id=0 sim=0.646 lat=0ms EARLY
+  ASR(partial, 2.1s): 那就是这个。
+  ASR [spk0] (1276.9-1278.9s sim=0.65 conf=0.85 src=SPK_FULL trigger=vad_gap) 那就是这个。
+  ... 3489.4s / 3615.1s
+  ... 3494.4s / 3615.1s
+  SPK: spk0 (id=0 sim=0.275)
+  STATS: spk0 id=0 sim=0.275 lat=0ms EARLY
+  ASR [spk0] (1278.9-1280.5s sim=0.65 conf=0.20 src=SPK_FULL trigger=post_silence) 美国公司，怎么玩？
+  ... 3499.4s / 3615.1s
+  ... 3504.4s / 3615.1s
+  ASR [spk0] (1282.0-1282.8s sim=0.65 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。嗯。
+  ... 3509.4s / 3615.1s
+  SPK: spk0 (id=0 sim=0.343)
+  STATS: spk0 id=0 sim=0.343 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.465)
+  STATS: spk0 id=0 sim=0.465 lat=0ms EARLY
+  ... 3514.4s / 3615.1s
+  ASR(partial, 2.7s): 看哪家锅来说，没有，嗯嗯，我肯定。
+  SPK: spk0 (id=0 sim=0.660)
+  STATS: spk0 id=0 sim=0.660 lat=0ms EARLY
+  ... 3519.4s / 3615.1s
+  ASR [spk0] (1282.9-1288.0s sim=0.66 conf=1.51 src=SPK_FULL trigger=post_silence) 看哪家高再说。没有，我跟你讲嘛，都领导讲，总是大家提醒一下。
+  ... 3524.4s / 3615.1s
+  ... 3529.4s / 3615.1s
+  ASR [spk0] (1288.5-1290.0s sim=0.66 conf=0.20 src=SPK_FULL trigger=post_silence) 这家美国公司。
+  ... 3534.4s / 3615.1s
+  ... 3539.4s / 3615.1s
+  ASR [spk0] (1290.3-1291.3s sim=0.66 conf=0.20 src=SPK_FULL trigger=post_silence) 也就是说。
+  ... 3544.4s / 3615.1s
+  SPK: spk0 (id=0 sim=0.391)
+  STATS: spk0 id=0 sim=0.391 lat=0ms EARLY
+  ... 3549.3s / 3615.1s
+  ASR [spk0] (1291.2-1292.6s sim=0.66 conf=0.10 src=SNAPSHOT trigger=post_silence) 这家美国公司。
+  ... 3554.3s / 3615.1s
+  ASR [spk0] (1292.7-1294.7s sim=0.39 conf=0.46 src=SPK_EARLY trigger=post_silence) 可以作为我们。
+  ... 3559.3s / 3615.1s
+  ... 3564.3s / 3615.1s
+  SPK: spk0 (id=0 sim=0.343)
+  STATS: spk0 id=0 sim=0.343 lat=0ms EARLY
+  ASR(partial, 2.0s): 在那边操作的一个客儿。对。
+  ... 3569.3s / 3615.1s
+  ASR [spk0] (1294.6-1296.9s sim=0.34 conf=0.40 src=SPK_EARLY trigger=post_silence) 在那边操作的一个客儿。对。
+  ... 3574.3s / 3615.1s
+  ASR [spk0] (1297.0-1298.1s sim=0.34 conf=0.20 src=SPK_EARLY trigger=post_silence) 一个。
+  ... 3579.3s / 3615.1s
+  ... 3584.3s / 3615.1s
+  SPK: spk0 (id=0 sim=0.356)
+  STATS: spk0 id=0 sim=0.356 lat=0ms EARLY
+  ASR [spk0] (1301.8-1302.6s sim=0.34 conf=0.10 src=SNAPSHOT trigger=post_silence) 嗯。对。
+  ... 3589.3s / 3615.1s
+  ... 3594.3s / 3615.1s
+  ASR(partial, 2.1s): 如果是负责把他卖的。
+  ASR [spk0] (1302.7-1306.0s sim=0.36 conf=0.28 src=SPK_EARLY trigger=post_silence) 如果是负责把，他卖，如果C卖呢？
+  ... 3599.3s / 3615.1s
+  ... 3604.3s / 3615.1s
+  ASR [spk0] (1306.9-1308.0s sim=0.36 conf=0.20 src=SPK_EARLY trigger=post_silence) 怎么样啊？
+  ... 3609.2s / 3615.1s
+  ... 3614.2s / 3615.1s
+============================================================
+Done streaming. Waiting 5s for final ASR results ...
+  SPK: spk2 (id=2 sim=0.409)
+  STATS: spk2 id=2 sim=0.409 lat=0ms EARLY
+  ASR [spk0] (1308.5-1309.3s sim=0.36 conf=0.10 src=SNAPSHOT trigger=post_silence) 我。
+  ASR [spk2] (1311.0-1313.0s sim=0.41 conf=0.46 src=SPK_EARLY trigger=post_silence) 那就是贸易商说白了。
+  SPK: spk2 (id=2 sim=0.310)
+  STATS: spk2 id=2 sim=0.310 lat=0ms EARLY
+  SPK: spk0 (id=0 sim=0.518)
+  STATS: spk0 id=0 sim=0.518 lat=0ms EARLY
+  ASR(partial, 2.2s): 对，十一马上就明白了。
+  SPK: spk0 (id=0 sim=0.380)
+  STATS: spk0 id=0 sim=0.380 lat=0ms EARLY
+  ASR [spk0] (1312.9-1315.0s sim=0.52 conf=0.86 src=SPK_FULL trigger=vad_gap) 对，十一马上就明白了。
+  ASR [spk0] (1315.0-1315.8s sim=0.52 conf=0.20 src=SPK_FULL trigger=post_silence) 嗯。
+  ASR [spk0] (1315.7-1317.8s sim=0.38 conf=0.43 src=SPK_EARLY trigger=post_silence) 就，我就不是公司里的。
+
+--- WebSocket closed ---
+Finished.
