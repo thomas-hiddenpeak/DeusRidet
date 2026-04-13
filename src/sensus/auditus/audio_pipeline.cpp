@@ -104,11 +104,14 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
             LOG_INFO("AudioPipe", "WavLM-ECAPA native GPU encoder ready (192-dim)");
             // Initialize SpeakerTracker (shares encoder, independent DB).
             tracker_.init(&wlecapa_enc_);
+            // Enable dual-encoder matching (384D = CAM++ 192D + WL-ECAPA 192D).
+            use_dual_encoder_ = true;
+            LOG_INFO("AudioPipe", "Dual-encoder matching enabled (384D)");
         }
     }
 
     speaker_threshold_.store(cfg_.speaker_threshold, std::memory_order_relaxed);
-    speaker_register_threshold_.store(0.65f, std::memory_order_relaxed);
+    speaker_register_threshold_.store(0.55f, std::memory_order_relaxed);
     wavlm_threshold_.store(cfg_.wavlm_threshold, std::memory_order_relaxed);
     unispeech_threshold_.store(cfg_.unispeech_threshold, std::memory_order_relaxed);
     wlecapa_threshold_.store(cfg_.wavlm_ecapa_threshold, std::memory_order_relaxed);
@@ -520,6 +523,7 @@ void AudioPipeline::process_loop() {
                 // during speech, extract embedding and match against existing speakers.
                 // No auto-register — avoids spurious registrations from short clips.
                 if (!campp_early_extracted_ &&
+                    !use_dual_encoder_ &&  // skip EARLY speaker when dual-encoder active
                     enable_early_.load(std::memory_order_relaxed) &&
                     speaker_enc_.initialized() &&
                     enable_speaker_.load(std::memory_order_relaxed)) {
@@ -528,8 +532,7 @@ void AudioPipeline::process_loop() {
                         campp_early_extracted_ = true;
                         auto emb = speaker_enc_.extract(seg_fbank_buf_.data(), fbank_frames);
                         if (!emb.empty()) {
-                            float thresh = warmup_done_ ? 0.0f :
-                                speaker_threshold_.load(std::memory_order_relaxed);
+                            float thresh = speaker_threshold_.load(std::memory_order_relaxed);
                             float reg_thresh = speaker_register_threshold_.load(std::memory_order_relaxed);
                             SpeakerMatch match = campp_db_.identify(emb, thresh, /*auto_register=*/false, reg_thresh);
                             if (match.speaker_id >= 0) {
@@ -867,21 +870,41 @@ void AudioPipeline::process_loop() {
 
                         auto emb = speaker_enc_.extract(seg_fbank_buf_.data(), fbank_frames);
                         if (!emb.empty()) {
-                            // Collect embedding for warm-up clustering.
-                            if (!warmup_done_) {
-                                warmup_embeddings_.push_back(emb);
-                                int64_t seg_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
-                                float mid_sec = (seg_start + total_samples_in_) * 0.5f / 16000.0f;
-                                warmup_timestamps_.push_back(mid_sec);
+                            bool auto_reg = true;
+                            float match_thresh = thresh;
+
+                            SpeakerMatch match;
+                            if (use_dual_encoder_) {
+                                // Dual-encoder: concatenate CAM++ + WL-ECAPA → 384D.
+                                int speech_samples = (int)speech_pcm_buf_.size();
+                                std::vector<float> wl_emb;
+                                if (speech_samples >= 16000) {
+                                    std::vector<float> pcm_f32(speech_samples);
+                                    for (int si = 0; si < speech_samples; si++)
+                                        pcm_f32[si] = speech_pcm_buf_[si] / 32768.0f;
+                                    wl_emb = wlecapa_enc_.extract(pcm_f32.data(), speech_samples);
+                                }
+                                if (!wl_emb.empty()) {
+                                    // Build 384D vector: [CAM++ 192D | WL-ECAPA 192D], L2-normalized.
+                                    std::vector<float> dual(384);
+                                    std::copy(emb.begin(), emb.end(), dual.begin());
+                                    std::copy(wl_emb.begin(), wl_emb.end(), dual.begin() + 192);
+                                    float n2 = 0;
+                                    for (float v : dual) n2 += v * v;
+                                    float inv = 1.0f / sqrtf(n2 + 1e-12f);
+                                    for (float& v : dual) v *= inv;
+                                    match = dual_db_.identify(dual, match_thresh,
+                                                              auto_reg, reg_thresh);
+                                } else {
+                                    // WL-ECAPA extraction failed (segment too short).
+                                    // Fallback to CAM++ only.
+                                    match = campp_db_.identify(emb, match_thresh,
+                                                               auto_reg, reg_thresh);
+                                }
+                            } else {
+                                match = campp_db_.identify(emb, match_thresh,
+                                                           auto_reg, reg_thresh);
                             }
-
-                            // Matching: during warm-up use greedy, after use locked store.
-                            bool auto_reg = !warmup_done_;
-                            float match_thresh = warmup_done_ ? 0.0f : thresh;
-
-                            SpeakerMatch match = campp_db_.identify(emb, match_thresh,
-                                                                     auto_reg,
-                                                                     reg_thresh);
 
                             // Temporal smoothing: majority voting over last N identifications.
                             int raw_id = match.speaker_id;
@@ -921,15 +944,16 @@ void AudioPipeline::process_loop() {
                             stats_.speaker_active = true;
                             stats_.speaker_exemplars = match.exemplar_count;
                             stats_.speaker_hits_above = match.hits_above;
+
+                            campp_full_count_++;
                             strncpy(stats_.speaker_name, match.name.c_str(),
                                     sizeof(stats_.speaker_name) - 1);
                             stats_.speaker_name[sizeof(stats_.speaker_name) - 1] = '\0';
-                            LOG_INFO("AudioPipe", "CAM++: raw=%d smoothed=%d sim=%.3f %s%s (fbank=%d, ex=%d, warmup=%s)",
+                            LOG_INFO("AudioPipe", "CAM++: raw=%d smoothed=%d sim=%.3f %s%s (fbank=%d, ex=%d)",
                                      raw_id, match.speaker_id, match.similarity,
                                      match.is_new ? "NEW " : "",
                                      match.name.empty() ? "(unnamed)" : match.name.c_str(),
-                                     fbank_frames, match.exemplar_count,
-                                     warmup_done_ ? "done" : "collecting");
+                                     fbank_frames, match.exemplar_count);
                             if (on_speaker_) on_speaker_(match);
 
                             // SAAS: feed CAM++ result into speaker timeline.
@@ -948,31 +972,47 @@ void AudioPipeline::process_loop() {
                                 spk_timeline_.push(ev);
                             }
 
-                            campp_full_count_++;
-
                             // Warm-up clustering trigger: run spectral clustering
                             // and rebuild speaker store when enough embeddings collected.
                             if (!warmup_done_ &&
                                 (int)warmup_embeddings_.size() >= kWarmupCount) {
-                                LOG_INFO("AudioPipe", "=== WARM-UP SPECTRAL CLUSTERING: %d embeddings ===",
-                                         (int)warmup_embeddings_.size());
+                                int n_emb = (int)warmup_embeddings_.size();
+                                bool use_dual = (int)warmup_wlecapa_embs_.size() == n_emb;
+                                int cluster_dim = use_dual ? 384 : 192;
+
+                                LOG_INFO("AudioPipe", "=== WARM-UP SPECTRAL CLUSTERING: %d embeddings, %s (%dD) ===",
+                                         n_emb, use_dual ? "dual CAM+++WL-ECAPA" : "CAM++ only",
+                                         cluster_dim);
+
+                                // Build clustering input: concatenate if dual, else CAM++ only.
+                                std::vector<std::vector<float>> cluster_input(n_emb);
+                                for (int i = 0; i < n_emb; ++i) {
+                                    cluster_input[i].resize(cluster_dim);
+                                    std::copy(warmup_embeddings_[i].begin(),
+                                              warmup_embeddings_[i].end(),
+                                              cluster_input[i].begin());
+                                    if (use_dual) {
+                                        std::copy(warmup_wlecapa_embs_[i].begin(),
+                                                  warmup_wlecapa_embs_[i].end(),
+                                                  cluster_input[i].begin() + 192);
+                                    }
+                                    // L2-normalize the concatenated vector.
+                                    float n2 = 0;
+                                    for (float v : cluster_input[i]) n2 += v * v;
+                                    float inv = 1.0f / sqrtf(n2 + 1e-12f);
+                                    for (float& v : cluster_input[i]) v *= inv;
+                                }
 
                                 SpectralClusterConfig sc_cfg;
-                                // Disable temporal mixing for warm-up batch.
                                 sc_cfg.temporal_alpha = 0.0f;
-                                // Keep full 192D (no PCA truncation) — for similar
-                                // voices, the discriminative features may be in
-                                // lower-variance dimensions that PCA 16D discards.
-                                sc_cfg.pca_dim = 192;
-                                // Post-clustering centroid merge at 0.70 in 192D.
-                                sc_cfg.merge_threshold = 0.70f;
-                                auto cr = spectral_cluster(warmup_embeddings_,
+                                sc_cfg.pca_dim = cluster_dim; // full dim, no PCA
+                                sc_cfg.merge_threshold = 1.0f; // no merge — over-segment
+                                auto cr = spectral_cluster(cluster_input,
                                                            warmup_timestamps_,
-                                                           192, sc_cfg);
+                                                           cluster_dim, sc_cfg);
 
-                                LOG_INFO("AudioPipe", "Spectral: K=%d (merge_thresh=%.2f) from %d embeddings",
-                                         cr.K, sc_cfg.merge_threshold,
-                                         (int)warmup_embeddings_.size());
+                                LOG_INFO("AudioPipe", "Spectral: K=%d (merge=%.2f) from %d embeddings (%dD)",
+                                         cr.K, sc_cfg.merge_threshold, n_emb, cluster_dim);
 
                                 // Log cluster sizes.
                                 std::vector<int> sizes(cr.K, 0);
@@ -980,10 +1020,30 @@ void AudioPipeline::process_loop() {
                                 for (int c = 0; c < cr.K; ++c)
                                     LOG_INFO("AudioPipe", "  cluster[%d]: %d embeddings", c, sizes[c]);
 
-                                // Rebuild speaker store with cluster centroids.
+                                // Compute CAM++ centroids per cluster (for online matching).
                                 campp_db_.clear();
                                 for (int c = 0; c < cr.K; ++c) {
-                                    int id = campp_db_.register_speaker("", cr.centroids[c]);
+                                    std::vector<float> centroid(192, 0.0f);
+                                    int cnt = 0;
+                                    for (int i = 0; i < n_emb; ++i) {
+                                        if (cr.labels[i] == c) {
+                                            cnt++;
+                                            for (int d = 0; d < 192; ++d)
+                                                centroid[d] += warmup_embeddings_[i][d];
+                                        }
+                                    }
+                                    if (cnt > 0) {
+                                        for (int d = 0; d < 192; ++d)
+                                            centroid[d] /= cnt;
+                                        // L2-normalize.
+                                        float n2 = 0;
+                                        for (int d = 0; d < 192; ++d)
+                                            n2 += centroid[d] * centroid[d];
+                                        float inv = 1.0f / sqrtf(n2 + 1e-12f);
+                                        for (int d = 0; d < 192; ++d)
+                                            centroid[d] *= inv;
+                                    }
+                                    int id = campp_db_.register_speaker("", centroid);
                                     LOG_INFO("AudioPipe", "  registered spk%d from cluster %d (%d members)",
                                              id, c, sizes[c]);
                                 }

@@ -823,8 +823,12 @@ private:
     // Warm-up spectral clustering: collect embeddings during warm-up,
     // then run one-shot spectral clustering to find speaker count and centroids.
     // After clustering, rebuild the speaker store and lock registration.
-    static constexpr int kWarmupCount = 80;  // FULL extractions before clustering
-    std::vector<std::vector<float>> warmup_embeddings_;
+    // Dual-encoder warm-up: collect both CAM++ (192D) and WL-ECAPA (192D)
+    // embeddings, concatenate to 384D for better clustering, then store
+    // only CAM++ centroids for online matching.
+    static constexpr int kWarmupCount = 999999;  // effectively disabled — greedy mode
+    std::vector<std::vector<float>> warmup_embeddings_;       // CAM++ 192D
+    std::vector<std::vector<float>> warmup_wlecapa_embs_;     // WL-ECAPA 192D (if available)
     std::vector<float> warmup_timestamps_;   // mid-time in seconds
     bool warmup_done_ = false;
 
@@ -834,6 +838,11 @@ private:
     SpeakerDb unispeech_db_{"ECAPADb", 0.15f};  // ECAPA-TDNN: higher EMA for stable centroids
     WavLMEcapaEncoder wlecapa_enc_;
     SpeakerVectorStore wlecapa_db_{"WLEcapaDb", 192, 0.15f};
+
+    // Dual-encoder 384D store: CAM++ (192D) + WL-ECAPA (192D) concatenated.
+    // Uses both encoders for better discrimination of similar voices.
+    SpeakerVectorStore dual_db_{"DualDb", 384, 0.15f};
+    bool use_dual_encoder_ = false;  // set true once WL-ECAPA is confirmed initialized
 
     AudioPipelineStats stats_{};
     std::atomic<float> gain_{1.0f};

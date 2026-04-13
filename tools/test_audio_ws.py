@@ -39,6 +39,8 @@ def decode_to_pcm(path: str) -> bytes:
 def on_message(ws, message):
     """Handle text messages from the server (JSON events)."""
     try:
+        if isinstance(message, bytes):
+            message = message.decode('utf-8', errors='replace')
         data = json.loads(message)
         msg_type = data.get("type", "")
 
@@ -141,7 +143,7 @@ def main():
         on_close=on_close,
     )
 
-    ws_thread = threading.Thread(target=ws.run_forever, daemon=True)
+    ws_thread = threading.Thread(target=lambda: ws.run_forever(skip_utf8_validation=True), daemon=True)
     ws_thread.start()
 
     # Wait for connection.
