@@ -23,6 +23,8 @@ struct SpeakerMatch {
     std::string name;             // empty if unnamed
     int    exemplar_count = 0;    // total exemplars for matched speaker
     int    hits_above     = 0;    // exemplars above threshold in this query
+    float  second_best_sim = 0.0f; // second-best speaker similarity (for margin)
+    int    second_best_id  = -1;   // second-best speaker ID
 };
 
 struct SpeakerInfo {

@@ -545,6 +545,10 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
                      best.speaker_id, best.similarity,
                      second_best_id, second_best_sim,
                      match_threshold, reg_thresh, n_spk, n_total_);
+
+            // Store second-best info in result for margin-based decisions.
+            best.second_best_sim = second_best_sim;
+            best.second_best_id  = second_best_id;
         }
 
         if (best.similarity >= match_threshold && sr.spk_idx >= 0) {

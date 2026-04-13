@@ -906,12 +906,27 @@ void AudioPipeline::process_loop() {
                                                            auto_reg, reg_thresh);
                             }
 
+                            // Margin-based acceptance: reject ambiguous matches
+                            // where top-1 and top-2 are too close (< 0.05 gap).
+                            // Ambiguous matches don't enter the smoothing ring.
+                            static constexpr float kMinMargin = 0.05f;
+                            bool ambiguous = false;
+                            if (match.speaker_id >= 0 && !match.is_new &&
+                                match.second_best_id >= 0) {
+                                float margin = match.similarity - match.second_best_sim;
+                                if (margin < kMinMargin) {
+                                    ambiguous = true;
+                                }
+                            }
+
                             // Temporal smoothing: majority voting over last N identifications.
+                            // Ambiguous matches (low margin) skip the ring to avoid poisoning.
                             int raw_id = match.speaker_id;
-                            if (raw_id >= 0) {
+                            if (raw_id >= 0 && !ambiguous) {
                                 smooth_ring_[smooth_ring_pos_] = raw_id;
                                 smooth_ring_pos_ = (smooth_ring_pos_ + 1) % kSmoothWindowSize;
-
+                            }
+                            if (raw_id >= 0) {
                                 int votes[64] = {};
                                 int max_votes = 0, majority_id = -1;
                                 for (int k = 0; k < kSmoothWindowSize; ++k) {
