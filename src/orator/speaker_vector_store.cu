@@ -393,35 +393,6 @@ int SpeakerVectorStore::id_to_idx(int id) const {
     return (it != id_to_idx_.end()) ? it->second : -1;
 }
 
-std::vector<float> SpeakerVectorStore::compute_topk_scores(int K) {
-    int n_spk = (int)speakers_.size();
-    if (n_spk == 0 || n_total_ == 0) return std::vector<float>(n_spk, -1.0f);
-
-    // Download all per-exemplar similarities to host.
-    std::vector<float> all_sims(n_total_);
-    cudaMemcpyAsync(all_sims.data(), d_sims_, n_total_ * sizeof(float),
-                    cudaMemcpyDeviceToHost, stream_);
-    cudaStreamSynchronize(stream_);
-
-    std::vector<float> scores(n_spk, -1.0f);
-    for (int s = 0; s < n_spk; s++) {
-        int begin = offsets_[s];
-        int end   = offsets_[s + 1];
-        int n = end - begin;
-        if (n == 0) continue;
-
-        int k = std::min(K, n);
-        std::vector<float> spk_sims(all_sims.begin() + begin, all_sims.begin() + end);
-        std::partial_sort(spk_sims.begin(), spk_sims.begin() + k, spk_sims.end(),
-                          std::greater<float>());
-
-        float sum = 0.0f;
-        for (int i = 0; i < k; i++) sum += spk_sims[i];
-        scores[s] = sum / k;
-    }
-    return scores;
-}
-
 int SpeakerVectorStore::count_hits_above(int spk_idx, float threshold) {
     int begin = offsets_[spk_idx];
     int end   = offsets_[spk_idx + 1];
@@ -542,8 +513,7 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
     int   second_best_id  = -1;
 
     if (!speakers_.empty()) {
-        int n_spk = (int)speakers_.size();
-        GpuSearchResult sr = gpu_search(n_total_, n_spk);
+        GpuSearchResult sr = gpu_search(n_total_, (int)speakers_.size());
 
         if (sr.spk_idx >= 0) {
             best.speaker_id = speakers_[sr.spk_idx].external_id;
@@ -551,6 +521,7 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
             best.name       = speakers_[sr.spk_idx].name;
 
             // Find second best (from d_spk_sims_ — copy small array).
+            int n_spk = (int)speakers_.size();
             if (n_spk > 1) {
                 std::vector<float> spk_sims(n_spk);
                 cudaMemcpyAsync(spk_sims.data(), d_spk_sims_,
@@ -574,28 +545,6 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
 
         if (best.similarity >= threshold && sr.spk_idx >= 0) {
             // === MATCHED ===
-            // Match-time margin guard: if there are 2+ speakers and the margin
-            // between best and second-best is too small, the match is ambiguous.
-            // Route to pending pool instead to prevent cross-speaker contamination.
-            if (match_margin_ > 0.0f && n_spk >= 2 && second_best_id >= 0) {
-                float margin = best.similarity - second_best_sim;
-                if (margin < match_margin_) {
-                    LOG_INFO(label_.c_str(),
-                             "Match rejected by margin guard: "
-                             "best=#%d(%.3f) 2nd=#%d(%.3f) margin=%.3f < %.3f",
-                             best.speaker_id, best.similarity,
-                             second_best_id, second_best_sim,
-                             margin, match_margin_);
-                    // Fall through to NO MATCH path below.
-                    goto no_match;
-                }
-            }
-            // NOTE: Do NOT reset consecutive_misses_ here. The counter tracks
-            // how many end-of-segment calls have passed without registering a
-            // NEW speaker. Known-speaker matches should not reset it — otherwise
-            // in a 3-person conversation where 2 are registered, the frequent
-            // matches for spk0/spk1 would keep resetting the counter, preventing
-            // the pending threshold from ever decaying for the 3rd speaker.
             // Margin guard is NOT applied here — if best exceeds threshold,
             // it's the best match regardless of how close second-best is.
             // Margin is only used during registration (below) to prevent
@@ -618,16 +567,14 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
             auto& spk = speakers_[sr.spk_idx];
             float div = min_diversity(sr.spk_idx);
 
-            // Dynamic admission margin: permissive when exemplar set is small
-            // to build diversity quickly (covering intra-speaker variation),
-            // then tighten once cluster is established.
+            // Dynamic admission margin: stricter when exemplar set is small
+            // (early exemplars define the speaker's cluster center and must
+            // be high-quality to prevent cross-speaker contamination).
             float admit_margin = kExemplarAdmitMargin;  // default 0.10
-            if (spk.exemplar_count < 3)
-                admit_margin = 0.05f;  // stricter early admission to prevent contamination
-            else if (spk.exemplar_count < 5)
-                admit_margin = 0.08f;
+            if (spk.exemplar_count < 5)
+                admit_margin = 0.20f;  // very strict early on
             else if (spk.exemplar_count < 10)
-                admit_margin = 0.08f;
+                admit_margin = 0.15f;  // moderate
             float admit_thresh = threshold + admit_margin;
 
             // Hit-ratio gate: when we have enough exemplars, require that
@@ -674,22 +621,9 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
     }
 
     // === NO MATCH ===
-    no_match:
     if (!auto_register) {
         best.speaker_id = -1;
         return best;
-    }
-
-    consecutive_misses_++;
-
-    // Effective pending threshold: starts at pending_threshold_ and decays
-    // under sustained misses to prevent the pool from churning indefinitely.
-    // Decay starts after 6 misses (conservative to prevent early fragmentation),
-    // at 3%/miss rate with floor at 75% of base (0.50*0.75=0.375).
-    float eff_pending_thresh = pending_threshold_;
-    if (consecutive_misses_ > 6) {
-        float decay = 0.03f * (float)(consecutive_misses_ - 6);
-        eff_pending_thresh *= std::max(0.75f, 1.0f - decay);
     }
 
     // Multi-pending pool: find if current query matches any existing pending slot.
@@ -699,44 +633,17 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
         if (!pending_slots_[s].active) continue;
         float sim = gpu_pending_dot(s);
         LOG_INFO(label_.c_str(),
-                 "Pending[%d] vs query: sim=%.3f (eff_thresh=%.2f, age=%d, misses=%d)",
-                 s, sim, eff_pending_thresh, pending_miss_seq_ - pending_slots_[s].miss_seq,
-                 consecutive_misses_);
-        if (sim >= eff_pending_thresh && sim > best_pending_sim) {
+                 "Pending[%d] vs query: sim=%.3f (thresh=%.2f, age=%d)",
+                 s, sim, threshold, pending_miss_seq_ - pending_slots_[s].miss_seq);
+        if (sim >= threshold && sim > best_pending_sim) {
             best_pending_sim = sim;
             matched_slot = s;
         }
     }
 
     if (matched_slot >= 0) {
-        // Pending slot matched — same unknown speaker seen again.
+        // Confirmed: pending slot matches current query — same unknown speaker twice.
         float pending_sim = best_pending_sim;
-
-        // Average pending + current on GPU (always — improves the slot embedding).
-        float* slot_ptr = d_pending_pool_ + matched_slot * dim_;
-        {
-            int d_f4 = dim_ / 4;
-            float4* prow = reinterpret_cast<float4*>(slot_ptr);
-            const float4* q = reinterpret_cast<const float4*>(d_query_);
-            ema_normalize_kernel<<<1, 32, 0, stream_>>>(prow, q, d_f4, 0.5f);
-        }
-
-        pending_slots_[matched_slot].hit_count++;
-
-        // Require 3 total observations (initial + 2 matches) before registration.
-        // This produces a more representative averaged embedding and reduces
-        // fragmentation caused by high intra-speaker variance on short segments.
-        static constexpr int kMinHitsForRegistration = 3;
-        if (pending_slots_[matched_slot].hit_count < kMinHitsForRegistration) {
-            LOG_INFO(label_.c_str(),
-                     "Pending[%d] accumulating: hit_count=%d/%d, sim=%.3f",
-                     matched_slot, pending_slots_[matched_slot].hit_count,
-                     kMinHitsForRegistration, pending_sim);
-            best.speaker_id = -1;
-            best.similarity = 0.0f;
-            best.is_new     = false;
-            return best;
-        }
 
         // Margin guard at REGISTRATION time: check if this pending embedding is
         // too close to two existing speakers (would create a confusing duplicate).
@@ -758,43 +665,13 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
             }
         }
 
-        // Proximity merge guard: re-search with the averaged embedding.
-        // If it's close to an existing speaker (just below threshold),
-        // absorb as a new exemplar instead of creating a competing cluster.
-        // This prevents speaker fragmentation caused by high intra-speaker
-        // embedding variance (e.g. expressive speakers, short utterances).
-        if (!speakers_.empty()) {
-            cudaMemcpyAsync(d_query_, slot_ptr, dim_ * sizeof(float),
-                            cudaMemcpyDeviceToDevice, stream_);
-            GpuSearchResult sr2 = gpu_search(n_total_, (int)speakers_.size());
-            if (sr2.spk_idx >= 0 && sr2.similarity >= threshold - proximity_margin_) {
-                auto& merge_spk = speakers_[sr2.spk_idx];
-                if (merge_spk.exemplar_count < max_exemplars_) {
-                    gpu_add_exemplar(sr2.spk_idx);
-                    LOG_INFO(label_.c_str(),
-                             "Proximity merge: absorbed into #%d instead of new registration "
-                             "(avg_sim=%.3f, thresh=%.3f, margin=%.2f, now %d exemplars, slot=%d)",
-                             merge_spk.external_id, sr2.similarity, threshold,
-                             proximity_margin_, merge_spk.exemplar_count, matched_slot);
-                } else {
-                    LOG_INFO(label_.c_str(),
-                             "Proximity merge: matched #%d (avg_sim=%.3f) but exemplars full (%d)",
-                             merge_spk.external_id, sr2.similarity, merge_spk.exemplar_count);
-                }
-                // Clear confirmed slot.
-                pending_slots_[matched_slot].active = false;
-                has_pending_ = false;
-                for (int s = 0; s < kMaxPending; s++)
-                    if (pending_slots_[s].active) { has_pending_ = true; break; }
-                consecutive_misses_ = 0;  // Reset on proximity merge.
-                merge_spk.match_count++;
-                best.speaker_id    = merge_spk.external_id;
-                best.similarity    = sr2.similarity;
-                best.name          = merge_spk.name;
-                best.is_new        = false;
-                best.exemplar_count = merge_spk.exemplar_count;
-                return best;
-            }
+        // Average pending + current on GPU, then register.
+        float* slot_ptr = d_pending_pool_ + matched_slot * dim_;
+        {
+            int d_f4 = dim_ / 4;
+            float4* prow = reinterpret_cast<float4*>(slot_ptr);
+            const float4* q = reinterpret_cast<const float4*>(d_query_);
+            ema_normalize_kernel<<<1, 32, 0, stream_>>>(prow, q, d_f4, 0.5f);
         }
 
         // Register new speaker.
@@ -822,12 +699,9 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
         for (int s = 0; s < kMaxPending; s++)
             if (pending_slots_[s].active) { has_pending_ = true; break; }
 
-        consecutive_misses_ = 0;  // Reset on successful registration.
-
         LOG_INFO(label_.c_str(),
-                 "Confirmed new speaker id=%d (pending_sim=%.3f, eff_thresh=%.2f, slot=%d, misses_were=%d, pool=[%d,%d,%d,%d,%d])",
-                 speakers_.back().external_id, pending_sim, eff_pending_thresh, matched_slot,
-                 consecutive_misses_,
+                 "Confirmed new speaker id=%d (pending_sim=%.3f, slot=%d, pool=[%d,%d,%d,%d,%d])",
+                 speakers_.back().external_id, pending_sim, matched_slot,
                  (int)pending_slots_[0].active,
                  (int)pending_slots_[1].active,
                  (int)pending_slots_[2].active,
@@ -870,7 +744,6 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
                     cudaMemcpyDeviceToDevice, stream_);
     pending_slots_[target_slot].active = true;
     pending_slots_[target_slot].miss_seq = pending_miss_seq_;
-    pending_slots_[target_slot].hit_count = 0;
     has_pending_ = true;
 
     LOG_INFO(label_.c_str(),
@@ -887,129 +760,6 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
     best.similarity = 0.0f;
     best.is_new = false;
     return best;
-}
-
-std::vector<SpeakerVectorStore::SearchResult>
-SpeakerVectorStore::search_all(const std::vector<float>& embedding) {
-    std::vector<SearchResult> results;
-    if ((int)embedding.size() != dim_) return results;
-
-    std::lock_guard<std::mutex> lk(mu_);
-
-    int n_spk = (int)speakers_.size();
-    if (n_spk == 0) return results;
-
-    upload_query(embedding.data());
-    gpu_search(n_total_, n_spk);
-
-    // Read back per-speaker best similarities.
-    std::vector<float> spk_sims(n_spk);
-    cudaMemcpyAsync(spk_sims.data(), d_spk_sims_,
-                    n_spk * sizeof(float),
-                    cudaMemcpyDeviceToHost, stream_);
-    cudaStreamSynchronize(stream_);
-
-    results.resize(n_spk);
-    for (int i = 0; i < n_spk; i++) {
-        results[i].speaker_id = speakers_[i].external_id;
-        results[i].similarity = spk_sims[i];
-    }
-
-    // Sort descending by similarity.
-    std::sort(results.begin(), results.end(),
-              [](const SearchResult& a, const SearchResult& b) {
-                  return a.similarity > b.similarity;
-              });
-    return results;
-}
-
-std::vector<SpeakerVectorStore::SearchResult>
-SpeakerVectorStore::search_all_topk(const std::vector<float>& embedding, int K) {
-    std::vector<SearchResult> results;
-    if ((int)embedding.size() != dim_) return results;
-
-    std::lock_guard<std::mutex> lk(mu_);
-
-    int n_spk = (int)speakers_.size();
-    if (n_spk == 0) return results;
-
-    upload_query(embedding.data());
-    gpu_search(n_total_, n_spk);
-
-    // Use mean-of-top-K exemplar similarities per speaker.
-    auto topk_scores = compute_topk_scores(K);
-
-    results.resize(n_spk);
-    for (int i = 0; i < n_spk; i++) {
-        results[i].speaker_id = speakers_[i].external_id;
-        results[i].similarity = topk_scores[i];
-    }
-
-    std::sort(results.begin(), results.end(),
-              [](const SearchResult& a, const SearchResult& b) {
-                  return a.similarity > b.similarity;
-              });
-    return results;
-}
-
-std::vector<SpeakerVectorStore::SearchResult>
-SpeakerVectorStore::search_all_weighted(const std::vector<float>& embedding,
-                                         float floor, float power) {
-    std::vector<SearchResult> results;
-    if ((int)embedding.size() != dim_) return results;
-
-    std::lock_guard<std::mutex> lk(mu_);
-
-    int n_spk = (int)speakers_.size();
-    if (n_spk == 0) return results;
-
-    upload_query(embedding.data());
-    gpu_search(n_total_, n_spk);
-
-    // Download per-exemplar similarities.
-    std::vector<float> all_sims(n_total_);
-    cudaMemcpyAsync(all_sims.data(), d_sims_, n_total_ * sizeof(float),
-                    cudaMemcpyDeviceToHost, stream_);
-    // Also read per-speaker MAX scores.
-    std::vector<float> spk_max(n_spk);
-    cudaMemcpyAsync(spk_max.data(), d_spk_sims_, n_spk * sizeof(float),
-                    cudaMemcpyDeviceToHost, stream_);
-    cudaStreamSynchronize(stream_);
-
-    results.resize(n_spk);
-    for (int s = 0; s < n_spk; s++) {
-        int begin = offsets_[s];
-        int end   = offsets_[s + 1];
-        int n = end - begin;
-
-        float max_sim = spk_max[s];
-        if (n <= 1) {
-            // Only 1 exemplar — use raw MAX (no consistency penalty).
-            results[s].speaker_id = speakers_[s].external_id;
-            results[s].similarity = max_sim;
-            continue;
-        }
-
-        // Count exemplars above the floor threshold.
-        int hits = 0;
-        for (int i = begin; i < end; i++) {
-            if (all_sims[i] >= floor) hits++;
-        }
-
-        // Consistency ratio: what fraction of exemplars agree?
-        float ratio = (float)hits / (float)n;
-        // Apply power to soften/sharpen the penalty: power=0.5 → sqrt(ratio).
-        float weight = powf(ratio, power);
-
-        results[s].speaker_id = speakers_[s].external_id;
-        results[s].similarity = max_sim * weight;
-    }
-
-    std::sort(results.begin(), results.end(),
-              [](const SearchResult& a, const SearchResult& b) {
-                  return a.similarity > b.similarity;
-              });
-    return results;
 }
 
 int SpeakerVectorStore::register_speaker(const std::string& name,
@@ -1087,7 +837,6 @@ void SpeakerVectorStore::clear() {
     for (int s = 0; s < kMaxPending; s++)
         pending_slots_[s].active = false;
     pending_miss_seq_ = 0;
-    consecutive_misses_ = 0;
     speakers_.clear();
     offsets_.clear();
     offsets_.push_back(0);
@@ -1527,6 +1276,59 @@ bool SpeakerVectorStore::load(const std::string& dir) {
     LOG_INFO(label_.c_str(), "Loaded %d speakers (%d exemplars) from %s",
              (int)speakers_.size(), n_total_, dir.c_str());
     return true;
+}
+
+int SpeakerVectorStore::absorb_fragments(float absorption_threshold) {
+    // Fragment absorption: iteratively merge speaker pairs with high anchor similarity.
+    // Absorbs smaller (fewer matches) into larger speaker.
+    int merges = 0;
+    while (true) {
+        int dst_id = -1, src_id = -1;
+        float best_sim = 0;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            int n_spk = (int)speakers_.size();
+            if (n_spk < 2) break;
+
+            // Download anchor embeddings (first exemplar per speaker).
+            std::vector<std::vector<float>> anchors(n_spk);
+            for (int i = 0; i < n_spk; ++i) {
+                anchors[i].resize(dim_);
+                cudaMemcpy(anchors[i].data(),
+                           d_embeddings_ + offsets_[i] * dim_,
+                           dim_ * sizeof(float),
+                           cudaMemcpyDeviceToHost);
+            }
+
+            // Find pair with highest mutual anchor similarity.
+            for (int i = 0; i < n_spk; ++i) {
+                for (int j = i + 1; j < n_spk; ++j) {
+                    float sim = 0;
+                    for (int d = 0; d < dim_; ++d)
+                        sim += anchors[i][d] * anchors[j][d];
+                    if (sim > best_sim) {
+                        best_sim = sim;
+                        // Larger (more matches) becomes destination.
+                        if (speakers_[i].match_count >= speakers_[j].match_count) {
+                            dst_id = speakers_[i].external_id;
+                            src_id = speakers_[j].external_id;
+                        } else {
+                            dst_id = speakers_[j].external_id;
+                            src_id = speakers_[i].external_id;
+                        }
+                    }
+                }
+            }
+        }
+        // Check if we found a pair above threshold (lock released).
+        if (best_sim < absorption_threshold || dst_id < 0) break;
+        LOG_INFO(label_.c_str(),
+                 "Absorb: merge spk%d → spk%d (anchor_sim=%.3f)",
+                 src_id, dst_id, best_sim);
+        merge_speakers(dst_id, src_id);
+        merges++;
+    }
+    return merges;
 }
 
 } // namespace deusridet

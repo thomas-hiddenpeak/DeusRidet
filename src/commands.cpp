@@ -1415,6 +1415,21 @@ int cmd_test_ws(const std::string& webui_dir,
     // Configure CAM++ speaker encoder model path.
     audio_cfg.speaker.model_path = home + "/models/dev/speaker/campplus/campplus.safetensors";
 
+    // Configure WavLM ONNX speaker encoder.
+    audio_cfg.wavlm.model_path = home + "/models/dev/speaker/wavlm/wavlm_base_plus_sv.onnx";
+    audio_cfg.wavlm.name = "wavlm";
+    audio_cfg.wavlm.input_name = "input_values";
+    audio_cfg.wavlm.output_name = "onnx::Gemm_3633";
+    audio_cfg.wavlm.embedding_dim = 512;
+
+    // Configure ECAPA-TDNN-1024-LM speaker encoder (WeSpeaker, fbank input).
+    // Adapted from WeSpeaker ECAPA-TDNN with Attentive Statistical Pooling (ASTP).
+    audio_cfg.unispeech.model_path = home + "/models/dev/speaker/ecapa_tdnn/ecapa_tdnn1024_lm.onnx";
+    audio_cfg.unispeech.name = "ecapa";
+    audio_cfg.unispeech.input_name = "feats";
+    audio_cfg.unispeech.output_name = "embs";
+    audio_cfg.unispeech.embedding_dim = 192;
+
     // Configure WavLM-Large + ECAPA-TDNN native GPU speaker encoder.
     audio_cfg.wavlm_ecapa_model = home + "/models/dev/speaker/espnet_wavlm_ecapa/wavlm_ecapa.safetensors";
     audio_cfg.wavlm_ecapa_threshold = 0.55f;
@@ -1478,20 +1493,21 @@ int cmd_test_ws(const std::string& webui_dir,
     };
 
     // Audio pipeline callbacks.
-    audio.set_on_vad([&](const VadResult& vr, float stream_sec) {
+    audio.set_on_vad([&](const VadResult& vr, int frame_idx) {
         char json[256];
         snprintf(json, sizeof(json),
-            R"({"type":"vad","speech":%s,"event":"%s","stream_sec":%.4f,"energy":%.2f})",
+            R"({"type":"vad","speech":%s,"event":"%s","frame":%d,"energy":%.2f})",
             vr.is_speech ? "true" : "false",
             vr.segment_start ? "start" : (vr.segment_end ? "end" : "none"),
-            stream_sec, vr.energy);
+            frame_idx, vr.energy);
         server.broadcast_text(json);
-        timeline.log_vad(stream_sec, vr.segment_start, vr.segment_end, vr.energy);
+        timeline.log_vad(vr.is_speech, vr.segment_start, vr.segment_end,
+                         frame_idx, vr.energy);
         if (vr.segment_start)
-            printf("[test-ws] VAD: speech START at %.2fs (energy=%.2f)\n",
-                   stream_sec, vr.energy);
+            printf("[test-ws] VAD: speech START at frame %d (energy=%.2f)\n",
+                   frame_idx, vr.energy);
         if (vr.segment_end)
-            printf("[test-ws] VAD: speech END at %.2fs\n", stream_sec);
+            printf("[test-ws] VAD: speech END at frame %d\n", frame_idx);
     });
 
     // ASR transcript callback (called from ASR worker thread).
@@ -1500,9 +1516,12 @@ int cmd_test_ws(const std::string& webui_dir,
                                 float speaker_sim, float speaker_confidence,
                                 const std::string& speaker_source,
                                 const std::string& trigger_reason,
+                                int tracker_id, const std::string& tracker_name,
+                                float tracker_sim,
                                 float stream_start_sec, float stream_end_sec) {
         std::string escaped = json_escape(result.text);
         std::string spk_escaped = json_escape(speaker_name);
+        std::string trk_escaped = json_escape(tracker_name);
         std::string src_escaped = json_escape(speaker_source);
         char json[2048];
         snprintf(json, sizeof(json),
@@ -1510,21 +1529,30 @@ int cmd_test_ws(const std::string& webui_dir,
             R"("stream_start_sec":%.2f,"stream_end_sec":%.2f,)"
             R"("mel_ms":%.1f,"encoder_ms":%.1f,"decode_ms":%.1f,"tokens":%d,"mel_frames":%d,)"
             R"("speaker_id":%d,"speaker_name":"%s","speaker_sim":%.3f,"speaker_confidence":%.3f,"speaker_source":"%s",)"
-            R"("trigger":"%s"})",
+            R"("trigger":"%s",)"
+            R"("tracker_id":%d,"tracker_name":"%s","tracker_sim":%.3f})",
             escaped.c_str(), result.total_ms, audio_sec,
             stream_start_sec, stream_end_sec,
             result.mel_ms, result.encoder_ms, result.decode_ms,
             result.token_count, result.mel_frames,
             speaker_id, spk_escaped.c_str(), speaker_sim, speaker_confidence, src_escaped.c_str(),
-            trigger_reason.c_str());
+            trigger_reason.c_str(),
+            tracker_id, trk_escaped.c_str(), tracker_sim);
         server.broadcast_text(json);
         timeline.log_asr(result.text.c_str(), stream_start_sec, stream_end_sec,
                          result.total_ms, audio_sec, trigger_reason.c_str(),
                          speaker_id, speaker_name.c_str(), speaker_sim,
-                         speaker_confidence, speaker_source.c_str());
-        printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s conf=%.2f src=%s]\n",
-               result.text.c_str(), result.total_ms, audio_sec,
-               speaker_id, speaker_name.c_str(), speaker_confidence, speaker_source.c_str());
+                         speaker_confidence, speaker_source.c_str(),
+                         tracker_id, tracker_name.c_str(), tracker_sim);
+        if (speaker_id >= 0)
+            printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s conf=%.2f src=%s | trk=%d %s]\n",
+                   result.text.c_str(), result.total_ms, audio_sec,
+                   speaker_id, speaker_name.c_str(), speaker_confidence, speaker_source.c_str(),
+                   tracker_id, tracker_name.c_str());
+        else
+            printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [trk=%d %s]\n",
+                   result.text.c_str(), result.total_ms, audio_sec,
+                   tracker_id, tracker_name.c_str());
 
         // Inject ASR transcript into consciousness stream
         if (llm_loaded && !result.text.empty()) {
@@ -1577,8 +1605,10 @@ int cmd_test_ws(const std::string& webui_dir,
         // Build speaker lists JSON — always included so the roster stays current.
         std::string lists_json;
         lists_json += R"(,"speaker_lists":[)";
-        lists_json += R"({"model":"CAM++","speakers":)" + speaker_list_json(audio.speaker_db()) + "},";
-
+        lists_json += R"({"model":"CAM++","speakers":)" + speaker_list_json(audio.campp_db()) + "},";
+        lists_json += R"({"model":"CAM++Legacy","speakers":)" + speaker_list_json(audio.speaker_db()) + "},";
+        lists_json += R"({"model":"WavLM","speakers":)" + speaker_list_json(audio.wavlm_db()) + "},";
+        lists_json += R"({"model":"ECAPA-TDNN","speakers":)" + speaker_list_json(audio.unispeech_db()) + "},";
         lists_json += R"({"model":"WL-ECAPA","speakers":)" + speaker_list_json(audio.wlecapa_db()) + "}]";
 
         char json[2800];
@@ -1592,7 +1622,10 @@ int cmd_test_ws(const std::string& webui_dir,
             R"("vad_source":%d,)"
             R"("speaker_id":%d,"speaker_sim":%.3f,"speaker_new":%s,"speaker_count":%d,)"
             R"("speaker_name":"%s","speaker_enabled":%s,"speaker_threshold":%.2f,"speaker_active":%s,)"
-
+            R"("wavlm_id":%d,"wavlm_sim":%.3f,"wavlm_new":%s,"wavlm_count":%d,)"
+            R"("wavlm_name":"%s","wavlm_enabled":%s,"wavlm_threshold":%.2f,"wavlm_active":%s,)"
+            R"("unispeech_id":%d,"unispeech_sim":%.3f,"unispeech_new":%s,"unispeech_count":%d,)"
+            R"("unispeech_name":"%s","unispeech_enabled":%s,"unispeech_threshold":%.2f,"unispeech_active":%s,)"
             R"("wlecapa_id":%d,"wlecapa_sim":%.3f,"wlecapa_new":%s,"wlecapa_count":%d,)"
             R"("wlecapa_exemplars":%d,"wlecapa_hits_above":%d,)"
             R"("wlecapa_name":"%s","wlecapa_enabled":%s,"wlecapa_threshold":%.2f,"wlecapa_active":%s)",
@@ -1619,7 +1652,18 @@ int cmd_test_ws(const std::string& webui_dir,
             audio.speaker_enabled() ? "true" : "false",
             audio.speaker_threshold(),
             st.speaker_active ? "true" : "false",
-
+            st.wavlm_id, st.wavlm_sim,
+            st.wavlm_new ? "true" : "false",
+            st.wavlm_count, st.wavlm_name,
+            audio.wavlm_enabled() ? "true" : "false",
+            audio.wavlm_threshold(),
+            st.wavlm_active ? "true" : "false",
+            st.unispeech_id, st.unispeech_sim,
+            st.unispeech_new ? "true" : "false",
+            st.unispeech_count, st.unispeech_name,
+            audio.unispeech_enabled() ? "true" : "false",
+            audio.unispeech_threshold(),
+            st.unispeech_active ? "true" : "false",
             st.wlecapa_id, st.wlecapa_sim,
             st.wlecapa_new ? "true" : "false",
             st.wlecapa_count,
@@ -1648,7 +1692,7 @@ int cmd_test_ws(const std::string& webui_dir,
                 R"(,"asr_pre_roll_sec":%.2f,"asr_max_tokens":%d,"asr_rep_penalty":%.2f,"asr_min_energy":%.4f)"
                 R"(,"asr_vad_source":%d,"asr_partial_sec":%.1f,"asr_min_speech_ratio":%.2f)"
                 R"(,"asr_adaptive_silence":%s,"asr_effective_silence_ms":%d,"asr_current_silence_ms":%d)"
-                R"(,"asr_adaptive_short_ms":%d,"asr_adaptive_long_ms":%d,"asr_adaptive_vlong_ms":%d,"asr_vad_gap_ms":%d)",
+                R"(,"asr_adaptive_short_ms":%d,"asr_adaptive_long_ms":%d,"asr_adaptive_vlong_ms":%d)",
                 audio.asr_enabled() ? "true" : "false",
                 audio.asr_loaded() ? "true" : "false",
                 st.asr_active ? "true" : "false",
@@ -1672,8 +1716,7 @@ int cmd_test_ws(const std::string& webui_dir,
                 st.asr_post_silence_ms,
                 audio.asr_adaptive_short_ms(),
                 audio.asr_adaptive_long_ms(),
-                audio.asr_adaptive_vlong_ms(),
-                audio.asr_vad_gap_ms());
+                audio.asr_adaptive_vlong_ms());
             full_json += asr;
         }
 
@@ -1698,6 +1741,47 @@ int cmd_test_ws(const std::string& webui_dir,
                 full_json += cd;
             }
 
+
+        }
+
+        // SpeakerTracker stats.
+        {
+            auto& ts = audio.tracker().stats();
+            char trk[512];
+            snprintf(trk, sizeof(trk),
+                R"(,"tracker_enabled":%s,"tracker_state":%d,"tracker_spk_id":%d,"tracker_spk_sim":%.3f)"
+                R"(,"tracker_spk_name":"%s","tracker_confidence":%d,"tracker_spk_count":%d)"
+                R"(,"tracker_timeline_len":%d,"tracker_switches":%d)"
+                R"(,"tracker_f0_hz":%.1f,"tracker_f0_jitter":%.3f)"
+                R"(,"tracker_sim_to_ref":%.3f,"tracker_sim_avg":%.3f)"
+                R"(,"tracker_check_active":%s,"tracker_check_lat_ms":%.1f)"
+                R"(,"tracker_interval_ms":%d,"tracker_window_ms":%d,"tracker_threshold":%.2f)",
+                ts.enabled ? "true" : "false",
+                static_cast<int>(ts.state),
+                ts.speaker_id, ts.speaker_sim,
+                ts.speaker_name,
+                static_cast<int>(ts.confidence),
+                ts.speaker_count,
+                ts.timeline_len, ts.switches,
+                ts.f0_hz, ts.f0_jitter,
+                ts.sim_to_ref, ts.sim_running_avg,
+                ts.check_active ? "true" : "false",
+                ts.check_lat_ms,
+                audio.tracker().interval_ms(),
+                audio.tracker().window_ms(),
+                audio.tracker().threshold());
+            full_json += trk;
+
+            if (ts.reg_event) {
+                char reg[128];
+                snprintf(reg, sizeof(reg),
+                    R"(,"tracker_reg_event":true,"tracker_reg_id":%d,"tracker_reg_name":"%s")",
+                    ts.reg_id, ts.reg_name);
+                full_json += reg;
+            }
+
+            // Tracker speaker list.
+            full_json += R"(,"tracker_speakers":)" + speaker_list_json(audio.tracker().db());
         }
 
         full_json += lists_json;
@@ -1705,7 +1789,7 @@ int cmd_test_ws(const std::string& webui_dir,
         server.broadcast_text(full_json);
 
         // Timeline log: compact stats.
-        timeline.log_stats(st,
+        timeline.log_stats(st, audio.tracker().stats(),
                            audio.wlecapa_db().min_margin(),
                            st.wlecapa_change_sim,
                            st.wlecapa_change_valid && !st.wlecapa_is_early);
@@ -1723,15 +1807,6 @@ int cmd_test_ws(const std::string& webui_dir,
                match.speaker_id, match.similarity,
                match.is_new ? "NEW " : "",
                match.name.empty() ? "(unnamed)" : match.name.c_str());
-    });
-
-    // Speaker timeline event callback — log SPK events to JSONL.
-    audio.set_on_spk_event([&](const SpeakerEvent& ev) {
-        static const char* kSrcNames[] = {"SPK_EARLY", "SPK_FULL", "SPK_CHANGE"};
-        const char* src = kSrcNames[static_cast<int>(ev.source)];
-        float s = ev.audio_start / 16000.0f;
-        float e = ev.audio_end / 16000.0f;
-        timeline.log_spk(s, e, src, ev.speaker_id, ev.name, ev.similarity, false);
     });
 
     // ── Consciousness stream callbacks ──────────────────────────────
@@ -2010,6 +2085,22 @@ int cmd_test_ws(const std::string& webui_dir,
                 R"({"type":"speaker_enable","enabled":%s})", on ? "true" : "false");
             server.send_text(fd, json);
             printf("[test-ws] Speaker %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg == "wavlm_enable:on" || msg == "wavlm_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.set_wavlm_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"wavlm_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] WavLM %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg == "unispeech_enable:on" || msg == "unispeech_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.set_unispeech_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"unispeech_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] UniSpeech %s (fd=%d)\n", on ? "ON" : "OFF", fd);
         } else if (msg.rfind("speaker_threshold:", 0) == 0) {
             float t = std::strtof(msg.c_str() + 18, nullptr);
             if (t < 0.0f) t = 0.0f;
@@ -2020,10 +2111,38 @@ int cmd_test_ws(const std::string& webui_dir,
                 R"({"type":"speaker_threshold","value":%.2f})", t);
             server.send_text(fd, json);
             printf("[test-ws] Speaker threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("wavlm_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 16, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.set_wavlm_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"wavlm_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] WavLM threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("unispeech_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 20, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.set_unispeech_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"unispeech_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] UniSpeech threshold = %.2f (fd=%d)\n", t, fd);
         } else if (msg == "speaker_clear") {
             audio.clear_speaker_db();
             server.send_text(fd, R"({"type":"speaker_clear"})");
             printf("[test-ws] Speaker (CAM++) DB cleared (fd=%d)\n", fd);
+        } else if (msg == "wavlm_clear") {
+            audio.clear_wavlm_db();
+            server.send_text(fd, R"({"type":"wavlm_clear"})");
+            printf("[test-ws] WavLM DB cleared (fd=%d)\n", fd);
+        } else if (msg == "unispeech_clear") {
+            audio.clear_unispeech_db();
+            server.send_text(fd, R"({"type":"unispeech_clear"})");
+            printf("[test-ws] UniSpeech DB cleared (fd=%d)\n", fd);
         } else if (msg.rfind("speaker_name:", 0) == 0) {
             // Format: speaker_name:ID:Name
             auto rest = msg.substr(13);
@@ -2037,6 +2156,32 @@ int cmd_test_ws(const std::string& webui_dir,
                     R"({"type":"speaker_name","id":%d,"name":"%s"})", id, name.c_str());
                 server.send_text(fd, json);
                 printf("[test-ws] CAM++ Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
+            }
+        } else if (msg.rfind("wavlm_name:", 0) == 0) {
+            auto rest = msg.substr(11);
+            auto colon = rest.find(':');
+            if (colon != std::string::npos) {
+                int id = std::stoi(rest.substr(0, colon));
+                std::string name = rest.substr(colon + 1);
+                audio.set_wavlm_name(id, name);
+                char json[256];
+                snprintf(json, sizeof(json),
+                    R"({"type":"wavlm_name","id":%d,"name":"%s"})", id, name.c_str());
+                server.send_text(fd, json);
+                printf("[test-ws] WavLM Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
+            }
+        } else if (msg.rfind("unispeech_name:", 0) == 0) {
+            auto rest = msg.substr(15);
+            auto colon = rest.find(':');
+            if (colon != std::string::npos) {
+                int id = std::stoi(rest.substr(0, colon));
+                std::string name = rest.substr(colon + 1);
+                audio.set_unispeech_name(id, name);
+                char json[256];
+                snprintf(json, sizeof(json),
+                    R"({"type":"unispeech_name","id":%d,"name":"%s"})", id, name.c_str());
+                server.send_text(fd, json);
+                printf("[test-ws] UniSpeech Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
             }
         } else if (msg == "wlecapa_enable:on" || msg == "wlecapa_enable:off") {
             bool on = msg.back() == 'n';
@@ -2134,6 +2279,72 @@ int cmd_test_ws(const std::string& webui_dir,
                     dst, src, ok ? "true" : "false");
                 server.send_text(fd, json);
                 printf("[test-ws] WL-ECAPA merge #%d←#%d %s (fd=%d)\n", dst, src, ok ? "OK" : "FAIL", fd);
+            }
+        // ── SpeakerTracker controls ──
+        } else if (msg == "tracker_enable:on" || msg == "tracker_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.tracker().set_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"tracker_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] Tracker %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg.rfind("tracker_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 18, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.tracker().set_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"tracker_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] Tracker threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("tracker_change_threshold:", 0) == 0) {
+            float t = std::strtof(msg.c_str() + 24, nullptr);
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+            audio.tracker().set_change_threshold(t);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"tracker_change_threshold","value":%.2f})", t);
+            server.send_text(fd, json);
+            printf("[test-ws] Tracker change threshold = %.2f (fd=%d)\n", t, fd);
+        } else if (msg.rfind("tracker_interval:", 0) == 0) {
+            int ms = std::stoi(msg.substr(17));
+            if (ms < 250) ms = 250;
+            if (ms > 5000) ms = 5000;
+            audio.tracker().set_interval_ms(ms);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"tracker_interval","value":%d})", ms);
+            server.send_text(fd, json);
+            printf("[test-ws] Tracker interval = %d ms (fd=%d)\n", ms, fd);
+        } else if (msg.rfind("tracker_window:", 0) == 0) {
+            int ms = std::stoi(msg.substr(15));
+            if (ms < 500) ms = 500;
+            if (ms > 5000) ms = 5000;
+            audio.tracker().set_window_ms(ms);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"tracker_window","value":%d})", ms);
+            server.send_text(fd, json);
+            printf("[test-ws] Tracker window = %d ms (fd=%d)\n", ms, fd);
+        } else if (msg == "tracker_clear") {
+            audio.tracker().clear();
+            server.send_text(fd, R"({"type":"tracker_clear"})");
+            printf("[test-ws] Tracker DB cleared (fd=%d)\n", fd);
+        } else if (msg.rfind("tracker_name:", 0) == 0) {
+            auto rest = msg.substr(13);
+            auto colon = rest.find(':');
+            if (colon != std::string::npos) {
+                int id = std::stoi(rest.substr(0, colon));
+                std::string name = rest.substr(colon + 1);
+                audio.tracker().set_speaker_name(id, name);
+                char json[256];
+                snprintf(json, sizeof(json),
+                    R"({"type":"tracker_name","id":%d,"name":"%s"})", id, name.c_str());
+                server.send_text(fd, json);
+                printf("[test-ws] Tracker Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
             }
         } else if (msg == "asr_enable:on" || msg == "asr_enable:off") {
             bool on = msg.back() == 'n';
@@ -2243,12 +2454,6 @@ int cmd_test_ws(const std::string& webui_dir,
                     snprintf(json, sizeof(json),
                         R"({"type":"asr_param","key":"adaptive_vlong_ms","value":%d})",
                         audio.asr_adaptive_vlong_ms());
-                } else if (key == "vad_gap_ms") {
-                    int v = std::stoi(val);
-                    audio.set_asr_vad_gap_ms(v);
-                    snprintf(json, sizeof(json),
-                        R"({"type":"asr_param","key":"vad_gap_ms","value":%d})",
-                        audio.asr_vad_gap_ms());
                 } else {
                     snprintf(json, sizeof(json),
                         R"({"type":"asr_param","key":"%s","error":"unknown"})",

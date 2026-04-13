@@ -45,7 +45,7 @@ class SpeakerVectorStore {
 public:
     // dim: embedding dimension (must be divisible by 4 for float4 vectorization).
     // ema_alpha: EMA weight for centroid updates when exemplar is similar.
-    // max_exemplars: maximum exemplar embeddings per speaker (1–30).
+    // max_exemplars: maximum exemplar embeddings per speaker (1–15).
     // initial_capacity: initial GPU buffer size in exemplar rows.
     explicit SpeakerVectorStore(const std::string& label,
                                 int dim,
@@ -64,31 +64,6 @@ public:
     SpeakerMatch identify(const std::vector<float>& embedding,
                           float threshold     = 0.65f,
                           bool  auto_register = true);
-
-    // Search all speakers and return per-speaker best cosine similarity.
-    // Result: vector of (external_id, similarity) sorted by similarity descending.
-    // Does NOT auto-register or update exemplars — read-only search.
-    struct SearchResult {
-        int   speaker_id;
-        float similarity;
-    };
-    std::vector<SearchResult> search_all(const std::vector<float>& embedding);
-
-    // Search all speakers and return per-speaker mean-of-top-K cosine similarity.
-    // Uses top-K exemplar averaging instead of MAX, which is more robust for
-    // similar-voice speakers: same-speaker matches have multiple high-sim exemplars,
-    // cross-speaker matches have only 1-2 lucky ones.
-    // K=3 by default.  Falls back to available exemplar count if speaker has < K.
-    std::vector<SearchResult> search_all_topk(const std::vector<float>& embedding, int K = 3);
-
-    // Search all speakers with consistency-weighted scoring:
-    // score = max_sim * (hits_above_floor / exemplar_count)^power
-    // Penalizes speakers where only one lucky exemplar matches.
-    // floor: minimum similarity to count as a "hit" (default 0.30 for fused space)
-    // power: controls penalty strength (default 0.5 = sqrt)
-    std::vector<SearchResult> search_all_weighted(const std::vector<float>& embedding,
-                                                   float floor = 0.30f,
-                                                   float power = 0.5f);
 
     // Register a named speaker with a known embedding.
     int register_speaker(const std::string& name,
@@ -118,30 +93,14 @@ public:
     // src is deleted after merge. Returns true on success.
     bool merge_speakers(int dst_id, int src_id);
 
+    // Fragment absorption: check all speaker pairs, merge any with mutual
+    // centroid similarity > absorption_threshold. Absorbs smaller speaker
+    // into larger one. Returns number of merges performed.
+    int absorb_fragments(float absorption_threshold = 0.55f);
+
     // ---- Margin guard ----
     void  set_min_margin(float m) { min_margin_ = m; }
     float min_margin() const { return min_margin_; }
-
-    // ---- Match-time margin ----
-    // When n_speakers >= 2, reject a match if the gap between best and
-    // second-best similarity is below this threshold.  Routes the query
-    // to the pending pool instead, preventing ambiguous cross-speaker matches
-    // from contaminating clusters.
-    void  set_match_margin(float m) { match_margin_ = m; }
-    float match_margin() const { return match_margin_; }
-
-    // ---- Proximity merge margin ----
-    void  set_proximity_margin(float m) { proximity_margin_ = m; }
-    float proximity_margin() const { return proximity_margin_; }
-
-    // ---- Pending threshold (separate from match threshold) ----
-    // Pending confirmation requires two unknown-speaker embeddings to have
-    // cosine sim >= pending_threshold. This is intentionally lower than the
-    // match threshold because short segments of the same speaker have lower
-    // mutual similarity than centroid-to-segment similarity.
-    void  set_pending_threshold(float t) { pending_threshold_ = t; }
-    float pending_threshold() const { return pending_threshold_; }
-    int   consecutive_misses() const { return consecutive_misses_; }
 
     // ---- Persistence ----
 
@@ -207,11 +166,6 @@ private:
     // Compute dot product between d_pending_pool_[slot] and d_query_.
     float gpu_pending_dot(int slot);
 
-    // Compute mean-of-top-K similarities per speaker from d_sims_.
-    // Must be called after gpu_search() (d_sims_ populated by batch_dot_kernel).
-    // Returns per-speaker scores indexed by internal speaker index.
-    std::vector<float> compute_topk_scores(int K = 3);
-
     // ---- Device buffers ----
     float* d_embeddings_ = nullptr;  // [capacity_ × dim_], L2-normed
     int*   d_offsets_    = nullptr;  // [spk_alloc_ + 1], exemplar prefix sums
@@ -249,9 +203,8 @@ private:
 
     // Multi-pending pool state.
     struct PendingSlot {
-        bool   active    = false;
-        int    miss_seq  = 0;  // monotonic sequence number at creation (for LRU)
-        int    hit_count = 0;  // how many times this slot was matched (registration at >=2)
+        bool   active   = false;
+        int    miss_seq = 0;  // monotonic sequence number at creation (for LRU)
     };
     PendingSlot pending_slots_[kMaxPending] = {};
     int pending_miss_seq_ = 0;  // global miss counter for LRU
@@ -270,31 +223,7 @@ private:
 
     // Margin guard for registration: if pending embedding is too close to two
     // existing speakers, reject registration to avoid creating duplicates.
-    float min_margin_ = 0.12f;
-
-    // Proximity merge margin: when a pending-confirmed embedding is close to an
-    // existing speaker (similarity >= threshold - proximity_margin), absorb it
-    // as an exemplar instead of creating a new speaker.  Default 0.20 tuned for
-    // single-encoder 192-dim space; must be reduced for fused 384-dim space.
-    float proximity_margin_ = 0.20f;
-
-    // Match-time margin: reject matches where best-second_best < this value.
-    // 0 = disabled (no match-time margin check).
-    float match_margin_ = 0.0f;
-
-    // Separate threshold for pending pool confirmation (lower than match threshold).
-    // Same-speaker segments from short utterances often have cosine sim 0.3-0.5,
-    // well below the match threshold of 0.55. Raised from 0.30 to 0.50 after
-    // calibration test: 0.30 → 11 spk, 0.45 → 8 spk for 4-person conversation.
-    float pending_threshold_ = 0.50f;
-
-    // Consecutive miss counter: tracks how many identify(auto_reg=true) calls
-    // resulted in NO pending confirmation or registration. Does NOT reset on
-    // known-speaker matches — only resets when a new speaker is actually
-    // registered or proximity-merged. This ensures the counter reflects
-    // "how long since we last grew the speaker DB", enabling pending threshold
-    // decay even in conversations with frequent known-speaker matches.
-    int consecutive_misses_ = 0;
+    float min_margin_ = 0.08f;
 
     cudaStream_t stream_ = nullptr;
 };

@@ -11,6 +11,7 @@ import { AsrLogPanel } from './components/asr-log-panel.js';
 import { ConsciousnessPanel } from './components/consciousness-panel.js';
 import { TextOutputPanel } from './components/text-output-panel.js';
 import { ConfigPanel } from './components/config-panel.js';
+import { TrackerPanel } from './components/tracker-panel.js';
 import { TimelinePanel } from './components/timeline-panel.js';
 import { spkColor } from './utils/speaker-colors.js';
 
@@ -54,6 +55,7 @@ ws.onText = (msg) => {
             updateSpeakerPanel(obj);
             speakerDebug.onPipelineStats(obj);
             asrPanel.onPipelineStats(obj);
+            trackerPanel.onPipelineStats(obj);
             timelinePanel.onPipelineStats(obj);
             return;
         }
@@ -173,6 +175,7 @@ const asrLogPanel = new AsrLogPanel(ws);
 const consciousnessPanel = new ConsciousnessPanel(ws);
 const textOutputPanel = new TextOutputPanel(ws);
 const configPanel = new ConfigPanel(ws);
+const trackerPanel = new TrackerPanel(ws);
 const timelinePanel = new TimelinePanel();
 
 // --- VAD source selector ---
@@ -189,6 +192,12 @@ if (vadSourceSelect) {
 const MODELS = [
     { prefix: 'speaker',    enableCmd: 'speaker_enable',    thresholdCmd: 'speaker_threshold',
       clearCmd: 'speaker_clear',  nameCmd: 'speaker_name',  btnId: 'spk-en-campp',  label: 'CAM++',
+      deleteCmd: null, mergeCmd: null },
+    { prefix: 'wavlm',     enableCmd: 'wavlm_enable',      thresholdCmd: 'wavlm_threshold',
+      clearCmd: 'wavlm_clear',   nameCmd: 'wavlm_name',    btnId: 'spk-en-wavlm',  label: 'WavLM',
+      deleteCmd: null, mergeCmd: null },
+    { prefix: 'unispeech',  enableCmd: 'unispeech_enable',  thresholdCmd: 'unispeech_threshold',
+      clearCmd: 'unispeech_clear', nameCmd: 'unispeech_name', btnId: 'spk-en-ecapa', label: 'ECAPA',
       deleteCmd: null, mergeCmd: null },
     { prefix: 'wlecapa',   enableCmd: 'wlecapa_enable',    thresholdCmd: 'wlecapa_threshold',
       clearCmd: 'wlecapa_clear',  nameCmd: 'wlecapa_name',  btnId: 'spk-en-wlecapa', label: 'WL-ECAPA',
@@ -513,7 +522,7 @@ function updateMergeButton() {
 
 function findModelByLabel(label) {
     // Map backend label → MODELS entry.
-    const map = { 'CAM++': 'speaker', 'WL-ECAPA': 'wlecapa' };
+    const map = { 'CAM++': 'speaker', 'WavLM': 'wavlm', 'ECAPA-TDNN': 'unispeech', 'WL-ECAPA': 'wlecapa' };
     const prefix = map[label];
     return prefix ? MODEL_BY_PREFIX[prefix] : null;
 }
