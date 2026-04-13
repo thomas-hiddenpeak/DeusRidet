@@ -946,14 +946,68 @@ void AudioPipeline::process_loop() {
                             stats_.speaker_hits_above = match.hits_above;
 
                             campp_full_count_++;
+
+                            // --- V21: Anti-fragmentation merge ---
+                            // Periodic merge: every 30 identifications, merge very similar
+                            // speaker clusters (same-speaker fragments that split over time).
+                            // Also cap total speakers at 6 to prevent runaway fragmentation.
+                            {
+                                static constexpr int kAbsorbInterval = 30;
+                                static constexpr int kMaxSpeakers = 6;
+                                static constexpr float kPeriodicMergeThresh = 0.80f;
+                                auto& active_db = use_dual_encoder_ ? dual_db_ : campp_db_;
+                                bool did_merge = false;
+
+                                // Periodic absorb: merge very similar clusters.
+                                if (campp_full_count_ % kAbsorbInterval == 0) {
+                                    int merged = active_db.absorb_fragments(kPeriodicMergeThresh);
+                                    if (merged > 0) {
+                                        LOG_INFO("AudioPipe", "V21 periodic: absorbed %d fragments "
+                                                 "(thresh=%.2f, now %d speakers)",
+                                                 merged, kPeriodicMergeThresh, active_db.count());
+                                        did_merge = true;
+                                    }
+                                }
+
+                                // Speaker cap: force-merge closest pair if over limit.
+                                while (active_db.count() > kMaxSpeakers) {
+                                    bool forced = false;
+                                    for (float t = 0.95f; t >= 0.30f; t -= 0.05f) {
+                                        if (active_db.absorb_fragments(t) > 0) {
+                                            LOG_INFO("AudioPipe", "V21 cap: force-merged at thresh=%.2f "
+                                                     "(now %d speakers)", t, active_db.count());
+                                            forced = true;
+                                            did_merge = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!forced) break;  // safety: no merge possible
+                                }
+
+                                // Reset smoothing ring after any merge to prevent stale IDs.
+                                if (did_merge) {
+                                    for (int k = 0; k < kSmoothWindowSize; k++) smooth_ring_[k] = -1;
+                                    smooth_ring_pos_ = 0;
+                                    smoothed_speaker_id_ = -1;
+                                    // Re-apply raw_id to ring since we just cleared it.
+                                    if (raw_id >= 0) {
+                                        smooth_ring_[0] = raw_id;
+                                        smooth_ring_pos_ = 1;
+                                        smoothed_speaker_id_ = raw_id;
+                                        match.speaker_id = raw_id;
+                                    }
+                                }
+                            }
+
                             strncpy(stats_.speaker_name, match.name.c_str(),
                                     sizeof(stats_.speaker_name) - 1);
                             stats_.speaker_name[sizeof(stats_.speaker_name) - 1] = '\0';
-                            LOG_INFO("AudioPipe", "CAM++: raw=%d smoothed=%d sim=%.3f %s%s (fbank=%d, ex=%d)",
+                            LOG_INFO("AudioPipe", "CAM++: raw=%d smoothed=%d sim=%.3f %s%s (fbank=%d, ex=%d, spks=%d)",
                                      raw_id, match.speaker_id, match.similarity,
                                      match.is_new ? "NEW " : "",
                                      match.name.empty() ? "(unnamed)" : match.name.c_str(),
-                                     fbank_frames, match.exemplar_count);
+                                     fbank_frames, match.exemplar_count,
+                                     (use_dual_encoder_ ? dual_db_.count() : campp_db_.count()));
                             if (on_speaker_) on_speaker_(match);
 
                             // SAAS: feed CAM++ result into speaker timeline.
