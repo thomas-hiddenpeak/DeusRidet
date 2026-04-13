@@ -493,8 +493,12 @@ void SpeakerVectorStore::gpu_remove_rows(int begin_row, int end_row) {
 // ============================================================================
 
 SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
-                                           float threshold,
-                                           bool auto_register) {
+                                           float match_threshold,
+                                           bool auto_register,
+                                           float register_threshold) {
+    // If no explicit register threshold, use match threshold.
+    float reg_thresh = (register_threshold > 0.0f) ? register_threshold : match_threshold;
+
     if ((int)embedding.size() != dim_) {
         LOG_INFO(label_.c_str(), "identify: dim mismatch (%d vs %d)",
                  (int)embedding.size(), dim_);
@@ -537,13 +541,13 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
             }
 
             LOG_INFO(label_.c_str(),
-                     "Match: best=#%d(%.3f) 2nd=#%d(%.3f) thresh=%.2f db=%d ex=%d",
+                     "Match: best=#%d(%.3f) 2nd=#%d(%.3f) m_thresh=%.2f r_thresh=%.2f db=%d ex=%d",
                      best.speaker_id, best.similarity,
                      second_best_id, second_best_sim,
-                     threshold, n_spk, n_total_);
+                     match_threshold, reg_thresh, n_spk, n_total_);
         }
 
-        if (best.similarity >= threshold && sr.spk_idx >= 0) {
+        if (best.similarity >= match_threshold && sr.spk_idx >= 0) {
             // === MATCHED ===
             // Margin guard is NOT applied here — if best exceeds threshold,
             // it's the best match regardless of how close second-best is.
@@ -557,7 +561,7 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
             // where matches are frequent.
 
             // Count how many exemplars exceeded threshold for this speaker.
-            best.hits_above     = count_hits_above(sr.spk_idx, threshold);
+            best.hits_above     = count_hits_above(sr.spk_idx, match_threshold);
             best.exemplar_count = speakers_[sr.spk_idx].exemplar_count;
 
             // Frozen anchor strategy: never EMA-update existing exemplars.
@@ -575,7 +579,7 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
                 admit_margin = 0.20f;  // very strict early on
             else if (spk.exemplar_count < 10)
                 admit_margin = 0.15f;  // moderate
-            float admit_thresh = threshold + admit_margin;
+            float admit_thresh = match_threshold + admit_margin;
 
             // Hit-ratio gate: when we have enough exemplars, require that
             // a meaningful fraction actually matched (not just the closest one).
@@ -633,9 +637,9 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
         if (!pending_slots_[s].active) continue;
         float sim = gpu_pending_dot(s);
         LOG_INFO(label_.c_str(),
-                 "Pending[%d] vs query: sim=%.3f (thresh=%.2f, age=%d)",
-                 s, sim, threshold, pending_miss_seq_ - pending_slots_[s].miss_seq);
-        if (sim >= threshold && sim > best_pending_sim) {
+                 "Pending[%d] vs query: sim=%.3f (reg_thresh=%.2f, age=%d)",
+                 s, sim, reg_thresh, pending_miss_seq_ - pending_slots_[s].miss_seq);
+        if (sim >= reg_thresh && sim > best_pending_sim) {
             best_pending_sim = sim;
             matched_slot = s;
         }
@@ -649,7 +653,7 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
         // too close to two existing speakers (would create a confusing duplicate).
         if (!speakers_.empty() && second_best_id >= 0) {
             float margin = best.similarity - second_best_sim;
-            if (margin >= 0 && margin < min_margin_ && best.similarity > threshold * 0.8f) {
+            if (margin >= 0 && margin < min_margin_ && best.similarity > reg_thresh * 0.8f) {
                 LOG_INFO(label_.c_str(),
                          "Registration blocked by margin guard: "
                          "best_db=#%d(%.3f) 2nd_db=#%d(%.3f) margin=%.3f < %.3f, pending_sim=%.3f slot=%d",
@@ -1279,7 +1283,8 @@ bool SpeakerVectorStore::load(const std::string& dir) {
 }
 
 int SpeakerVectorStore::absorb_fragments(float absorption_threshold) {
-    // Fragment absorption: iteratively merge speaker pairs with high anchor similarity.
+    // Fragment absorption: iteratively merge speaker pairs with high centroid similarity.
+    // Uses mean of all exemplars (centroid) instead of single anchor for robustness.
     // Absorbs smaller (fewer matches) into larger speaker.
     int merges = 0;
     while (true) {
@@ -1290,22 +1295,45 @@ int SpeakerVectorStore::absorb_fragments(float absorption_threshold) {
             int n_spk = (int)speakers_.size();
             if (n_spk < 2) break;
 
-            // Download anchor embeddings (first exemplar per speaker).
-            std::vector<std::vector<float>> anchors(n_spk);
+            // Compute centroid (mean embedding) for each speaker.
+            std::vector<std::vector<float>> centroids(n_spk, std::vector<float>(dim_, 0.0f));
             for (int i = 0; i < n_spk; ++i) {
-                anchors[i].resize(dim_);
-                cudaMemcpy(anchors[i].data(),
-                           d_embeddings_ + offsets_[i] * dim_,
-                           dim_ * sizeof(float),
+                int start = offsets_[i];
+                int end   = offsets_[i + 1];
+                int n_ex  = end - start;
+                if (n_ex == 0) continue;
+
+                // Download all exemplars for this speaker.
+                std::vector<float> buf(n_ex * dim_);
+                cudaMemcpy(buf.data(),
+                           d_embeddings_ + start * dim_,
+                           n_ex * dim_ * sizeof(float),
                            cudaMemcpyDeviceToHost);
+
+                // Compute mean.
+                for (int e = 0; e < n_ex; ++e)
+                    for (int d = 0; d < dim_; ++d)
+                        centroids[i][d] += buf[e * dim_ + d];
+                float inv_n = 1.0f / n_ex;
+                float norm = 0;
+                for (int d = 0; d < dim_; ++d) {
+                    centroids[i][d] *= inv_n;
+                    norm += centroids[i][d] * centroids[i][d];
+                }
+                // L2-normalize centroid.
+                if (norm > 1e-12f) {
+                    float inv_norm = 1.0f / sqrtf(norm);
+                    for (int d = 0; d < dim_; ++d)
+                        centroids[i][d] *= inv_norm;
+                }
             }
 
-            // Find pair with highest mutual anchor similarity.
+            // Find pair with highest mutual centroid similarity.
             for (int i = 0; i < n_spk; ++i) {
                 for (int j = i + 1; j < n_spk; ++j) {
                     float sim = 0;
                     for (int d = 0; d < dim_; ++d)
-                        sim += anchors[i][d] * anchors[j][d];
+                        sim += centroids[i][d] * centroids[j][d];
                     if (sim > best_sim) {
                         best_sim = sim;
                         // Larger (more matches) becomes destination.
@@ -1323,7 +1351,7 @@ int SpeakerVectorStore::absorb_fragments(float absorption_threshold) {
         // Check if we found a pair above threshold (lock released).
         if (best_sim < absorption_threshold || dst_id < 0) break;
         LOG_INFO(label_.c_str(),
-                 "Absorb: merge spk%d → spk%d (anchor_sim=%.3f)",
+                 "Absorb: merge spk%d → spk%d (centroid_sim=%.3f)",
                  src_id, dst_id, best_sim);
         merge_speakers(dst_id, src_id);
         merges++;

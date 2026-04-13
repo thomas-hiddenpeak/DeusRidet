@@ -107,6 +107,7 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
     }
 
     speaker_threshold_.store(cfg_.speaker_threshold, std::memory_order_relaxed);
+    speaker_register_threshold_.store(0.55f, std::memory_order_relaxed);
     wavlm_threshold_.store(cfg_.wavlm_threshold, std::memory_order_relaxed);
     unispeech_threshold_.store(cfg_.unispeech_threshold, std::memory_order_relaxed);
     wlecapa_threshold_.store(cfg_.wavlm_ecapa_threshold, std::memory_order_relaxed);
@@ -527,7 +528,8 @@ void AudioPipeline::process_loop() {
                         auto emb = speaker_enc_.extract(seg_fbank_buf_.data(), fbank_frames);
                         if (!emb.empty()) {
                             float thresh = speaker_threshold_.load(std::memory_order_relaxed);
-                            SpeakerMatch match = campp_db_.identify(emb, thresh, /*auto_register=*/false);
+                            float reg_thresh = speaker_register_threshold_.load(std::memory_order_relaxed);
+                            SpeakerMatch match = campp_db_.identify(emb, thresh, /*auto_register=*/false, reg_thresh);
                             if (match.speaker_id >= 0) {
                                 stats_.speaker_id = match.speaker_id;
                                 stats_.speaker_sim = match.similarity;
@@ -858,10 +860,49 @@ void AudioPipeline::process_loop() {
                     enable_speaker_.load(std::memory_order_relaxed) &&
                     fbank_frames >= 150) {
                         float thresh = speaker_threshold_.load(std::memory_order_relaxed);
+                        float reg_thresh = speaker_register_threshold_.load(std::memory_order_relaxed);
 
                         auto emb = speaker_enc_.extract(seg_fbank_buf_.data(), fbank_frames);
                         if (!emb.empty()) {
-                            SpeakerMatch match = campp_db_.identify(emb, thresh);
+                            SpeakerMatch match = campp_db_.identify(emb, thresh,
+                                                                     /*auto_register=*/true,
+                                                                     reg_thresh);
+
+                            // Temporal smoothing: majority voting over last N identifications.
+                            // Only change the reported speaker if the new ID wins majority.
+                            int raw_id = match.speaker_id;
+                            if (raw_id >= 0) {
+                                smooth_ring_[smooth_ring_pos_] = raw_id;
+                                smooth_ring_pos_ = (smooth_ring_pos_ + 1) % kSmoothWindowSize;
+
+                                // Count votes.
+                                int votes[64] = {};
+                                int max_votes = 0, majority_id = -1;
+                                for (int k = 0; k < kSmoothWindowSize; ++k) {
+                                    int sid = smooth_ring_[k];
+                                    if (sid >= 0 && sid < 64) {
+                                        votes[sid]++;
+                                        if (votes[sid] > max_votes) {
+                                            max_votes = votes[sid];
+                                            majority_id = sid;
+                                        }
+                                    }
+                                }
+                                // Apply smoothing: switch only on majority (2/3 or better).
+                                if (majority_id >= 0 && max_votes >= 2) {
+                                    if (majority_id != smoothed_speaker_id_) {
+                                        LOG_INFO("AudioPipe", "Smooth: switch spk%d → spk%d (votes=%d/%d)",
+                                                 smoothed_speaker_id_, majority_id,
+                                                 max_votes, kSmoothWindowSize);
+                                    }
+                                    smoothed_speaker_id_ = majority_id;
+                                }
+                                // If no majority yet, keep previous smoothed speaker.
+                                if (smoothed_speaker_id_ >= 0) {
+                                    match.speaker_id = smoothed_speaker_id_;
+                                }
+                            }
+
                             stats_.speaker_id = match.speaker_id;
                             stats_.speaker_sim = match.similarity;
                             stats_.speaker_new = match.is_new;
@@ -872,8 +913,8 @@ void AudioPipeline::process_loop() {
                             strncpy(stats_.speaker_name, match.name.c_str(),
                                     sizeof(stats_.speaker_name) - 1);
                             stats_.speaker_name[sizeof(stats_.speaker_name) - 1] = '\0';
-                            LOG_INFO("AudioPipe", "CAM++: id=%d sim=%.3f %s%s (fbank=%d, ex=%d)",
-                                     match.speaker_id, match.similarity,
+                            LOG_INFO("AudioPipe", "CAM++: raw=%d smoothed=%d sim=%.3f %s%s (fbank=%d, ex=%d)",
+                                     raw_id, match.speaker_id, match.similarity,
                                      match.is_new ? "NEW " : "",
                                      match.name.empty() ? "(unnamed)" : match.name.c_str(),
                                      fbank_frames, match.exemplar_count);
@@ -897,9 +938,13 @@ void AudioPipeline::process_loop() {
                                          match.speaker_id, match.similarity);
                             }
 
-                            // Fragment absorption: merge over-split speakers.
-                            if (match.is_new && campp_db_.count() >= 3) {
-                                int absorbed = campp_db_.absorb_fragments(0.55f);
+                            // Fragment absorption: centroid-based merging.
+                            // Run on new registration AND periodically every 5 FULL extractions.
+                            campp_full_count_++;
+                            bool do_absorb = (match.is_new && campp_db_.count() >= 3) ||
+                                             (campp_full_count_ % 5 == 0 && campp_db_.count() >= 3);
+                            if (do_absorb) {
+                                int absorbed = campp_db_.absorb_fragments(0.45f);
                                 if (absorbed > 0) {
                                     stats_.speaker_count = campp_db_.count();
                                     LOG_INFO("AudioPipe", "CAM++ absorption: %d merges, %d speakers remain",

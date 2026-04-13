@@ -61,7 +61,7 @@ struct AudioPipelineConfig {
     std::string asr_model_path;            // Qwen3-ASR model directory (empty = disabled)
     size_t ring_buffer_bytes = 1 << 20;  // 1 MB (~32 seconds of int16 mono 16kHz)
     int process_chunk_ms     = 100;      // process in 100ms chunks (10 mel frames)
-    float speaker_threshold  = 0.50f;    // CAM++ cosine sim threshold (same ~0.67, diff ~0.07)
+    float speaker_threshold  = 0.50f;    // CAM++ cosine sim match threshold
     float wavlm_threshold    = 0.80f;    // WavLM Gemm threshold (same ~0.86-0.93, diff ~0.36-0.76)
     float unispeech_threshold= 0.55f;    // ECAPA-TDNN threshold (same ~0.57, diff ~0.03-0.45)
 };
@@ -811,6 +811,14 @@ private:
     FsmnFbankGpu speaker_fbank_;  // 80-dim fbank for CAM++
     std::vector<float> seg_fbank_buf_;   // accumulated fbank frames for current speech segment
     bool campp_early_extracted_ = false; // whether CAM++ EARLY has fired this segment
+
+    // CAM++ temporal smoothing: majority voting over recent identifications.
+    // Prevents rapid flip-backs between speakers.
+    static constexpr int kSmoothWindowSize = 3;
+    int smooth_ring_[kSmoothWindowSize] = {-1, -1, -1};  // recent speaker IDs
+    int smooth_ring_pos_ = 0;
+    int smoothed_speaker_id_ = -1;       // current smoothed speaker
+    int campp_full_count_ = 0;           // count FULL extractions for periodic absorption
     OnnxSpeakerEncoder wavlm_enc_;
     SpeakerDb wavlm_db_{"WavLMDb", 0.1f};       // low EMA to resist centroid contamination
     OnnxSpeakerEncoder unispeech_enc_;
@@ -829,7 +837,8 @@ private:
     std::atomic<bool> enable_wavlm_{false};
     std::atomic<bool> enable_unispeech_{false};
     std::atomic<bool> enable_wlecapa_{false};    // WL-ECAPA — disabled (CAM++ is primary)
-    std::atomic<float> speaker_threshold_{0.65f}; // CAM++ matching threshold
+    std::atomic<float> speaker_threshold_{0.50f}; // CAM++ matching threshold
+    std::atomic<float> speaker_register_threshold_{0.55f}; // CAM++ registration threshold (pending pool)
     std::atomic<float> wavlm_threshold_{0.80f};
     std::atomic<float> unispeech_threshold_{0.55f};
     std::atomic<float> wlecapa_threshold_{0.55f};

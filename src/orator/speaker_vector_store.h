@@ -61,9 +61,13 @@ public:
 
     // Identify speaker from embedding. Returns match or auto-registers new
     // speaker after 2-miss confirmation (same as SpeakerDb pending logic).
+    // match_threshold: cosine similarity threshold for matching existing speakers.
+    // register_threshold: cosine similarity threshold for registration confirmation
+    //   via pending pool (-1 = use match_threshold).
     SpeakerMatch identify(const std::vector<float>& embedding,
-                          float threshold     = 0.65f,
-                          bool  auto_register = true);
+                          float match_threshold    = 0.65f,
+                          bool  auto_register      = true,
+                          float register_threshold = -1.0f);
 
     // Register a named speaker with a known embedding.
     int register_speaker(const std::string& name,
