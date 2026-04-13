@@ -5,6 +5,7 @@
 
 #include "audio_pipeline.h"
 #include "../../communis/log.h"
+#include "../../orator/spectral_cluster.h"
 
 #include <chrono>
 #include <cmath>
@@ -107,7 +108,7 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
     }
 
     speaker_threshold_.store(cfg_.speaker_threshold, std::memory_order_relaxed);
-    speaker_register_threshold_.store(0.55f, std::memory_order_relaxed);
+    speaker_register_threshold_.store(0.65f, std::memory_order_relaxed);
     wavlm_threshold_.store(cfg_.wavlm_threshold, std::memory_order_relaxed);
     unispeech_threshold_.store(cfg_.unispeech_threshold, std::memory_order_relaxed);
     wlecapa_threshold_.store(cfg_.wavlm_ecapa_threshold, std::memory_order_relaxed);
@@ -527,7 +528,8 @@ void AudioPipeline::process_loop() {
                         campp_early_extracted_ = true;
                         auto emb = speaker_enc_.extract(seg_fbank_buf_.data(), fbank_frames);
                         if (!emb.empty()) {
-                            float thresh = speaker_threshold_.load(std::memory_order_relaxed);
+                            float thresh = warmup_done_ ? 0.0f :
+                                speaker_threshold_.load(std::memory_order_relaxed);
                             float reg_thresh = speaker_register_threshold_.load(std::memory_order_relaxed);
                             SpeakerMatch match = campp_db_.identify(emb, thresh, /*auto_register=*/false, reg_thresh);
                             if (match.speaker_id >= 0) {
@@ -854,8 +856,9 @@ void AudioPipeline::process_loop() {
                 int fbank_frames = (int)(seg_fbank_buf_.size() / 80);
 
                 // CAM++ speaker encoder — FULL extraction using accumulated fbank.
-                // Uses SpeakerVectorStore (multi-exemplar, GPU-accelerated) for
-                // better discrimination of similar speakers.
+                // Warm-up spectral clustering: collect first N embeddings,
+                // run spectral clustering to find K speakers, rebuild store.
+                // Adapted from qwen35-orin spectral clustering (Phase 3b).
                 if (speaker_enc_.initialized() &&
                     enable_speaker_.load(std::memory_order_relaxed) &&
                     fbank_frames >= 150) {
@@ -864,18 +867,28 @@ void AudioPipeline::process_loop() {
 
                         auto emb = speaker_enc_.extract(seg_fbank_buf_.data(), fbank_frames);
                         if (!emb.empty()) {
-                            SpeakerMatch match = campp_db_.identify(emb, thresh,
-                                                                     /*auto_register=*/true,
+                            // Collect embedding for warm-up clustering.
+                            if (!warmup_done_) {
+                                warmup_embeddings_.push_back(emb);
+                                int64_t seg_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
+                                float mid_sec = (seg_start + total_samples_in_) * 0.5f / 16000.0f;
+                                warmup_timestamps_.push_back(mid_sec);
+                            }
+
+                            // Matching: during warm-up use greedy, after use locked store.
+                            bool auto_reg = !warmup_done_;
+                            float match_thresh = warmup_done_ ? 0.0f : thresh;
+
+                            SpeakerMatch match = campp_db_.identify(emb, match_thresh,
+                                                                     auto_reg,
                                                                      reg_thresh);
 
                             // Temporal smoothing: majority voting over last N identifications.
-                            // Only change the reported speaker if the new ID wins majority.
                             int raw_id = match.speaker_id;
                             if (raw_id >= 0) {
                                 smooth_ring_[smooth_ring_pos_] = raw_id;
                                 smooth_ring_pos_ = (smooth_ring_pos_ + 1) % kSmoothWindowSize;
 
-                                // Count votes.
                                 int votes[64] = {};
                                 int max_votes = 0, majority_id = -1;
                                 for (int k = 0; k < kSmoothWindowSize; ++k) {
@@ -888,7 +901,6 @@ void AudioPipeline::process_loop() {
                                         }
                                     }
                                 }
-                                // Apply smoothing: switch only on majority (2/3 or better).
                                 if (majority_id >= 0 && max_votes >= 2) {
                                     if (majority_id != smoothed_speaker_id_) {
                                         LOG_INFO("AudioPipe", "Smooth: switch spk%d → spk%d (votes=%d/%d)",
@@ -897,7 +909,6 @@ void AudioPipeline::process_loop() {
                                     }
                                     smoothed_speaker_id_ = majority_id;
                                 }
-                                // If no majority yet, keep previous smoothed speaker.
                                 if (smoothed_speaker_id_ >= 0) {
                                     match.speaker_id = smoothed_speaker_id_;
                                 }
@@ -913,14 +924,15 @@ void AudioPipeline::process_loop() {
                             strncpy(stats_.speaker_name, match.name.c_str(),
                                     sizeof(stats_.speaker_name) - 1);
                             stats_.speaker_name[sizeof(stats_.speaker_name) - 1] = '\0';
-                            LOG_INFO("AudioPipe", "CAM++: raw=%d smoothed=%d sim=%.3f %s%s (fbank=%d, ex=%d)",
+                            LOG_INFO("AudioPipe", "CAM++: raw=%d smoothed=%d sim=%.3f %s%s (fbank=%d, ex=%d, warmup=%s)",
                                      raw_id, match.speaker_id, match.similarity,
                                      match.is_new ? "NEW " : "",
                                      match.name.empty() ? "(unnamed)" : match.name.c_str(),
-                                     fbank_frames, match.exemplar_count);
+                                     fbank_frames, match.exemplar_count,
+                                     warmup_done_ ? "done" : "collecting");
                             if (on_speaker_) on_speaker_(match);
 
-                            // SAAS: feed CAM++ result into speaker timeline for fusion.
+                            // SAAS: feed CAM++ result into speaker timeline.
                             if (match.speaker_id >= 0) {
                                 seg_ref_speaker_id_ = match.speaker_id;
                                 seg_ref_speaker_name_ = match.name;
@@ -934,22 +946,60 @@ void AudioPipeline::process_loop() {
                                 ev.similarity  = match.similarity;
                                 strncpy(ev.name, match.name.c_str(), sizeof(ev.name) - 1);
                                 spk_timeline_.push(ev);
-                                LOG_INFO("AudioPipe", "CAM++ SAAS_FULL: spk=%d sim=%.3f → timeline",
-                                         match.speaker_id, match.similarity);
                             }
 
-                            // Fragment absorption: centroid-based merging.
-                            // Run on new registration AND periodically every 5 FULL extractions.
                             campp_full_count_++;
-                            bool do_absorb = (match.is_new && campp_db_.count() >= 3) ||
-                                             (campp_full_count_ % 5 == 0 && campp_db_.count() >= 3);
-                            if (do_absorb) {
-                                int absorbed = campp_db_.absorb_fragments(0.45f);
-                                if (absorbed > 0) {
-                                    stats_.speaker_count = campp_db_.count();
-                                    LOG_INFO("AudioPipe", "CAM++ absorption: %d merges, %d speakers remain",
-                                             absorbed, campp_db_.count());
+
+                            // Warm-up clustering trigger: run spectral clustering
+                            // and rebuild speaker store when enough embeddings collected.
+                            if (!warmup_done_ &&
+                                (int)warmup_embeddings_.size() >= kWarmupCount) {
+                                LOG_INFO("AudioPipe", "=== WARM-UP SPECTRAL CLUSTERING: %d embeddings ===",
+                                         (int)warmup_embeddings_.size());
+
+                                SpectralClusterConfig sc_cfg;
+                                // Disable temporal mixing for warm-up batch.
+                                sc_cfg.temporal_alpha = 0.0f;
+                                // Keep full 192D (no PCA truncation) — for similar
+                                // voices, the discriminative features may be in
+                                // lower-variance dimensions that PCA 16D discards.
+                                sc_cfg.pca_dim = 192;
+                                // Post-clustering centroid merge at 0.70 in 192D.
+                                sc_cfg.merge_threshold = 0.70f;
+                                auto cr = spectral_cluster(warmup_embeddings_,
+                                                           warmup_timestamps_,
+                                                           192, sc_cfg);
+
+                                LOG_INFO("AudioPipe", "Spectral: K=%d (merge_thresh=%.2f) from %d embeddings",
+                                         cr.K, sc_cfg.merge_threshold,
+                                         (int)warmup_embeddings_.size());
+
+                                // Log cluster sizes.
+                                std::vector<int> sizes(cr.K, 0);
+                                for (int lbl : cr.labels) sizes[lbl]++;
+                                for (int c = 0; c < cr.K; ++c)
+                                    LOG_INFO("AudioPipe", "  cluster[%d]: %d embeddings", c, sizes[c]);
+
+                                // Rebuild speaker store with cluster centroids.
+                                campp_db_.clear();
+                                for (int c = 0; c < cr.K; ++c) {
+                                    int id = campp_db_.register_speaker("", cr.centroids[c]);
+                                    LOG_INFO("AudioPipe", "  registered spk%d from cluster %d (%d members)",
+                                             id, c, sizes[c]);
                                 }
+
+                                // Reset temporal smoothing for new ID space.
+                                for (int k = 0; k < kSmoothWindowSize; ++k)
+                                    smooth_ring_[k] = -1;
+                                smooth_ring_pos_ = 0;
+                                smoothed_speaker_id_ = -1;
+
+                                warmup_done_ = true;
+                                warmup_embeddings_.clear();
+                                warmup_timestamps_.clear();
+
+                                LOG_INFO("AudioPipe", "=== WARM-UP DONE: %d speakers, registration locked ===",
+                                         campp_db_.count());
                             }
                         }
                 }

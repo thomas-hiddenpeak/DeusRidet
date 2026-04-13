@@ -819,6 +819,15 @@ private:
     int smooth_ring_pos_ = 0;
     int smoothed_speaker_id_ = -1;       // current smoothed speaker
     int campp_full_count_ = 0;           // count FULL extractions for periodic absorption
+
+    // Warm-up spectral clustering: collect embeddings during warm-up,
+    // then run one-shot spectral clustering to find speaker count and centroids.
+    // After clustering, rebuild the speaker store and lock registration.
+    static constexpr int kWarmupCount = 80;  // FULL extractions before clustering
+    std::vector<std::vector<float>> warmup_embeddings_;
+    std::vector<float> warmup_timestamps_;   // mid-time in seconds
+    bool warmup_done_ = false;
+
     OnnxSpeakerEncoder wavlm_enc_;
     SpeakerDb wavlm_db_{"WavLMDb", 0.1f};       // low EMA to resist centroid contamination
     OnnxSpeakerEncoder unispeech_enc_;
