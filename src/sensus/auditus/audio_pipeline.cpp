@@ -886,10 +886,18 @@ void AudioPipeline::process_loop() {
 
                         auto emb = speaker_enc_.extract(seg_fbank_buf_.data(), fbank_frames);
                         if (!emb.empty()) {
-                            bool auto_reg = !warmup_done_;  // lock registration after warmup clustering
+                            bool auto_reg = true;  // always allow registration
                             float match_thresh = thresh;
 
-                            // v24: Temporal recency bonus — lower threshold when recent
+                            // v24d: Discovery phase — use higher threshold during
+                            // early extractions to force speaker separation.
+                            // Without this, similar speakers (e.g. 徐子景/朱杰)
+                            // get absorbed into the first registered speaker.
+                            static constexpr int kDiscoveryCount = 50;
+                            static constexpr float kDiscoveryBoost = 0.07f;
+                            if (campp_full_count_ < kDiscoveryCount) {
+                                match_thresh += kDiscoveryBoost;  // 0.45 → 0.52
+                            }                            // v24: Temporal recency bonus — lower threshold when recent
                             // speaker still active, reducing false negatives (fragmentation).
                             float seg_mid_time = (float)(total_samples_in_ - (int64_t)speech_pcm_buf_.size() / 2) / 16000.0f;
                             float time_since_prev = seg_mid_time - prev_full_time_;
