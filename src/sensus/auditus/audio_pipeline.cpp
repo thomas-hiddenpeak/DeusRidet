@@ -111,15 +111,11 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
     }
 
     speaker_threshold_.store(cfg_.speaker_threshold, std::memory_order_relaxed);
-    speaker_register_threshold_.store(0.65f, std::memory_order_relaxed);
+    speaker_register_threshold_.store(0.55f, std::memory_order_relaxed);
 
-    // CAM++ only mode: use 192D embeddings for all identification.
-    // 192D has stronger cosine similarity than 384D dual encoder.
-    // Override to appropriate threshold if default was set for dual encoder.
-    if (cfg_.speaker_threshold < 0.50f) {
-        speaker_threshold_.store(0.55f, std::memory_order_relaxed);
-        LOG_INFO("AudioPipe", "CAM++ only mode: match threshold set to 0.55, register=0.65");
-    }
+    // v24: threshold set from config (default 0.50 in header, 0.45 in machina.conf).
+    // Recency bonus (-0.05) applies dynamically during FULL identification.
+    // No threshold override needed — dual encoder mode uses cfg value directly.
     wavlm_threshold_.store(cfg_.wavlm_threshold, std::memory_order_relaxed);
     unispeech_threshold_.store(cfg_.unispeech_threshold, std::memory_order_relaxed);
     wlecapa_threshold_.store(cfg_.wavlm_ecapa_threshold, std::memory_order_relaxed);
@@ -893,28 +889,87 @@ void AudioPipeline::process_loop() {
                             bool auto_reg = true;
                             float match_thresh = thresh;
 
-                            // Hard speaker cap: stop all new registrations after N speakers.
-                            // Prevents fragmentation that degrades accuracy over time.
-                            int current_count = campp_db_.count();
-                            static constexpr int kMaxSpeakers = 5;
-                            if (current_count >= kMaxSpeakers) {
-                                auto_reg = false;
+                            // v24: Temporal recency bonus — lower threshold when recent
+                            // speaker still active, reducing false negatives (fragmentation).
+                            float seg_mid_time = (float)(total_samples_in_ - (int64_t)speech_pcm_buf_.size() / 2) / 16000.0f;
+                            float time_since_prev = seg_mid_time - prev_full_time_;
+                            static constexpr float kRecencyWindow = 15.0f;  // seconds
+                            static constexpr float kRecencyBonus  = 0.05f;  // threshold reduction
+                            bool recency_active = (prev_full_speaker_id_ >= 0 &&
+                                                   time_since_prev < kRecencyWindow);
+                            if (recency_active) {
+                                match_thresh -= kRecencyBonus;
                             }
 
-                            // Always use CAM++ only (192D) for identification.
-                            // CAM++ achieves 88.7% in offline pipeline (qwen35-orin reference).
-                            // 384D dual encoder dilutes cosine similarity => worse matching.
-                            SpeakerMatch match = campp_db_.identify(emb, match_thresh,
-                                                                     auto_reg, reg_thresh);
+                            SpeakerMatch match;
+                            if (use_dual_encoder_) {
+                                // Dual-encoder: concatenate CAM++ + WL-ECAPA → 384D.
+                                int speech_samples = (int)speech_pcm_buf_.size();
+                                std::vector<float> wl_emb;
+                                if (speech_samples >= 16000) {
+                                    std::vector<float> pcm_f32(speech_samples);
+                                    for (int si = 0; si < speech_samples; si++)
+                                        pcm_f32[si] = speech_pcm_buf_[si] / 32768.0f;
+                                    wl_emb = wlecapa_enc_.extract(pcm_f32.data(), speech_samples);
+                                }
+                                if (!wl_emb.empty()) {
+                                    // Build 384D vector: [CAM++ 192D | WL-ECAPA 192D], L2-normalized.
+                                    std::vector<float> dual(384);
+                                    std::copy(emb.begin(), emb.end(), dual.begin());
+                                    std::copy(wl_emb.begin(), wl_emb.end(), dual.begin() + 192);
+                                    float n2 = 0;
+                                    for (float v : dual) n2 += v * v;
+                                    float inv = 1.0f / sqrtf(n2 + 1e-12f);
+                                    for (float& v : dual) v *= inv;
+                                    match = dual_db_.identify(dual, match_thresh,
+                                                              auto_reg, reg_thresh);
+                                } else {
+                                    // WL-ECAPA extraction failed (segment too short).
+                                    // Skip — don't fallback to different ID space.
+                                    LOG_INFO("AudioPipe", "CAM++ FULL: WL-ECAPA failed, skip dual identify");
+                                }
+                            } else {
+                                match = campp_db_.identify(emb, match_thresh,
+                                                           auto_reg, reg_thresh);
+                            }
 
-                            // No temporal smoothing — push raw identification to timeline.
-                            // Timeline resolve() handles temporal fusion via weighted majority voting.
-                            // Smoothing ring was causing delayed/wrong speaker transitions.
+                            // v24: Recency validation — if threshold was lowered and matched
+                            // a DIFFERENT speaker than the recent one, discard the match and
+                            // re-run at standard threshold to avoid false positives.
+                            if (recency_active && match.speaker_id >= 0 &&
+                                match.speaker_id != prev_full_speaker_id_ &&
+                                match.similarity < thresh) {
+                                LOG_INFO("AudioPipe", "Recency: matched #%d(%.3f) != prev #%d, re-check at %.2f",
+                                         match.speaker_id, match.similarity, prev_full_speaker_id_, thresh);
+                                // Re-identify at standard threshold.
+                                if (use_dual_encoder_) {
+                                    int speech_samples = (int)speech_pcm_buf_.size();
+                                    std::vector<float> wl_emb;
+                                    if (speech_samples >= 16000) {
+                                        std::vector<float> pcm_f32(speech_samples);
+                                        for (int si = 0; si < speech_samples; si++)
+                                            pcm_f32[si] = speech_pcm_buf_[si] / 32768.0f;
+                                        wl_emb = wlecapa_enc_.extract(pcm_f32.data(), speech_samples);
+                                    }
+                                    if (!wl_emb.empty()) {
+                                        std::vector<float> dual(384);
+                                        std::copy(emb.begin(), emb.end(), dual.begin());
+                                        std::copy(wl_emb.begin(), wl_emb.end(), dual.begin() + 192);
+                                        float n2 = 0;
+                                        for (float v : dual) n2 += v * v;
+                                        float inv = 1.0f / sqrtf(n2 + 1e-12f);
+                                        for (float& v : dual) v *= inv;
+                                        match = dual_db_.identify(dual, thresh, auto_reg, reg_thresh);
+                                    }
+                                } else {
+                                    match = campp_db_.identify(emb, thresh, auto_reg, reg_thresh);
+                                }
+                            }
 
                             stats_.speaker_id = match.speaker_id;
                             stats_.speaker_sim = match.similarity;
                             stats_.speaker_new = match.is_new;
-                            stats_.speaker_count = campp_db_.count();
+                            stats_.speaker_count = use_dual_encoder_ ? dual_db_.count() : campp_db_.count();
                             stats_.speaker_active = true;
                             stats_.speaker_exemplars = match.exemplar_count;
                             stats_.speaker_hits_above = match.hits_above;
@@ -923,14 +978,21 @@ void AudioPipeline::process_loop() {
                             strncpy(stats_.speaker_name, match.name.c_str(),
                                     sizeof(stats_.speaker_name) - 1);
                             stats_.speaker_name[sizeof(stats_.speaker_name) - 1] = '\0';
-                            LOG_INFO("AudioPipe", "CAM++: id=%d sim=%.3f %s%s (fbank=%d, ex=%d)",
+                            LOG_INFO("AudioPipe", "FULL: id=%d sim=%.3f %s%s (fbank=%d, ex=%d, recency=%s, mt=%.2f)",
                                      match.speaker_id, match.similarity,
                                      match.is_new ? "NEW " : "",
                                      match.name.empty() ? "(unnamed)" : match.name.c_str(),
-                                     fbank_frames, match.exemplar_count);
+                                     fbank_frames, match.exemplar_count,
+                                     recency_active ? "ON" : "off", match_thresh);
                             if (on_speaker_) on_speaker_(match);
 
-                            // SAAS: feed CAM++ result into speaker timeline.
+                            // Update recency tracking.
+                            if (match.speaker_id >= 0) {
+                                prev_full_speaker_id_ = match.speaker_id;
+                                prev_full_time_ = seg_mid_time;
+                            }
+
+                            // SAAS: feed result into speaker timeline.
                             if (match.speaker_id >= 0) {
                                 seg_ref_speaker_id_ = match.speaker_id;
                                 seg_ref_speaker_name_ = match.name;
@@ -944,6 +1006,25 @@ void AudioPipeline::process_loop() {
                                 ev.similarity  = match.similarity;
                                 strncpy(ev.name, match.name.c_str(), sizeof(ev.name) - 1);
                                 spk_timeline_.push(ev);
+                            }
+
+                            // v24: Periodic fragment absorption — merge speakers with
+                            // high centroid similarity to prevent fragmentation.
+                            // Only after enough extractions to build stable centroids.
+                            {
+                                auto& db = use_dual_encoder_ ? dual_db_ : campp_db_;
+                                static constexpr int kAbsorbInterval = 20;
+                                static constexpr int kAbsorbMinExtractions = 30;
+                                static constexpr float kAbsorbThreshold = 0.55f;
+                                if (campp_full_count_ >= kAbsorbMinExtractions &&
+                                    campp_full_count_ % kAbsorbInterval == 0 &&
+                                    db.count() > 4) {
+                                    int merges = db.absorb_fragments(kAbsorbThreshold);
+                                    if (merges > 0) {
+                                        LOG_INFO("AudioPipe", "v24 absorb: %d merges at extraction #%d (now %d speakers)",
+                                                 merges, campp_full_count_, db.count());
+                                    }
+                                }
                             }
 
                             // Warm-up clustering trigger: run spectral clustering

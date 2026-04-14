@@ -61,7 +61,7 @@ struct AudioPipelineConfig {
     std::string asr_model_path;            // Qwen3-ASR model directory (empty = disabled)
     size_t ring_buffer_bytes = 1 << 20;  // 1 MB (~32 seconds of int16 mono 16kHz)
     int process_chunk_ms     = 100;      // process in 100ms chunks (10 mel frames)
-    float speaker_threshold  = 0.50f;    // CAM++ cosine sim match threshold
+    float speaker_threshold  = 0.45f;    // dual 384D cosine sim match threshold (v24)
     float wavlm_threshold    = 0.80f;    // WavLM Gemm threshold (same ~0.86-0.93, diff ~0.36-0.76)
     float unispeech_threshold= 0.55f;    // ECAPA-TDNN threshold (same ~0.57, diff ~0.03-0.45)
 };
@@ -819,6 +819,12 @@ private:
     int smooth_ring_pos_ = 0;
     int smoothed_speaker_id_ = -1;       // current smoothed speaker
     int campp_full_count_ = 0;           // count FULL extractions for periodic absorption
+
+    // v24: Temporal recency tracking for FULL speaker identification.
+    // When the previous speaker was active recently, lower the match
+    // threshold to reduce false negatives that cause fragmentation.
+    int prev_full_speaker_id_ = -1;
+    float prev_full_time_ = -100.0f;  // seconds, init far past
 
     // Warm-up spectral clustering: collect embeddings during warm-up,
     // then run one-shot spectral clustering to find speaker count and centroids.
