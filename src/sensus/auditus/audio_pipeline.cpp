@@ -111,14 +111,14 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
     }
 
     speaker_threshold_.store(cfg_.speaker_threshold, std::memory_order_relaxed);
-    speaker_register_threshold_.store(0.55f, std::memory_order_relaxed);
+    speaker_register_threshold_.store(0.65f, std::memory_order_relaxed);
 
-    // Dual-encoder (384D) has diluted cosine similarities compared to single
-    // encoder (192D). Lower the match threshold to compensate.
-    // Typical same-speaker: 0.49-0.73, different speaker: 0.34-0.44 (384D).
-    if (use_dual_encoder_) {
-        speaker_threshold_.store(0.45f, std::memory_order_relaxed);
-        LOG_INFO("AudioPipe", "Dual-encoder mode: match threshold adjusted to 0.45");
+    // CAM++ only mode: use 192D embeddings for all identification.
+    // 192D has stronger cosine similarity than 384D dual encoder.
+    // Override to appropriate threshold if default was set for dual encoder.
+    if (cfg_.speaker_threshold < 0.50f) {
+        speaker_threshold_.store(0.55f, std::memory_order_relaxed);
+        LOG_INFO("AudioPipe", "CAM++ only mode: match threshold set to 0.55, register=0.65");
     }
     wavlm_threshold_.store(cfg_.wavlm_threshold, std::memory_order_relaxed);
     unispeech_threshold_.store(cfg_.unispeech_threshold, std::memory_order_relaxed);
@@ -895,49 +895,17 @@ void AudioPipeline::process_loop() {
 
                             // Hard speaker cap: stop all new registrations after N speakers.
                             // Prevents fragmentation that degrades accuracy over time.
-                            int current_count = use_dual_encoder_ ? dual_db_.count() : campp_db_.count();
+                            int current_count = campp_db_.count();
                             static constexpr int kMaxSpeakers = 5;
                             if (current_count >= kMaxSpeakers) {
                                 auto_reg = false;
                             }
 
-                            SpeakerMatch match;
-                            if (use_dual_encoder_) {
-                                // Dual-encoder: concatenate CAM++ + WL-ECAPA → 384D.
-                                int speech_samples = (int)speech_pcm_buf_.size();
-                                std::vector<float> wl_emb;
-                                if (speech_samples >= 16000) {
-                                    std::vector<float> pcm_f32(speech_samples);
-                                    for (int si = 0; si < speech_samples; si++)
-                                        pcm_f32[si] = speech_pcm_buf_[si] / 32768.0f;
-                                    wl_emb = wlecapa_enc_.extract(pcm_f32.data(), speech_samples);
-                                }
-                                if (!wl_emb.empty()) {
-                                    // Build 384D vector: [CAM++ 192D | WL-ECAPA 192D], L2-normalized.
-                                    std::vector<float> dual(384);
-                                    std::copy(emb.begin(), emb.end(), dual.begin());
-                                    std::copy(wl_emb.begin(), wl_emb.end(), dual.begin() + 192);
-                                    float n2 = 0;
-                                    for (float v : dual) n2 += v * v;
-                                    float inv = 1.0f / sqrtf(n2 + 1e-12f);
-                                    for (float& v : dual) v *= inv;
-                                    match = dual_db_.identify(dual, match_thresh,
-                                                              auto_reg, reg_thresh);
-                                } else {
-                                    // WL-ECAPA extraction failed (segment too short).
-                                    // When dual encoder active, don't fallback to campp_db_
-                                    // (different ID space). Just skip identification.
-                                    if (!use_dual_encoder_) {
-                                        match = campp_db_.identify(emb, match_thresh,
-                                                                   auto_reg, reg_thresh);
-                                    } else {
-                                        LOG_INFO("AudioPipe", "CAM++ FULL: WL-ECAPA failed, skip dual identify (speech too short)");
-                                    }
-                                }
-                            } else {
-                                match = campp_db_.identify(emb, match_thresh,
-                                                           auto_reg, reg_thresh);
-                            }
+                            // Always use CAM++ only (192D) for identification.
+                            // CAM++ achieves 88.7% in offline pipeline (qwen35-orin reference).
+                            // 384D dual encoder dilutes cosine similarity => worse matching.
+                            SpeakerMatch match = campp_db_.identify(emb, match_thresh,
+                                                                     auto_reg, reg_thresh);
 
                             // No temporal smoothing — push raw identification to timeline.
                             // Timeline resolve() handles temporal fusion via weighted majority voting.
@@ -946,7 +914,7 @@ void AudioPipeline::process_loop() {
                             stats_.speaker_id = match.speaker_id;
                             stats_.speaker_sim = match.similarity;
                             stats_.speaker_new = match.is_new;
-                            stats_.speaker_count = use_dual_encoder_ ? dual_db_.count() : campp_db_.count();
+                            stats_.speaker_count = campp_db_.count();
                             stats_.speaker_active = true;
                             stats_.speaker_exemplars = match.exemplar_count;
                             stats_.speaker_hits_above = match.hits_above;
