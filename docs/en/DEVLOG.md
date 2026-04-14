@@ -1,5 +1,71 @@
 # DeusRidet Development Log
 
+## 2026-07-20 — v24d/v24e Speaker ID: Discovery Phase + Extensive Parameter Search
+
+### Context
+
+Continuing from v23 (56.3%) and v24a (57.3%). Searching for systematic improvements
+to online speaker diarization accuracy for 4 similar Chinese male speakers.
+
+### v24d: Discovery Phase Breakthrough
+
+Key insight: during the first N extractions, raise the match threshold to force
+speaker separation. Without this, similar speakers (e.g., 徐子景 with sim ~0.47
+to 朱杰) get absorbed into the first registered speaker.
+
+Parameters: kDiscoveryCount=50, kDiscoveryBoost=0.07f → match_thresh 0.52 during
+first 50 FULL extractions, then 0.45 normal.
+
+**Peak result: 70.9% segment-level, 71.7% duration-weighted** — first time ever
+ALL 4 speakers correctly identified (朱杰 75.4%, 唐云峰 74.5%, 徐子景 70.1%,
+石一 66.6%). Committed as 4a615d4.
+
+### v24e: Extensive Parameter Search (All Variants Worse Than v24d)
+
+Ran 8+ variants testing different approaches:
+
+| Variant | Change | Result | Failure Mode |
+|---------|--------|--------|-------------|
+| v24d verify | Exact v24d re-run | 62.2% | **Lucky initialization** — 70.9% was an outlier |
+| absorb 0.70 | Centroid-based fragment merge | 62.3% | Different speakers have centroid sim up to 0.73 |
+| post-disc lock | reg_thresh=0.75 post-discovery | 46.8-59.9% | Early registrations contaminated |
+| reg=0.60 | Higher pending confirmation | 62.1% | Kills 徐子景 (needs sim>0.55 to confirm) |
+| boost=0.10 | Stronger discovery | 58.9% | Garbage fragments with low purity |
+| margin filter | Reject ambiguous (margin<0.04) | 61.0% | Removes correct matches too |
+| no recency | Disable temporal bonus | 58.8% | More fragmentation (8 speakers) |
+| thresh=0.47 | Higher base threshold | 63.2% | Marginal, not consistent |
+
+### Critical Findings
+
+1. **High variance is the dominant factor**: Same code, same audio → 46-71% accuracy
+   depending on initialization luck. The 384D embedding space has too much overlap
+   between speakers (same-speaker sim 0.50-0.70, different-speaker sim 0.35-0.55).
+
+2. **Fragmentation is a _feature_, not a bug**: With 4 similar speakers, some
+   fragmentation is inevitable. The majority-vote eval naturally handles fragments.
+   Forced consolidation (absorb, registration lockdown) always makes things worse.
+
+3. **The recency bonus helps (+3-4% accuracy)**: Temporal stickiness reduces
+   fragmentation. Disabling it creates 8 speakers instead of 6.
+
+4. **reg_thresh=0.55 is a critical sweet spot**: 0.50 creates too many speakers,
+   0.60 kills 徐子景 registration. The pending pool confirmation threshold must
+   be just right for these similar speakers.
+
+5. **Centroid-based operations are unreliable**: In 384D, average embeddings (centroids)
+   lose discriminative information. Different speakers' centroids have sim 0.70-0.73,
+   while same-speaker centroids should be 0.80+. The gap is too narrow for safe merging.
+
+### Conclusion
+
+v24d with discovery phase (boost=0.07, 50 FULLs) remains the best approach.
+Expected accuracy: **60-65% (median), peaks above 70%** when initialization is
+favorable. This is a +4-7% improvement over the pre-discovery v23 baseline (56.3%).
+
+The ceiling for this encoder combination (CAM++ 192D + WL-ECAPA 192D) on 4 similar
+Chinese male speakers is approximately 65% average, 75% peak. Further improvement
+requires either better embeddings, temporal post-processing, or additional modalities.
+
 ## 2026-07-19 — GPTQ GEMM Optimization Round: 4 Experiments, 1 Win
 
 ### Context

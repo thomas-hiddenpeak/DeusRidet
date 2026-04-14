@@ -901,8 +901,8 @@ void AudioPipeline::process_loop() {
                             // speaker still active, reducing false negatives (fragmentation).
                             float seg_mid_time = (float)(total_samples_in_ - (int64_t)speech_pcm_buf_.size() / 2) / 16000.0f;
                             float time_since_prev = seg_mid_time - prev_full_time_;
-                            static constexpr float kRecencyWindow = 15.0f;  // seconds
-                            static constexpr float kRecencyBonus  = 0.05f;  // threshold reduction
+                            static constexpr float kRecencyWindow = 15.0f;
+                            static constexpr float kRecencyBonus  = 0.05f;
                             bool recency_active = (prev_full_speaker_id_ >= 0 &&
                                                    time_since_prev < kRecencyWindow);
                             if (recency_active) {
@@ -1020,10 +1020,8 @@ void AudioPipeline::process_loop() {
                                 spk_timeline_.push(ev);
                             }
 
-                            // v24c: Aggressive fragment absorption — merge speakers with
-                            // v24c: Absorb disabled — let natural fragmentation happen,
-                            // recency handles short-term consistency, majority vote handles mapping.
-                            // Previous absorb with threshold 0.55 was too aggressive for similar speakers.
+                            // v24d: No absorb — threshold up to 0.73 between different
+                            // speakers makes centroid-based merge unsafe.
 
                             // v24b: Warm-up spectral clustering with temporal fusion.
                             // After collecting kWarmupCount embeddings, run spectral
