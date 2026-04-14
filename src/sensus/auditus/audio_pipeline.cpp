@@ -112,6 +112,14 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
 
     speaker_threshold_.store(cfg_.speaker_threshold, std::memory_order_relaxed);
     speaker_register_threshold_.store(0.55f, std::memory_order_relaxed);
+
+    // Dual-encoder (384D) has diluted cosine similarities compared to single
+    // encoder (192D). Lower the match threshold to compensate.
+    // Typical same-speaker: 0.49-0.73, different speaker: 0.34-0.44 (384D).
+    if (use_dual_encoder_) {
+        speaker_threshold_.store(0.45f, std::memory_order_relaxed);
+        LOG_INFO("AudioPipe", "Dual-encoder mode: match threshold adjusted to 0.45");
+    }
     wavlm_threshold_.store(cfg_.wavlm_threshold, std::memory_order_relaxed);
     unispeech_threshold_.store(cfg_.unispeech_threshold, std::memory_order_relaxed);
     wlecapa_threshold_.store(cfg_.wavlm_ecapa_threshold, std::memory_order_relaxed);
@@ -608,20 +616,26 @@ void AudioPipeline::process_loop() {
                             stats_.wlecapa_exemplars = match.exemplar_count;
                             stats_.wlecapa_hits_above = match.hits_above;
                             // SAAS: track speaker ref for ASR annotation and inheritance.
-                            seg_ref_speaker_id_ = match.speaker_id;
-                            seg_ref_speaker_name_ = match.name;
-                            seg_ref_speaker_sim_ = match.similarity;
+                            // When dual encoder active, EARLY uses wlecapa_db_ (different ID space
+                            // from dual_db_). Don't contaminate seg_ref or timeline.
+                            if (!use_dual_encoder_) {
+                                seg_ref_speaker_id_ = match.speaker_id;
+                                seg_ref_speaker_name_ = match.name;
+                                seg_ref_speaker_sim_ = match.similarity;
+                            }
                             strncpy(stats_.wlecapa_name, match.name.c_str(),
                                     sizeof(stats_.wlecapa_name) - 1);
                             stats_.wlecapa_name[sizeof(stats_.wlecapa_name) - 1] = '\0';
-                            LOG_INFO("AudioPipe", "WL-ECAPA(early): id=%d sim=%.3f %s (%.2fs, %.1fms)",
+                            LOG_INFO("AudioPipe", "WL-ECAPA(early): id=%d sim=%.3f %s (%.2fs, %.1fms)%s",
                                      match.speaker_id, match.similarity,
                                      match.name.empty() ? "(unnamed)" : match.name.c_str(),
                                      early_samples / 16000.0f,
-                                     wlecapa_enc_.last_lat_total_ms());
+                                     wlecapa_enc_.last_lat_total_ms(),
+                                     use_dual_encoder_ ? " [skip timeline: dual mode]" : "");
                             if (on_speaker_) on_speaker_(match);
                             // Timeline: SAAS early extraction event.
-                            {
+                            // Skip when dual encoder active — wlecapa_db_ IDs != dual_db_ IDs.
+                            if (!use_dual_encoder_) {
                                 SpeakerEvent ev{};
                                 ev.audio_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
                                 ev.audio_end   = total_samples_in_;
@@ -699,9 +713,13 @@ void AudioPipeline::process_loop() {
                                         if (!pre_emb.empty()) {
                                             float wt = wlecapa_threshold_.load(std::memory_order_relaxed);
                                             SpeakerMatch m = wlecapa_db_.identify(pre_emb, wt);
-                                            seg_ref_speaker_id_ = m.speaker_id;
-                                            seg_ref_speaker_name_ = m.name;
-                                            seg_ref_speaker_sim_ = m.similarity;
+                                            // When dual encoder active, don't pollute seg_ref with
+                                            // wlecapa_db_ IDs (different ID space from dual_db_).
+                                            if (!use_dual_encoder_) {
+                                                seg_ref_speaker_id_ = m.speaker_id;
+                                                seg_ref_speaker_name_ = m.name;
+                                                seg_ref_speaker_sim_ = m.similarity;
+                                            }
                                             stats_.wlecapa_id = m.speaker_id;
                                             stats_.wlecapa_sim = m.similarity;
                                             stats_.wlecapa_new = m.is_new;
@@ -720,7 +738,8 @@ void AudioPipeline::process_loop() {
                                             if (on_speaker_) on_speaker_(m);
                                             prev_wlecapa_emb_ = pre_emb;
                                             // Timeline: SAAS speaker change event.
-                                            {
+                                            // Skip when dual encoder active — wlecapa_db_ IDs != dual_db_ IDs.
+                                            if (!use_dual_encoder_) {
                                                 int64_t seg_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
                                                 SpeakerEvent ev{};
                                                 ev.audio_start = seg_start;
@@ -797,8 +816,9 @@ void AudioPipeline::process_loop() {
                     prev_seg_speaker_id_ = stats_.speaker_id;
                     prev_seg_speaker_name_ = stats_.speaker_name;
                     prev_seg_speaker_sim_ = stats_.speaker_sim;
-                } else if (stats_.wlecapa_id >= 0) {
+                } else if (!use_dual_encoder_ && stats_.wlecapa_id >= 0) {
                     // Further fallback: use whatever WL-ECAPA ID was last reported.
+                    // Skip when dual encoder active — wlecapa_db_ IDs != dual_db_ IDs.
                     prev_seg_speaker_id_ = stats_.wlecapa_id;
                     prev_seg_speaker_name_ = stats_.wlecapa_name;
                     prev_seg_speaker_sim_ = stats_.wlecapa_sim;
@@ -873,6 +893,14 @@ void AudioPipeline::process_loop() {
                             bool auto_reg = true;
                             float match_thresh = thresh;
 
+                            // Hard speaker cap: stop all new registrations after N speakers.
+                            // Prevents fragmentation that degrades accuracy over time.
+                            int current_count = use_dual_encoder_ ? dual_db_.count() : campp_db_.count();
+                            static constexpr int kMaxSpeakers = 5;
+                            if (current_count >= kMaxSpeakers) {
+                                auto_reg = false;
+                            }
+
                             SpeakerMatch match;
                             if (use_dual_encoder_) {
                                 // Dual-encoder: concatenate CAM++ + WL-ECAPA → 384D.
@@ -897,93 +925,41 @@ void AudioPipeline::process_loop() {
                                                               auto_reg, reg_thresh);
                                 } else {
                                     // WL-ECAPA extraction failed (segment too short).
-                                    // Fallback to CAM++ only.
-                                    match = campp_db_.identify(emb, match_thresh,
-                                                               auto_reg, reg_thresh);
+                                    // When dual encoder active, don't fallback to campp_db_
+                                    // (different ID space). Just skip identification.
+                                    if (!use_dual_encoder_) {
+                                        match = campp_db_.identify(emb, match_thresh,
+                                                                   auto_reg, reg_thresh);
+                                    } else {
+                                        LOG_INFO("AudioPipe", "CAM++ FULL: WL-ECAPA failed, skip dual identify (speech too short)");
+                                    }
                                 }
                             } else {
                                 match = campp_db_.identify(emb, match_thresh,
                                                            auto_reg, reg_thresh);
                             }
 
-                            // Temporal smoothing: majority voting over last N identifications.
-                            int raw_id = match.speaker_id;
-                            if (raw_id >= 0) {
-                                smooth_ring_[smooth_ring_pos_] = raw_id;
-                                smooth_ring_pos_ = (smooth_ring_pos_ + 1) % kSmoothWindowSize;
-
-                                int votes[64] = {};
-                                int max_votes = 0, majority_id = -1;
-                                for (int k = 0; k < kSmoothWindowSize; ++k) {
-                                    int sid = smooth_ring_[k];
-                                    if (sid >= 0 && sid < 64) {
-                                        votes[sid]++;
-                                        if (votes[sid] > max_votes) {
-                                            max_votes = votes[sid];
-                                            majority_id = sid;
-                                        }
-                                    }
-                                }
-                                if (majority_id >= 0 && max_votes >= 2) {
-                                    if (majority_id != smoothed_speaker_id_) {
-                                        LOG_INFO("AudioPipe", "Smooth: switch spk%d → spk%d (votes=%d/%d)",
-                                                 smoothed_speaker_id_, majority_id,
-                                                 max_votes, kSmoothWindowSize);
-                                    }
-                                    smoothed_speaker_id_ = majority_id;
-                                }
-                                if (smoothed_speaker_id_ >= 0) {
-                                    match.speaker_id = smoothed_speaker_id_;
-                                }
-                            }
+                            // No temporal smoothing — push raw identification to timeline.
+                            // Timeline resolve() handles temporal fusion via weighted majority voting.
+                            // Smoothing ring was causing delayed/wrong speaker transitions.
 
                             stats_.speaker_id = match.speaker_id;
                             stats_.speaker_sim = match.similarity;
                             stats_.speaker_new = match.is_new;
-                            stats_.speaker_count = campp_db_.count();
+                            stats_.speaker_count = use_dual_encoder_ ? dual_db_.count() : campp_db_.count();
                             stats_.speaker_active = true;
                             stats_.speaker_exemplars = match.exemplar_count;
                             stats_.speaker_hits_above = match.hits_above;
 
                             campp_full_count_++;
-
-                            // --- V21b: Periodic absorb only (no speaker cap) ---
-                            // Merge speaker fragments with centroid similarity > 0.70.
-                            // V21 lesson: speaker cap forces destructive low-threshold merges.
-                            {
-                                static constexpr int kAbsorbInterval = 30;
-                                static constexpr float kPeriodicMergeThresh = 0.70f;
-                                auto& active_db = use_dual_encoder_ ? dual_db_ : campp_db_;
-
-                                if (campp_full_count_ % kAbsorbInterval == 0) {
-                                    int merged = active_db.absorb_fragments(kPeriodicMergeThresh);
-                                    if (merged > 0) {
-                                        LOG_INFO("AudioPipe", "V21b absorb: merged %d fragments "
-                                                 "(thresh=%.2f, now %d speakers)",
-                                                 merged, kPeriodicMergeThresh, active_db.count());
-                                        // Reset smoothing ring to prevent stale IDs.
-                                        for (int k = 0; k < kSmoothWindowSize; k++) smooth_ring_[k] = -1;
-                                        smooth_ring_pos_ = 0;
-                                        smoothed_speaker_id_ = -1;
-                                        if (raw_id >= 0) {
-                                            smooth_ring_[0] = raw_id;
-                                            smooth_ring_pos_ = 1;
-                                            smoothed_speaker_id_ = raw_id;
-                                            match.speaker_id = raw_id;
-                                        }
-                                    }
-                                }
-                            }
-
                             strncpy(stats_.speaker_name, match.name.c_str(),
                                     sizeof(stats_.speaker_name) - 1);
                             stats_.speaker_name[sizeof(stats_.speaker_name) - 1] = '\0';
-                            LOG_INFO("AudioPipe", "CAM++: raw=%d smoothed=%d sim=%.3f %s%s (fbank=%d, ex=%d, spks=%d)",
-                                     raw_id, match.speaker_id, match.similarity,
+                            LOG_INFO("AudioPipe", "CAM++: id=%d sim=%.3f %s%s (fbank=%d, ex=%d)",
+                                     match.speaker_id, match.similarity,
                                      match.is_new ? "NEW " : "",
                                      match.name.empty() ? "(unnamed)" : match.name.c_str(),
-                                     fbank_frames, match.exemplar_count,
-                                     (use_dual_encoder_ ? dual_db_.count() : campp_db_.count()));
+                                     fbank_frames, match.exemplar_count);
                             if (on_speaker_) on_speaker_(match);
 
                             // SAAS: feed CAM++ result into speaker timeline.
@@ -1187,9 +1163,13 @@ void AudioPipeline::process_loop() {
                         stats_.wlecapa_lat_total_ms   = wlecapa_enc_.last_lat_total_ms();
 
                         // SAAS: track speaker ref for ASR annotation and inheritance.
-                        seg_ref_speaker_id_ = match.speaker_id;
-                        seg_ref_speaker_name_ = match.name;
-                        seg_ref_speaker_sim_ = match.similarity;
+                        // When dual encoder active, dual_db_ FULL path already sets seg_ref.
+                        // Don't overwrite with wlecapa_db_ IDs.
+                        if (!use_dual_encoder_) {
+                            seg_ref_speaker_id_ = match.speaker_id;
+                            seg_ref_speaker_name_ = match.name;
+                            seg_ref_speaker_sim_ = match.similarity;
+                        }
 
                         // Change detection: cosine similarity with previous segment embedding.
                         if (!prev_wlecapa_emb_.empty() && prev_wlecapa_emb_.size() == emb.size()) {
@@ -1214,7 +1194,8 @@ void AudioPipeline::process_loop() {
                                  speech_samples, wlecapa_enc_.last_lat_total_ms());
                         if (on_speaker_) on_speaker_(match);
                         // Timeline: SAAS full end-of-segment event (highest authority).
-                        {
+                        // Skip when dual encoder active — dual_db_ FULL path already pushed.
+                        if (!use_dual_encoder_) {
                             int64_t seg_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
                             SpeakerEvent ev{};
                             ev.audio_start = seg_start;
@@ -1250,8 +1231,10 @@ void AudioPipeline::process_loop() {
             tracker_.feed(pcm_buf.data(), n_samples, tracker_vad);
             if (tracker_.check()) {
                 // Timeline: Tracker identification event.
+                // Skip when dual encoder active — tracker uses its own DB with
+                // different speaker IDs from dual_db_.
                 auto& ts = tracker_.stats();
-                if (ts.speaker_id >= 0) {
+                if (ts.speaker_id >= 0 && !use_dual_encoder_) {
                     int win = tracker_.window_ms() * 16;  // window in samples
                     SpeakerEvent ev{};
                     ev.audio_start = total_samples_in_ - win;
