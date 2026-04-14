@@ -304,6 +304,11 @@ inline ClusterResult spectral_cluster(
     // ===== Step 5: Eigengap K-selection =====
     int optimal_k = cfg.min_k;
     {
+        // Log eigenvalues for debugging K-selection.
+        LOG_INFO("SpCluster", "Eigenvalues (top-%d):", actual_max);
+        for (int k = 0; k < actual_max && k < 8; ++k)
+            LOG_INFO("SpCluster", "  λ[%d] = %.6f", k, eigvals[k]);
+
         float max_gap_score = 0;
         for (int k = 0; k + 1 < actual_max; ++k) {
             float gap = eigvals[k] - eigvals[k + 1];
@@ -311,11 +316,14 @@ inline ClusterResult spectral_cluster(
             float rel_gap = gap / (eigvals[0] + 1e-12f);
             float nme = gap / (k + 1);
             float score = nme + 0.3f * rel_gap;
+            LOG_INFO("SpCluster", "  gap[%d→%d]: gap=%.6f rel=%.4f nme=%.6f score=%.6f",
+                     k, k + 1, gap, rel_gap, nme, score);
             if (score > max_gap_score) {
                 max_gap_score = score;
                 optimal_k = k + 1;
             }
         }
+        LOG_INFO("SpCluster", "Optimal K=%d (max_gap_score=%.6f)", optimal_k, max_gap_score);
         optimal_k = std::max(cfg.min_k, std::min(optimal_k, cfg.max_k));
     }
 
@@ -568,6 +576,8 @@ inline ClusterResult spectral_cluster(
             if (best_sim >= cfg.merge_threshold && best_a >= 0) {
                 int ca = active[best_a], cb = active[best_b];
                 int na = ccnt[ca], nb = ccnt[cb];
+                LOG_INFO("SpCluster", "Merge: cluster %d (%d) + cluster %d (%d), sim=%.4f",
+                         ca, na, cb, nb, best_sim);
                 // Merge cb into ca: weighted centroid average.
                 for (int d = 0; d < dim; ++d) {
                     result.centroids[ca][d] = (result.centroids[ca][d] * na +

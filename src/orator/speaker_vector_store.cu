@@ -770,6 +770,17 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
     return best;
 }
 
+bool SpeakerVectorStore::add_exemplar(int id, const std::vector<float>& embedding) {
+    if ((int)embedding.size() != dim_) return false;
+    std::lock_guard<std::mutex> lk(mu_);
+    int idx = id_to_idx(id);
+    if (idx < 0) return false;
+    upload_query(embedding.data());
+    gpu_add_exemplar(idx);
+    cudaStreamSynchronize(stream_);
+    return true;
+}
+
 int SpeakerVectorStore::register_speaker(const std::string& name,
                                           const std::vector<float>& embedding) {
     if ((int)embedding.size() != dim_) return -1;

@@ -61,7 +61,7 @@ struct AudioPipelineConfig {
     std::string asr_model_path;            // Qwen3-ASR model directory (empty = disabled)
     size_t ring_buffer_bytes = 1 << 20;  // 1 MB (~32 seconds of int16 mono 16kHz)
     int process_chunk_ms     = 100;      // process in 100ms chunks (10 mel frames)
-    float speaker_threshold  = 0.45f;    // dual 384D cosine sim match threshold (v24)
+    float speaker_threshold  = 0.45f;    // dual 384D cosine sim match threshold (v22c level)
     float wavlm_threshold    = 0.80f;    // WavLM Gemm threshold (same ~0.86-0.93, diff ~0.36-0.76)
     float unispeech_threshold= 0.55f;    // ECAPA-TDNN threshold (same ~0.57, diff ~0.03-0.45)
 };
@@ -832,7 +832,7 @@ private:
     // Dual-encoder warm-up: collect both CAM++ (192D) and WL-ECAPA (192D)
     // embeddings, concatenate to 384D for better clustering, then store
     // only CAM++ centroids for online matching.
-    static constexpr int kWarmupCount = 999999;  // effectively disabled — greedy mode
+    static constexpr int kWarmupCount = 999999;  // v24c: disable warmup clustering
     std::vector<std::vector<float>> warmup_embeddings_;       // CAM++ 192D
     std::vector<std::vector<float>> warmup_wlecapa_embs_;     // WL-ECAPA 192D (if available)
     std::vector<float> warmup_timestamps_;   // mid-time in seconds
@@ -862,7 +862,7 @@ private:
     std::atomic<bool> enable_unispeech_{false};
     std::atomic<bool> enable_wlecapa_{false};    // WL-ECAPA — disabled (CAM++ is primary)
     std::atomic<float> speaker_threshold_{0.50f}; // CAM++ matching threshold
-    std::atomic<float> speaker_register_threshold_{0.55f}; // CAM++ registration threshold (pending pool)
+    std::atomic<float> speaker_register_threshold_{0.55f}; // pending pool confirmation threshold
     std::atomic<float> wavlm_threshold_{0.80f};
     std::atomic<float> unispeech_threshold_{0.55f};
     std::atomic<float> wlecapa_threshold_{0.55f};

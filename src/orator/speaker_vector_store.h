@@ -115,6 +115,10 @@ public:
     // Load store from directory. Replaces current contents.
     bool load(const std::string& dir);
 
+    // Add an extra exemplar embedding for an existing speaker (by external ID).
+    // Returns true if added, false if ID not found or dim mismatch.
+    bool add_exemplar(int id, const std::vector<float>& embedding);
+
     // ---- Accessors ----
 
     int dim() const { return dim_; }
