@@ -142,7 +142,9 @@ __global__ void istft_ola_kernel(
     if (out_pos >= out_len) return;
 
     float w = window[k];
-    float val = frames[frame * fft_len + k] * w;
+    // cuFFT C2R doesn't normalize by N — fold 1/N into OLA
+    float inv_n = 1.0f / (float)fft_len;
+    float val = frames[frame * fft_len + k] * w * inv_n;
     float w2 = w * w;
 
     atomicAdd(&ola_buf[out_pos], val);
@@ -295,6 +297,46 @@ void launch_bias_add(float* d_data, const float* d_bias,
     int total = C * HW;
     bias_add_kernel<<<div_ceil(total, BLOCK), BLOCK, 0, stream>>>(
         d_data, d_bias, C, HW);
+}
+
+// im2col: unroll input [C_in, H, W] into column matrix [C_in*kH*kW, H_out*W_out]
+// for use with cuBLAS GEMM to compute Conv2d without cuDNN
+__global__ void im2col_kernel(
+    const float* __restrict__ data_im,
+    float* __restrict__ data_col,
+    int C_in, int H, int W,
+    int kH, int kW, int sH, int sW, int pH, int pW,
+    int H_out, int W_out)
+{
+    int total = C_in * kH * kW * H_out * W_out;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+
+    int w_col = idx % W_out;
+    int h_col = (idx / W_out) % H_out;
+    int c_col = idx / (W_out * H_out);  // which element in the unrolled filter
+
+    int c_im = c_col / (kH * kW);
+    int kh = (c_col / kW) % kH;
+    int kw = c_col % kW;
+
+    int h_im = h_col * sH - pH + kh;
+    int w_im = w_col * sW - pW + kw;
+
+    if (h_im >= 0 && h_im < H && w_im >= 0 && w_im < W) {
+        data_col[idx] = data_im[(c_im * H + h_im) * W + w_im];
+    } else {
+        data_col[idx] = 0.0f;
+    }
+}
+
+void launch_im2col(const float* d_im, float* d_col,
+                   int C_in, int H, int W,
+                   int kH, int kW, int sH, int sW, int pH, int pW,
+                   int H_out, int W_out, cudaStream_t stream) {
+    int total = C_in * kH * kW * H_out * W_out;
+    im2col_kernel<<<div_ceil(total, BLOCK), BLOCK, 0, stream>>>(
+        d_im, d_col, C_in, H, W, kH, kW, sH, sW, pH, pW, H_out, W_out);
 }
 
 __global__ void tanh_kernel(float* data, int n) {

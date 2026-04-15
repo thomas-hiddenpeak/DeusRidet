@@ -306,6 +306,12 @@ void launch_add_inplace(float* a, const float* b, int n,
 void launch_bias_add(float* d_data, const float* d_bias,
                      int C, int HW, cudaStream_t stream);
 
+// im2col: unroll input [C_in, H, W] patches into [C_in*kH*kW, H_out*W_out]
+void launch_im2col(const float* d_im, float* d_col,
+                   int C_in, int H, int W,
+                   int kH, int kW, int sH, int sW, int pH, int pW,
+                   int H_out, int W_out, cudaStream_t stream);
+
 // tanh activation in-place
 void launch_tanh(float* d_data, int n, cudaStream_t stream);
 

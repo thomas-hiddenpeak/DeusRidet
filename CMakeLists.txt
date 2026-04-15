@@ -147,3 +147,15 @@ set_target_properties(deusridet PROPERTIES
     INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
     LINK_FLAGS "-Wl,--disable-new-dtags"
 )
+
+# ============================================================================
+# Test: FRCRN GPU standalone test
+# ============================================================================
+add_executable(test_frcrn_gpu tests/test_frcrn_gpu.cpp)
+target_include_directories(test_frcrn_gpu PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_frcrn_gpu PRIVATE sensus machina communis CUDA::cudart CUDA::cublas CUDA::cufft cudnn)
+set_target_properties(test_frcrn_gpu PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)

@@ -9,7 +9,8 @@
 //   6. Complex mask application
 //   7. iSTFT (cuFFT C2R + overlap-add)
 //
-// Uses cuDNN for Conv2d/ConvTranspose2d, cuBLAS for linear, cuFFT for STFT,
+// Uses im2col + cuBLAS GEMM for Conv2d (cuDNN buggy on Orin SM87),
+// cuDNN for ConvTranspose2d, cuBLAS for linear, cuFFT for STFT,
 // and custom CUDA kernels for everything else.
 //
 // Adapted from ModelScope iic/speech_frcrn_ans_cirm_16k (Apache-2.0).
@@ -162,11 +163,14 @@ bool FrcrnGpu::init(const std::string& weights_dir, int max_samples,
     stream_ = stream;
     max_samples_ = max_samples;
 
+    // Add edge padding for center-style STFT (kWinLen/2 on each side)
+    int padded_max = max_samples + kWinLen;
+
     // Pad to hop alignment
-    if (max_samples_ % kHop != 0) {
-        max_samples_ = ((max_samples_ / kHop) + 1) * kHop;
+    if (padded_max % kHop != 0) {
+        padded_max = ((padded_max / kHop) + 1) * kHop;
     }
-    max_frames_ = (max_samples_ - kWinLen) / kHop + 1;
+    max_frames_ = (padded_max - kWinLen) / kHop + 1;
 
     LOG_INFO("FRCRN", "Initializing: max_samples=%d, max_frames=%d",
              max_samples_, max_frames_);
@@ -210,7 +214,8 @@ bool FrcrnGpu::init(const std::string& weights_dir, int max_samples,
     }
 
     // Allocate iSTFT buffers
-    int ola_len = max_samples_ + kWinLen;
+    // OLA length must accommodate edge-padded signal
+    int ola_len = padded_max + kWinLen;
     CUDA_CHECK(cudaMalloc(&d_istft_in_, max_frames_ * kFreqBins * sizeof(cufftComplex)));
     CUDA_CHECK(cudaMalloc(&d_istft_out_, max_frames_ * kFftLen * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_ola_buf_, ola_len * sizeof(float)));
@@ -247,8 +252,8 @@ bool FrcrnGpu::init(const std::string& weights_dir, int max_samples,
     CUDA_CHECK(cudaMalloc(&d_mask2_re_, mask_size * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_mask2_im_, mask_size * sizeof(float)));
 
-    // Host staging buffer
-    CUDA_CHECK(cudaMalloc(&d_pcm_staging_, max_samples_ * sizeof(float)));
+    // Host staging buffer (large enough for edge-padded signal)
+    CUDA_CHECK(cudaMalloc(&d_pcm_staging_, (max_samples_ + kWinLen + kHop) * sizeof(float)));
 
     initialized_ = true;
     LOG_INFO("FRCRN", "GPU initialization complete");
@@ -300,7 +305,7 @@ void FrcrnGpu::forward_istft(int n_frames, float* d_pcm_out, int n_samples) {
 }
 
 // ============================================================================
-// cuDNN Conv2d
+// Conv2d via im2col + cuBLAS GEMM (replaces cuDNN which has bugs on Orin SM87)
 // ============================================================================
 
 void FrcrnGpu::forward_conv2d(
@@ -313,58 +318,44 @@ void FrcrnGpu::forward_conv2d(
     H_out = (H + 2 * pH - kH) / sH + 1;
     W_out = (W + 2 * pW - kW) / sW + 1;
 
-    cudnnTensorDescriptor_t in_desc, out_desc;
-    cudnnFilterDescriptor_t filt_desc;
-    cudnnConvolutionDescriptor_t conv_desc;
+    int K = C_in * kH * kW;      // unrolled filter dimension
+    int N = H_out * W_out;        // spatial output dimension
 
-    cudnnCreateTensorDescriptor(&in_desc);
-    cudnnCreateTensorDescriptor(&out_desc);
-    cudnnCreateFilterDescriptor(&filt_desc);
-    cudnnCreateConvolutionDescriptor(&conv_desc);
-
-    CUDNN_CHECK(cudnnSetTensor4dDescriptor(in_desc, CUDNN_TENSOR_NCHW,
-        CUDNN_DATA_FLOAT, 1, C_in, H, W));
-    CUDNN_CHECK(cudnnSetTensor4dDescriptor(out_desc, CUDNN_TENSOR_NCHW,
-        CUDNN_DATA_FLOAT, 1, C_out, H_out, W_out));
-    CUDNN_CHECK(cudnnSetFilter4dDescriptor(filt_desc, CUDNN_DATA_FLOAT,
-        CUDNN_TENSOR_NCHW, C_out, C_in, kH, kW));
-    CUDNN_CHECK(cudnnSetConvolution2dDescriptor(conv_desc,
-        pH, pW, sH, sW, 1, 1,
-        CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
-    cudnnSetConvolutionMathType(conv_desc, CUDNN_TENSOR_OP_MATH);
-
-    // Find best algorithm
-    int returned = 0;
-    cudnnConvolutionFwdAlgoPerf_t algo_perf;
-    cudnnGetConvolutionForwardAlgorithm_v7(cudnn_, in_desc, filt_desc,
-        conv_desc, out_desc, 1, &returned, &algo_perf);
-    auto algo = algo_perf.algo;
-
-    // Ensure workspace
-    size_t ws_need = 0;
-    cudnnGetConvolutionForwardWorkspaceSize(cudnn_, in_desc, filt_desc,
-        conv_desc, out_desc, algo, &ws_need);
-    if (ws_need > cudnn_ws_size_) {
+    // Ensure im2col workspace is large enough
+    size_t col_bytes = (size_t)K * N * sizeof(float);
+    if (col_bytes > cudnn_ws_size_) {
         if (d_cudnn_ws_) cudaFree(d_cudnn_ws_);
-        cudaMalloc(&d_cudnn_ws_, ws_need);
-        cudnn_ws_size_ = ws_need;
+        cudaMalloc(&d_cudnn_ws_, col_bytes);
+        cudnn_ws_size_ = col_bytes;
     }
 
-    float alpha = 1.0f, beta = 0.0f;
-    CUDNN_CHECK(cudnnConvolutionForward(cudnn_, &alpha,
-        in_desc, d_in, filt_desc, d_weight,
-        conv_desc, algo, d_cudnn_ws_, ws_need,
-        &beta, out_desc, d_out));
+    float* d_col = (float*)d_cudnn_ws_;
 
-    // Add bias
+    // Step 1: im2col — unroll input patches into column matrix [K, N]
+    launch_im2col(d_in, d_col, C_in, H, W,
+                  kH, kW, sH, sW, pH, pW,
+                  H_out, W_out, stream_);
+
+    // Step 2: GEMM — output [C_out, N] = weight [C_out, K] × col [K, N]
+    // Both stored in row-major. Using cuBLAS column-major:
+    //   row-major A[M,K] == col-major A^T[K,M]
+    //   out^T[N, C_out] = col^T[N, K] * weight^T[K, C_out]
+    //   cuBLAS: C(m,n) = A(m,k)*B(k,n),  m=N, n=C_out, k=K
+    float alpha = 1.0f, beta = 0.0f;
+    cublasSgemm(cublas_, CUBLAS_OP_N, CUBLAS_OP_N,
+                N,       // m
+                C_out,   // n
+                K,       // k
+                &alpha,
+                d_col, N,       // A = col^T in col-major, lda = N
+                d_weight, K,    // B = weight^T in col-major, ldb = K
+                &beta,
+                d_out, N);      // C = out^T in col-major, ldc = N
+
+    // Step 3: Add bias
     if (d_bias) {
         launch_bias_add(d_out, d_bias, C_out, H_out * W_out, stream_);
     }
-
-    cudnnDestroyTensorDescriptor(in_desc);
-    cudnnDestroyTensorDescriptor(out_desc);
-    cudnnDestroyFilterDescriptor(filt_desc);
-    cudnnDestroyConvolutionDescriptor(conv_desc);
 }
 
 // ============================================================================
@@ -401,15 +392,24 @@ void FrcrnGpu::forward_conv_transpose2d(
     CUDNN_CHECK(cudnnSetConvolution2dDescriptor(conv_desc,
         pH, pW, sH, sW, 1, 1,
         CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
-    cudnnSetConvolutionMathType(conv_desc, CUDNN_TENSOR_OP_MATH);
 
-    // Find best algorithm for backward data
+    // Find best algorithm for backward data — request multiple
+    const int kMaxAlgos = 8;
     int returned = 0;
-    cudnnConvolutionBwdDataAlgoPerf_t algo_perf;
+    cudnnConvolutionBwdDataAlgoPerf_t algo_perfs[kMaxAlgos];
     cudnnGetConvolutionBackwardDataAlgorithm_v7(cudnn_,
         filt_desc, in_desc, conv_desc, out_desc,
-        1, &returned, &algo_perf);
-    auto algo = algo_perf.algo;
+        kMaxAlgos, &returned, algo_perfs);
+
+    cudnnConvolutionBwdDataAlgo_t algo = CUDNN_CONVOLUTION_BWD_DATA_ALGO_0;
+    bool found = false;
+    for (int a = 0; a < returned; a++) {
+        if (algo_perfs[a].status == CUDNN_STATUS_SUCCESS) {
+            algo = algo_perfs[a].algo;
+            found = true;
+            break;
+        }
+    }
 
     size_t ws_need = 0;
     cudnnGetConvolutionBackwardDataWorkspaceSize(cudnn_,
@@ -421,10 +421,38 @@ void FrcrnGpu::forward_conv_transpose2d(
     }
 
     float alpha = 1.0f, beta = 0.0f;
-    CUDNN_CHECK(cudnnConvolutionBackwardData(cudnn_, &alpha,
+    cudnnStatus_t bwd_st = cudnnConvolutionBackwardData(cudnn_, &alpha,
         filt_desc, d_weight, in_desc, d_in,
         conv_desc, algo, d_cudnn_ws_, ws_need,
-        &beta, out_desc, d_out));
+        &beta, out_desc, d_out);
+
+    if (bwd_st != CUDNN_STATUS_SUCCESS) {
+        LOG_ERROR("FRCRN", "ConvT2d FAILED: Cin=%d Cout=%d H=%d W=%d kH=%d kW=%d sH=%d sW=%d pH=%d pW=%d algo=%d returned=%d err=%s",
+                  C_in, C_out, H, W, kH, kW, sH, sW, pH, pW, (int)algo, returned, cudnnGetErrorString(bwd_st));
+        for (int a = 0; a < returned; a++) {
+            if (algo_perfs[a].algo == algo) continue;
+            size_t ws2 = 0;
+            cudnnGetConvolutionBackwardDataWorkspaceSize(cudnn_,
+                filt_desc, in_desc, conv_desc, out_desc, algo_perfs[a].algo, &ws2);
+            if (ws2 > cudnn_ws_size_) {
+                if (d_cudnn_ws_) cudaFree(d_cudnn_ws_);
+                cudaMalloc(&d_cudnn_ws_, ws2);
+                cudnn_ws_size_ = ws2;
+            }
+            bwd_st = cudnnConvolutionBackwardData(cudnn_, &alpha,
+                filt_desc, d_weight, in_desc, d_in,
+                conv_desc, algo_perfs[a].algo, d_cudnn_ws_, ws2,
+                &beta, out_desc, d_out);
+            if (bwd_st == CUDNN_STATUS_SUCCESS) {
+                LOG_INFO("FRCRN", "ConvT2d retry OK with algo=%d", (int)algo_perfs[a].algo);
+                break;
+            }
+        }
+        if (bwd_st != CUDNN_STATUS_SUCCESS) {
+            LOG_ERROR("FRCRN", "ConvT2d ALL algos failed for Cin=%d Cout=%d H=%d W=%d kH=%d kW=%d",
+                      C_in, C_out, H, W, kH, kW);
+        }
+    }
 
     if (d_bias) {
         launch_bias_add(d_out, d_bias, C_out, H_out * W_out, stream_);
@@ -1000,6 +1028,7 @@ void FrcrnGpu::forward_unet(
     forward_complex_fsmn(cur_re, cur_im, cur_C, cur_H, cur_W,
                          prefix + ".fsmn");
 
+
     // ---- Decoder ----
     for (int i = 0; i < kNumStages; i++) {
         // Decoder: ComplexConvTranspose2d + ComplexBN + LeakyReLU
@@ -1088,41 +1117,65 @@ int FrcrnGpu::enhance(const float* d_pcm_in, float* d_pcm_out, int n_samples) {
 
     auto t0 = std::chrono::steady_clock::now();
 
+    // Edge padding: kWinLen/2 zeros at start and end (center-style STFT)
+    int edge_pad = kWinLen / 2;  // 320
+    int total = n_samples + 2 * edge_pad;
+
     // Pad to hop alignment
-    int padded = n_samples;
+    int padded = total;
     if (padded % kHop != 0) {
         padded = ((padded / kHop) + 1) * kHop;
     }
     if (padded < kWinLen) padded = kWinLen;
 
-    // If padded > input, we need a padded buffer
-    const float* pcm = d_pcm_in;
-    if (padded > n_samples) {
-        CUDA_CHECK(cudaMemcpyAsync(d_pcm_staging_, d_pcm_in,
+    // Build padded buffer: [zeros | input | zeros]
+    // Handle potential aliasing: d_pcm_in might point into d_pcm_staging_
+    // Use device-to-device memmove-safe approach: copy input first, then zero edges
+    if (d_pcm_in != d_pcm_staging_ + edge_pad) {
+        // If source != dest, can copy directly then zero edges
+        CUDA_CHECK(cudaMemcpyAsync(d_pcm_staging_ + edge_pad, d_pcm_in,
                                    n_samples * sizeof(float),
                                    cudaMemcpyDeviceToDevice, stream_));
-        CUDA_CHECK(cudaMemsetAsync(d_pcm_staging_ + n_samples, 0,
-                                   (padded - n_samples) * sizeof(float), stream_));
-        pcm = d_pcm_staging_;
     }
+    // If d_pcm_in == d_pcm_staging_ (from enhance_host), we need memmove.
+    // Since edge_pad > 0 and source starts before dest, this is a forward
+    // overlapping copy — use the OLA buffer as a temporary.
+    else if (d_pcm_in == d_pcm_staging_) {
+        CUDA_CHECK(cudaMemcpyAsync(d_ola_buf_, d_pcm_in,
+                                   n_samples * sizeof(float),
+                                   cudaMemcpyDeviceToDevice, stream_));
+        CUDA_CHECK(cudaMemcpyAsync(d_pcm_staging_ + edge_pad, d_ola_buf_,
+                                   n_samples * sizeof(float),
+                                   cudaMemcpyDeviceToDevice, stream_));
+    }
+    // Zero the edges
+    CUDA_CHECK(cudaMemsetAsync(d_pcm_staging_, 0, edge_pad * sizeof(float), stream_));
+    int trail_start = edge_pad + n_samples;
+    if (trail_start < padded) {
+        CUDA_CHECK(cudaMemsetAsync(d_pcm_staging_ + trail_start, 0,
+                                   (padded - trail_start) * sizeof(float), stream_));
+    }
+
+    const float* pcm = d_pcm_staging_;
 
     // 1. STFT
     int n_frames = 0;
     forward_stft(pcm, padded, n_frames);
 
     // spec_re, spec_im now contain [kFreqBins, n_frames]
+    int spec_n = kFreqBins * n_frames;
 
     // 2. Reshape: [kFreqBins, n_frames] → [1, kFreqBins, n_frames] (already in this layout)
     // UNet input is [1, kFreqBins, n_frames] where C=1, H=kFreqBins, W=n_frames
 
     // 3. UNet1: spec → mask1 (output to d_mask1_re/im, then we need unet1_raw for UNet2)
     // Store UNet1 raw output before tanh
-    int spec_n = kFreqBins * n_frames;
     float* unet1_re = d_mask1_re_;
     float* unet1_im = d_mask1_im_;
 
     forward_unet(d_spec_re_, d_spec_im_, unet1_re, unet1_im,
                  kFreqBins, n_frames, "unet");
+
 
     // 4. mask1 = tanh(unet1_out)
     // But we also need the raw unet1 output as input to unet2!
@@ -1145,11 +1198,14 @@ int FrcrnGpu::enhance(const float* d_pcm_in, float* d_pcm_out, int n_samples) {
     forward_unet(unet1_raw_re, unet1_raw_im, unet2_re, unet2_im,
                  kFreqBins, n_frames, "unet2");
 
+
     // 6. mask2 = mask1 + tanh(unet2_out)
     launch_tanh(unet2_re, spec_n, stream_);
     launch_tanh(unet2_im, spec_n, stream_);
+
     launch_add_inplace(unet2_re, unet1_re, spec_n, stream_);
     launch_add_inplace(unet2_im, unet1_im, spec_n, stream_);
+
     // d_mask2_re/im now contains final mask
 
     // 7. Apply complex mask: est_spec = spec * mask2
@@ -1158,8 +1214,14 @@ int FrcrnGpu::enhance(const float* d_pcm_in, float* d_pcm_out, int n_samples) {
                         d_spec_re_, d_spec_im_,  // in-place overwrite
                         spec_n, stream_);
 
-    // 8. iSTFT
-    forward_istft(n_frames, d_pcm_out, n_samples);
+
+    // 8. iSTFT → padded output into staging buffer
+    forward_istft(n_frames, d_pcm_staging_, padded);
+
+    // 9. Trim edge padding: copy [edge_pad, edge_pad + n_samples) to output
+    CUDA_CHECK(cudaMemcpyAsync(d_pcm_out, d_pcm_staging_ + edge_pad,
+                               n_samples * sizeof(float),
+                               cudaMemcpyDeviceToDevice, stream_));
 
     CUDA_CHECK(cudaStreamSynchronize(stream_));
 
