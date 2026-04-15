@@ -12,6 +12,7 @@
 #pragma once
 
 #include "mel_gpu.h"
+#include "frcrn_enhancer.h"
 #include "silero_vad.h"
 #include "fsmn_vad.h"
 #include "fsmn_fbank_gpu.h"
@@ -50,6 +51,7 @@ enum class VadSource : int {
 struct AudioPipelineConfig {
     MelConfig mel;
     VadConfig vad;
+    FrcrnConfig frcrn;                  // FRCRN speech enhancement (P0)
     SileroVadConfig silero;             // Silero VAD model config
     FsmnVadConfig fsmn;                 // FSMN VAD model config
     TenVadConfig  ten;                  // TEN VAD model config
@@ -73,6 +75,9 @@ struct AudioPipelineStats {
     float    last_rms;         // latest frame RMS (linear)
     float    last_energy;      // latest frame mean log-energy
     bool     is_speech;        // current energy VAD state
+    // FRCRN speech enhancement.
+    bool     frcrn_active;     // true when FRCRN is processing
+    float    frcrn_lat_ms;     // latest FRCRN inference latency (ms)
     // Silero VAD.
     float    silero_prob;      // latest Silero speech probability [0,1]
     bool     silero_speech;    // Silero VAD speech state
@@ -617,6 +622,11 @@ public:
     float silero_threshold() const { return silero_.threshold(); }
     float silero_prob() const { return stats_.silero_prob; }
 
+    // FRCRN speech enhancement enable/disable (thread-safe).
+    void set_frcrn_enabled(bool e) { enable_frcrn_.store(e, std::memory_order_relaxed); }
+    bool frcrn_enabled() const { return enable_frcrn_.load(std::memory_order_relaxed); }
+    bool frcrn_loaded() const { return frcrn_.initialized(); }
+
     // FSMN VAD threshold.
     void set_fsmn_threshold(float t) { fsmn_.set_threshold(t); }
     float fsmn_threshold() const { return fsmn_.threshold(); }
@@ -801,6 +811,7 @@ private:
 
     RingBuffer* ring_ = nullptr;
     MelSpectrogram mel_;
+    FrcrnEnhancer frcrn_;
     VoiceActivityDetector vad_;
     SileroVad silero_;
     FsmnVad fsmn_;
@@ -855,6 +866,7 @@ private:
     std::atomic<int> vad_source_{static_cast<int>(VadSource::SILERO)};
     std::atomic<int> asr_vad_source_{static_cast<int>(VadSource::SILERO)};  // ASR defaults to SILERO (same as speaker)
     std::atomic<bool> enable_silero_{true};
+    std::atomic<bool> enable_frcrn_{false};    // FRCRN speech enhancement (P0) — disabled until TRT acceleration
     std::atomic<bool> enable_fsmn_{false};
     std::atomic<bool> enable_ten_{false};
     std::atomic<bool> enable_speaker_{true};    // CAM++ — primary SAAS encoder

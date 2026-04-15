@@ -1404,6 +1404,10 @@ int cmd_test_ws(const std::string& webui_dir,
     audio_cfg.silero.model_path = std::string(getenv("HOME") ? getenv("HOME") : "/home/rm01")
                                   + "/models/dev/vad/silero_vad.onnx";
 
+    // Configure FRCRN speech enhancement (CUDA GPU, safetensors weights).
+    audio_cfg.frcrn.weights_dir = std::string(getenv("HOME") ? getenv("HOME") : "/home/rm01")
+                                  + "/models/dev/vad/frcrn_weights";
+
     // Configure FSMN VAD model paths.
     std::string home = getenv("HOME") ? getenv("HOME") : "/home/rm01";
     audio_cfg.fsmn.model_path = home + "/models/dev/vad/fsmn/model_quant.onnx";
@@ -1611,11 +1615,12 @@ int cmd_test_ws(const std::string& webui_dir,
         lists_json += R"({"model":"ECAPA-TDNN","speakers":)" + speaker_list_json(audio.unispeech_db()) + "},";
         lists_json += R"({"model":"WL-ECAPA","speakers":)" + speaker_list_json(audio.wlecapa_db()) + "}]";
 
-        char json[2800];
+        char json[3200];
         snprintf(json, sizeof(json),
             R"({"type":"pipeline_stats","pcm_samples":%lu,"mel_frames":%lu,)"
             R"("speech_frames":%lu,"rms":%.4f,"energy":%.2f,"is_speech":%s,)"
             R"("threshold":%.2f,"noise_floor":%.2f,"gain":%.1f,)"
+            R"("frcrn_active":%s,"frcrn_enabled":%s,"frcrn_loaded":%s,"frcrn_lat_ms":%.1f,)"
             R"("silero_prob":%.3f,"silero_speech":%s,"silero_threshold":%.2f,"silero_enabled":%s,)"
             R"("fsmn_prob":%.3f,"fsmn_speech":%s,"fsmn_threshold":%.2f,"fsmn_enabled":%s,)"
             R"("ten_prob":%.3f,"ten_speech":%s,"ten_threshold":%.2f,"ten_enabled":%s,)"
@@ -1636,6 +1641,10 @@ int cmd_test_ws(const std::string& webui_dir,
             st.is_speech ? "true" : "false",
             audio.vad_threshold(), audio.vad_noise_floor(),
             audio.gain(),
+            st.frcrn_active ? "true" : "false",
+            audio.frcrn_enabled() ? "true" : "false",
+            audio.frcrn_loaded() ? "true" : "false",
+            st.frcrn_lat_ms,
             st.silero_prob, st.silero_speech ? "true" : "false",
             audio.silero_threshold(),
             audio.silero_enabled() ? "true" : "false",
@@ -2048,6 +2057,14 @@ int cmd_test_ws(const std::string& webui_dir,
                 R"({"type":"silero_enable","enabled":%s})", on ? "true" : "false");
             server.send_text(fd, json);
             printf("[test-ws] Silero %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        } else if (msg == "frcrn_enable:on" || msg == "frcrn_enable:off") {
+            bool on = msg.back() == 'n';
+            audio.set_frcrn_enabled(on);
+            char json[128];
+            snprintf(json, sizeof(json),
+                R"({"type":"frcrn_enable","enabled":%s})", on ? "true" : "false");
+            server.send_text(fd, json);
+            printf("[test-ws] FRCRN %s (fd=%d)\n", on ? "ON" : "OFF", fd);
         } else if (msg == "fsmn_enable:on" || msg == "fsmn_enable:off") {
             bool on = msg.back() == 'n';
             audio.set_fsmn_enabled(on);

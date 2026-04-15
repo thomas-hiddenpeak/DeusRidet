@@ -37,6 +37,13 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
     // Initialize VAD.
     vad_.init(cfg_.vad);
 
+    // Initialize FRCRN speech enhancement (optional — non-fatal).
+    if (!cfg_.frcrn.weights_dir.empty() && cfg_.frcrn.enabled) {
+        if (!frcrn_.init(cfg_.frcrn)) {
+            LOG_WARN("AudioPipe", "FRCRN speech enhancement init failed — running without denoising");
+        }
+    }
+
     // Initialize Silero VAD (optional — non-fatal if model not found).
     if (!cfg_.silero.model_path.empty()) {
         if (!silero_.init(cfg_.silero)) {
@@ -304,8 +311,9 @@ void AudioPipeline::process_loop() {
     int ten_hop = ten_.initialized() ? cfg_.ten.hop_size : 0;
     std::vector<int16_t> ten_buf;  // carries remainder for TEN VAD
 
-    LOG_INFO("AudioPipe", "Process loop: chunk=%d samples (%d ms), silero=%s fsmn=%s ten=%s",
+    LOG_INFO("AudioPipe", "Process loop: chunk=%d samples (%d ms), frcrn=%s silero=%s fsmn=%s ten=%s",
              chunk_samples, cfg_.process_chunk_ms,
+             frcrn_.initialized() ? "ON" : "OFF",
              silero_.initialized() ? "ON" : "OFF",
              fsmn_.initialized() ? "ON" : "OFF",
              ten_.initialized() ? "ON" : "OFF");
@@ -344,6 +352,16 @@ void AudioPipeline::process_loop() {
             sum_sq += s * s;
         }
         stats_.last_rms = n_samples > 0 ? sqrtf((float)(sum_sq / n_samples)) : 0;
+
+        // FRCRN speech enhancement: denoise PCM before all downstream processing.
+        // Uses direct per-chunk enhancement (no accumulation latency).
+        // FRCRN internally pads to valid STFT alignment.
+        stats_.frcrn_active = false;
+        if (frcrn_.initialized() && enable_frcrn_.load(std::memory_order_relaxed)) {
+            frcrn_.enhance_inplace(pcm_buf.data(), n_samples);
+            stats_.frcrn_active = true;
+            stats_.frcrn_lat_ms = frcrn_.last_latency_ms();
+        }
 
         // Run Silero VAD on raw PCM (512-sample windows).
         if (silero_.initialized() && silero_window > 0 &&
