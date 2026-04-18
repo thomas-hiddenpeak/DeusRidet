@@ -6,3 +6,4 @@ hub/
 *.wav
 logs/
 __pycache__/
+models/

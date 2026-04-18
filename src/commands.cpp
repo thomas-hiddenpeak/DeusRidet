@@ -1037,13 +1037,16 @@ int cmd_bench_prefill(const std::string& model_dir) {
 int cmd_test_wavlm_cnn() {
     printf("[test-wavlm-cnn] WavLM CNN Feature Extractor validation\n");
 
-    // Paths
-    const char* model_path = "/home/rm01/models/dev/speaker/espnet_wavlm_ecapa/wavlm_ecapa.safetensors";
-    const char* ref_dir    = "/home/rm01/models/dev/speaker/espnet_wavlm_ecapa/ref_dump/";
+    // Paths (workspace-local by default; override with DEUSRIDET_MODEL_ROOT)
+    std::string model_root = getenv("DEUSRIDET_MODEL_ROOT")
+                             ? getenv("DEUSRIDET_MODEL_ROOT")
+                             : "/home/rm01/DeusRidet/models/dev";
+    std::string model_path = model_root + "/speaker/espnet_wavlm_ecapa/wavlm_ecapa.safetensors";
+    std::string ref_dir    = model_root + "/speaker/espnet_wavlm_ecapa/ref_dump/";
 
     // Helper: load reference binary tensor
     auto load_ref = [&](const char* name) -> std::vector<float> {
-        std::string path = std::string(ref_dir) + name;
+        std::string path = ref_dir + name;
         FILE* f = fopen(path.c_str(), "rb");
         if (!f) {
             fprintf(stderr, "  ERROR: cannot open %s\n", path.c_str());
@@ -1400,37 +1403,38 @@ int cmd_test_ws(const std::string& webui_dir,
     AudioPipelineConfig audio_cfg;
     // defaults: n_fft=400, hop=160, n_mels=128, sr=16000
 
+    // Model root (workspace-local by default; override with DEUSRIDET_MODEL_ROOT).
+    std::string model_root = getenv("DEUSRIDET_MODEL_ROOT")
+                             ? getenv("DEUSRIDET_MODEL_ROOT")
+                             : "/home/rm01/DeusRidet/models/dev";
+
     // Configure Silero VAD model path.
-    audio_cfg.silero.model_path = std::string(getenv("HOME") ? getenv("HOME") : "/home/rm01")
-                                  + "/models/dev/vad/silero_vad.safetensors";
+    audio_cfg.silero.model_path = model_root + "/vad/silero_vad.safetensors";
 
     // Configure FRCRN speech enhancement (CUDA GPU, safetensors weights).
-    audio_cfg.frcrn.weights_dir = std::string(getenv("HOME") ? getenv("HOME") : "/home/rm01")
-                                  + "/models/dev/vad/frcrn_weights";
+    audio_cfg.frcrn.weights_dir = model_root + "/vad/frcrn_weights";
 
     // Configure FSMN VAD model paths.
-    std::string home = getenv("HOME") ? getenv("HOME") : "/home/rm01";
-
     // Configure P1: pyannote overlap detection (native CUDA).
-    audio_cfg.overlap_det.model_path = home + "/models/dev/vad/pyannote_seg3.safetensors";
+    audio_cfg.overlap_det.model_path = model_root + "/vad/pyannote_seg3.safetensors";
     audio_cfg.overlap_det.enabled = true;
 
     // Configure P2: MossFormer2 speech separation (native CUDA, lazy loaded).
-    audio_cfg.separator.model_path = home + "/models/dev/vad/mossformer2_ss_16k.safetensors";
+    audio_cfg.separator.model_path = model_root + "/vad/mossformer2_ss_16k.safetensors";
     audio_cfg.separator.lazy_load = true;
 
-    audio_cfg.fsmn.model_path = home + "/models/dev/vad/fsmn/fsmn_vad.safetensors";
-    audio_cfg.fsmn.cmvn_path  = home + "/models/dev/vad/fsmn/am.mvn";
+    audio_cfg.fsmn.model_path = model_root + "/vad/fsmn/fsmn_vad.safetensors";
+    audio_cfg.fsmn.cmvn_path  = model_root + "/vad/fsmn/am.mvn";
 
     // Configure CAM++ speaker encoder model path.
-    audio_cfg.speaker.model_path = home + "/models/dev/speaker/campplus/campplus.safetensors";
+    audio_cfg.speaker.model_path = model_root + "/speaker/campplus/campplus.safetensors";
 
     // Configure WavLM-Large + ECAPA-TDNN native GPU speaker encoder.
-    audio_cfg.wavlm_ecapa_model = home + "/models/dev/speaker/espnet_wavlm_ecapa/wavlm_ecapa.safetensors";
+    audio_cfg.wavlm_ecapa_model = model_root + "/speaker/espnet_wavlm_ecapa/wavlm_ecapa.safetensors";
     audio_cfg.wavlm_ecapa_threshold = 0.55f;
 
     // Configure Qwen3-ASR engine.
-    audio_cfg.asr_model_path = home + "/models/dev/asr/Qwen/Qwen3-ASR-1.7B";
+    audio_cfg.asr_model_path = model_root + "/asr/Qwen/Qwen3-ASR-1.7B";
 
     // Track WS-level stats.
     std::atomic<uint64_t> total_frames{0};
