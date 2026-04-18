@@ -1,18 +1,17 @@
-// fsmn_vad.cpp — FunASR FSMN VAD implementation (GPU Fbank + ORT CPU).
+// fsmn_vad.cpp — FunASR FSMN VAD native C++ inference (FP32, safetensors).
 //
-// Pipeline: PCM → GPU Fbank(80, Hamming+preemph, 25ms/10ms)
-//         → LFR(5x) → CMVN → ORT CPU → speech prob
+// Architecture: in_linear1(400->140) -> in_linear2(140->250) -> ReLU
+//   -> 4x FSMN block: linear(250->128) -> depthwise_conv(128,k=20) + residual -> affine(128->250) -> ReLU
+//   -> out_linear1(250->140) -> ReLU -> out_linear2(140->248) -> softmax
 //
-// model_quant.onnx uses DynamicQuantizeLinear/MatMulInteger (TRT incompatible).
-// On Tegra unified memory, CPU EP shares the same physical DRAM — no penalty.
+// ~430K FP32 params, pure CPU. On Tegra unified memory this shares the same DRAM.
 //
 // Adapted from FunASR runtime (https://github.com/modelscope/FunASR)
 // Original: MIT License
 
 #include "fsmn_vad.h"
 #include "../../communis/log.h"
-
-#include <onnxruntime_cxx_api.h>
+#include "../../machina/safetensors.h"
 
 #include <algorithm>
 #include <cmath>
@@ -66,17 +65,7 @@ static bool load_cmvn(const std::string& path,
 // ============================================================================
 
 FsmnVad::FsmnVad() = default;
-
-FsmnVad::~FsmnVad() {
-    if (session_) {
-        delete static_cast<Ort::Session*>(session_);
-        session_ = nullptr;
-    }
-    if (env_) {
-        delete static_cast<Ort::Env*>(env_);
-        env_ = nullptr;
-    }
-}
+FsmnVad::~FsmnVad() = default;
 
 bool FsmnVad::init(const FsmnVadConfig& cfg) {
     cfg_ = cfg;
@@ -107,34 +96,185 @@ bool FsmnVad::init(const FsmnVadConfig& cfg) {
         return false;
     }
 
-    // Create ONNX Runtime session (CPU EP — unified memory on Tegra).
-    try {
-        auto* env = new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "fsmn_vad");
-        env_ = env;
+    // Load weights from safetensors.
+    SafetensorsFile sf(cfg_.model_path);
 
-        Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(1);
-        opts.SetInterOpNumThreads(1);
-        opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    auto load_vec = [&](const char* name, std::vector<float>& dst) -> bool {
+        auto t = sf.get_tensor(name);
+        if (!t) {
+            LOG_ERROR("FsmnVAD", "Missing tensor: %s", name);
+            return false;
+        }
+        dst.resize(t->numel());
+        std::memcpy(dst.data(), t->data(), t->numel() * sizeof(float));
+        return true;
+    };
 
-        auto* session = new Ort::Session(*env, cfg_.model_path.c_str(), opts);
-        session_ = session;
-    } catch (const Ort::Exception& e) {
-        LOG_ERROR("FsmnVAD", "ORT init failed: %s", e.what());
-        return false;
+    // Input projection
+    if (!load_vec("encoder.in_linear1.linear.weight", in_linear1_w_)) return false;
+    if (!load_vec("encoder.in_linear1.linear.bias",   in_linear1_b_)) return false;
+    if (!load_vec("encoder.in_linear2.linear.weight", in_linear2_w_)) return false;
+    if (!load_vec("encoder.in_linear2.linear.bias",   in_linear2_b_)) return false;
+
+    // FSMN blocks
+    for (int i = 0; i < kFsmnLayers; i++) {
+        char name[128];
+        snprintf(name, sizeof(name), "encoder.fsmn.%d.linear.linear.weight", i);
+        if (!load_vec(name, fsmn_[i].linear_w)) return false;
+
+        snprintf(name, sizeof(name), "encoder.fsmn.%d.fsmn_block.conv_left.weight", i);
+        if (!load_vec(name, fsmn_[i].conv_w)) return false;
+
+        snprintf(name, sizeof(name), "encoder.fsmn.%d.affine.linear.weight", i);
+        if (!load_vec(name, fsmn_[i].affine_w)) return false;
+
+        snprintf(name, sizeof(name), "encoder.fsmn.%d.affine.linear.bias", i);
+        if (!load_vec(name, fsmn_[i].affine_b)) return false;
     }
 
-    // Init caches to zeros: each [1, 128, 19].
-    for (int i = 0; i < NUM_CACHES; i++) {
-        caches_[i].assign(CACHE_DIM * CACHE_LEN, 0.0f);
+    // Output projection
+    if (!load_vec("encoder.out_linear1.linear.weight", out_linear1_w_)) return false;
+    if (!load_vec("encoder.out_linear1.linear.bias",   out_linear1_b_)) return false;
+    if (!load_vec("encoder.out_linear2.linear.weight", out_linear2_w_)) return false;
+    if (!load_vec("encoder.out_linear2.linear.bias",   out_linear2_b_)) return false;
+
+    // Init streaming caches
+    for (int i = 0; i < kFsmnLayers; i++) {
+        caches_[i].assign(kProjDim * kCacheLen, 0.0f);
     }
 
     initialized_ = true;
-    LOG_INFO("FsmnVAD", "Loaded: %s (GPU Fbank + ORT CPU, cmvn=%s, %d-bin, LFR=%dx)",
+    LOG_INFO("FsmnVAD", "Loaded (native FP32): %s (GPU Fbank, cmvn=%s, %d-bin, LFR=%dx)",
              cfg_.model_path.c_str(), cfg_.cmvn_path.c_str(),
              cfg_.n_mels, cfg_.lfr_m);
     return true;
 }
+
+// ============================================================================
+// Forward pass helpers
+// ============================================================================
+
+// MatMul: out[m,n] = x[m,k] @ w[k,n] + bias[n]  (row-major)
+static void matmul_bias(const float* x, int M, int K,
+                        const float* w, const float* bias, int N,
+                        float* out) {
+    for (int m = 0; m < M; m++) {
+        for (int n = 0; n < N; n++) {
+            float sum = bias ? bias[n] : 0.0f;
+            const float* xr = x + m * K;
+            for (int k = 0; k < K; k++) {
+                sum += xr[k] * w[k * N + n];
+            }
+            out[m * N + n] = sum;
+        }
+    }
+}
+
+static void relu_inplace(float* data, int n) {
+    for (int i = 0; i < n; i++)
+        if (data[i] < 0.0f) data[i] = 0.0f;
+}
+
+static void softmax_inplace(float* data, int n) {
+    float max_val = data[0];
+    for (int i = 1; i < n; i++)
+        if (data[i] > max_val) max_val = data[i];
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++) {
+        data[i] = expf(data[i] - max_val);
+        sum += data[i];
+    }
+    float inv_sum = 1.0f / sum;
+    for (int i = 0; i < n; i++)
+        data[i] *= inv_sum;
+}
+
+// ============================================================================
+// Forward pass -- processes frame(s) sequentially (streaming)
+// ============================================================================
+
+float FsmnVad::forward(const float* feats, int n_frames, int feat_dim) {
+    if (n_frames <= 0) return 0.0f;
+
+    float prob = 0.0f;
+
+    for (int f = 0; f < n_frames; f++) {
+        const float* x_in = feats + f * feat_dim;
+
+        // in_linear1: (1, 400) -> (1, 140)
+        float a1[kAffineIn];
+        matmul_bias(x_in, 1, kInputDim,
+                    in_linear1_w_.data(), in_linear1_b_.data(), kAffineIn, a1);
+
+        // in_linear2: (1, 140) -> (1, 250)
+        float a2[kLinearDim];
+        matmul_bias(a1, 1, kAffineIn,
+                    in_linear2_w_.data(), in_linear2_b_.data(), kLinearDim, a2);
+        relu_inplace(a2, kLinearDim);
+
+        // Working buffer for FSMN blocks
+        float x[kLinearDim];
+        std::memcpy(x, a2, kLinearDim * sizeof(float));
+
+        for (int i = 0; i < kFsmnLayers; i++) {
+            // linear: (1, 250) -> (1, 128) -- no bias
+            float h[kProjDim];
+            matmul_bias(x, 1, kLinearDim,
+                        fsmn_[i].linear_w.data(), nullptr, kProjDim, h);
+
+            // Depthwise conv with left context cache.
+            // cache: (128, 19), new h: 128 scalars -> concat -> (128, 20) -> conv -> 128
+            float conv_out[kProjDim];
+            for (int c = 0; c < kProjDim; c++) {
+                float sum = 0.0f;
+                const float* cache_row = caches_[i].data() + c * kCacheLen;
+                const float* cw = fsmn_[i].conv_w.data() + c * kLorder;
+                for (int k = 0; k < kCacheLen; k++)
+                    sum += cache_row[k] * cw[k];
+                sum += h[c] * cw[kCacheLen]; // last tap
+                conv_out[c] = sum;
+            }
+
+            // Update cache: shift left by 1, append h
+            for (int c = 0; c < kProjDim; c++) {
+                float* cache_row = caches_[i].data() + c * kCacheLen;
+                std::memmove(cache_row, cache_row + 1, (kCacheLen - 1) * sizeof(float));
+                cache_row[kCacheLen - 1] = h[c];
+            }
+
+            // Residual + affine + ReLU
+            float res[kProjDim];
+            for (int c = 0; c < kProjDim; c++)
+                res[c] = h[c] + conv_out[c];
+
+            matmul_bias(res, 1, kProjDim,
+                        fsmn_[i].affine_w.data(), fsmn_[i].affine_b.data(),
+                        kLinearDim, x);
+            relu_inplace(x, kLinearDim);
+        }
+
+        // out_linear1: (1, 250) -> (1, 140)
+        float o1[kAffineOut];
+        matmul_bias(x, 1, kLinearDim,
+                    out_linear1_w_.data(), out_linear1_b_.data(), kAffineOut, o1);
+        relu_inplace(o1, kAffineOut);
+
+        // out_linear2: (1, 140) -> (1, 248)
+        float logits[kOutputDim];
+        matmul_bias(o1, 1, kAffineOut,
+                    out_linear2_w_.data(), out_linear2_b_.data(), kOutputDim, logits);
+        softmax_inplace(logits, kOutputDim);
+
+        // P(speech) = 1 - P(silence), class 0 = silence
+        prob = 1.0f - logits[0];
+    }
+
+    return prob;
+}
+
+// ============================================================================
+// LFR + CMVN
+// ============================================================================
 
 int FsmnVad::apply_lfr_cmvn(std::vector<float>& out_feats) {
     int n_fbank = (int)fbank_buf_.size();
@@ -161,7 +301,6 @@ int FsmnVad::apply_lfr_cmvn(std::vector<float>& out_feats) {
 
     lfr_consumed_ += n_lfr * cfg_.lfr_m;
 
-    // Trim consumed frames to prevent unbounded growth.
     if (lfr_consumed_ > 1000) {
         fbank_buf_.erase(fbank_buf_.begin(),
                          fbank_buf_.begin() + lfr_consumed_);
@@ -171,84 +310,16 @@ int FsmnVad::apply_lfr_cmvn(std::vector<float>& out_feats) {
     return n_lfr;
 }
 
-float FsmnVad::run_onnx(const float* feats, int n_frames, int feat_dim) {
-    auto* session = static_cast<Ort::Session*>(session_);
-    if (!session || n_frames <= 0) return 0.0f;
-
-    auto mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-
-    // Input: speech [1, T, 400].
-    std::vector<int64_t> speech_shape = {1, n_frames, feat_dim};
-    auto speech_tensor = Ort::Value::CreateTensor<float>(
-        mem, const_cast<float*>(feats),
-        n_frames * feat_dim, speech_shape.data(), 3);
-
-    // Input: in_cache0..3 [1, 128, 19, 1].
-    std::vector<int64_t> cache_shape = {1, CACHE_DIM, CACHE_LEN, 1};
-    Ort::Value cache_tensors[NUM_CACHES] = {
-        Ort::Value::CreateTensor<float>(mem, caches_[0].data(),
-            CACHE_DIM * CACHE_LEN, cache_shape.data(), 4),
-        Ort::Value::CreateTensor<float>(mem, caches_[1].data(),
-            CACHE_DIM * CACHE_LEN, cache_shape.data(), 4),
-        Ort::Value::CreateTensor<float>(mem, caches_[2].data(),
-            CACHE_DIM * CACHE_LEN, cache_shape.data(), 4),
-        Ort::Value::CreateTensor<float>(mem, caches_[3].data(),
-            CACHE_DIM * CACHE_LEN, cache_shape.data(), 4),
-    };
-
-    // Assemble inputs.
-    const char* input_names[] = {
-        "speech", "in_cache0", "in_cache1", "in_cache2", "in_cache3"
-    };
-    std::vector<Ort::Value> inputs;
-    inputs.push_back(std::move(speech_tensor));
-    for (int i = 0; i < NUM_CACHES; i++)
-        inputs.push_back(std::move(cache_tensors[i]));
-
-    // Output names.
-    const char* output_names[] = {
-        "logits", "out_cache0", "out_cache1", "out_cache2", "out_cache3"
-    };
-
-    try {
-        auto outputs = session->Run(
-            Ort::RunOptions{nullptr},
-            input_names, inputs.data(), 5,
-            output_names, 5);
-
-        // Update caches from output: out_cache → caches_ for next call.
-        for (int i = 0; i < NUM_CACHES; i++) {
-            const float* out_cache = outputs[1 + i].GetTensorData<float>();
-            std::memcpy(caches_[i].data(), out_cache,
-                        CACHE_DIM * CACHE_LEN * sizeof(float));
-        }
-
-        // Output "logits" is already softmax probabilities [1, T_out, 248].
-        // Class 0 = silence. P(speech) = 1 - P(silence).
-        // Do NOT apply softmax again — the ONNX model output is post-softmax.
-        auto shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
-        int t_out = (shape.size() >= 2) ? (int)shape[1] : n_frames;
-        int n_cls = (shape.size() >= 3) ? (int)shape[2] : 248;
-
-        const float* probs = outputs[0].GetTensorData<float>();
-        const float* last = probs + (t_out - 1) * n_cls;
-
-        float sil_prob = last[0]; // class 0 = silence
-        return 1.0f - sil_prob;
-    } catch (const Ort::Exception& e) {
-        LOG_ERROR("FsmnVAD", "ORT run failed: %s", e.what());
-        return 0.0f;
-    }
-}
+// ============================================================================
+// Process: PCM -> Fbank -> LFR -> CMVN -> forward -> speech probability
+// ============================================================================
 
 FsmnVadResult FsmnVad::process(const int16_t* pcm, int n_samples) {
     FsmnVadResult result{};
     if (!initialized_ || !pcm || n_samples <= 0) return result;
 
-    // Push PCM to GPU Fbank — produces fbank frames on device.
     int new_frames = fbank_gpu_.push_pcm(pcm, n_samples);
 
-    // Read new fbank frames from GPU to host.
     if (new_frames > 0) {
         std::vector<float> fbank_host(new_frames * cfg_.n_mels);
         int read = fbank_gpu_.read_fbank(fbank_host.data(), new_frames);
@@ -261,14 +332,12 @@ FsmnVadResult FsmnVad::process(const int16_t* pcm, int n_samples) {
         }
     }
 
-    // Apply LFR + CMVN.
     std::vector<float> feats;
     int n_lfr = apply_lfr_cmvn(feats);
     if (n_lfr == 0) return result;
 
-    // Run ONNX Runtime inference (CPU EP).
     int feat_dim = cfg_.n_mels * cfg_.lfr_m;
-    float speech_prob = run_onnx(feats.data(), n_lfr, feat_dim);
+    float speech_prob = forward(feats.data(), n_lfr, feat_dim);
 
     result.probability = speech_prob;
     result.is_speech = speech_prob >= threshold_;
@@ -276,8 +345,8 @@ FsmnVadResult FsmnVad::process(const int16_t* pcm, int n_samples) {
 }
 
 void FsmnVad::reset_state() {
-    for (int i = 0; i < NUM_CACHES; i++) {
-        caches_[i].assign(CACHE_DIM * CACHE_LEN, 0.0f);
+    for (int i = 0; i < kFsmnLayers; i++) {
+        caches_[i].assign(kProjDim * kCacheLen, 0.0f);
     }
     fbank_buf_.clear();
     lfr_consumed_ = 0;

@@ -141,12 +141,12 @@ bool MelSpectrogram::init(const MelConfig& cfg) {
     // Allocate Mel filterbank on GPU.
     cudaMalloc(&d_mel_filters_, cfg_.n_mels * freq_bins * sizeof(float));
 
-    // Rolling PCM buffer: hold up to 30 seconds of audio.
-    pcm_buf_capacity_ = cfg_.sample_rate * 30;
+    // Rolling PCM buffer: hold up to 60 seconds of audio.
+    pcm_buf_capacity_ = cfg_.sample_rate * 60;
     cudaMalloc(&d_pcm_rolling_, pcm_buf_capacity_ * sizeof(float));
     pcm_buf_len_ = 0;
 
-    // Mel output buffer: max frames for 30 seconds.
+    // Mel output buffer: max frames for 60 seconds.
     max_frames_ = (pcm_buf_capacity_ - cfg_.n_fft) / cfg_.hop_length + 1;
     cudaMalloc(&d_mel_out_, max_frames_ * cfg_.n_mels * sizeof(float));
     frames_produced_ = 0;

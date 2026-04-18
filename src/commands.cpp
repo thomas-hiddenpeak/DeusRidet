@@ -1402,7 +1402,7 @@ int cmd_test_ws(const std::string& webui_dir,
 
     // Configure Silero VAD model path.
     audio_cfg.silero.model_path = std::string(getenv("HOME") ? getenv("HOME") : "/home/rm01")
-                                  + "/models/dev/vad/silero_vad.onnx";
+                                  + "/models/dev/vad/silero_vad.safetensors";
 
     // Configure FRCRN speech enhancement (CUDA GPU, safetensors weights).
     audio_cfg.frcrn.weights_dir = std::string(getenv("HOME") ? getenv("HOME") : "/home/rm01")
@@ -1410,29 +1410,20 @@ int cmd_test_ws(const std::string& webui_dir,
 
     // Configure FSMN VAD model paths.
     std::string home = getenv("HOME") ? getenv("HOME") : "/home/rm01";
-    audio_cfg.fsmn.model_path = home + "/models/dev/vad/fsmn/model_quant.onnx";
-    audio_cfg.fsmn.cmvn_path  = home + "/models/dev/vad/fsmn/am.mvn";
 
-    // Configure TEN VAD model path.
-    audio_cfg.ten.model_path = home + "/models/dev/vad/ten/ten-vad.onnx";
+    // Configure P1: pyannote overlap detection (native CUDA).
+    audio_cfg.overlap_det.model_path = home + "/models/dev/vad/pyannote_seg3.safetensors";
+    audio_cfg.overlap_det.enabled = true;
+
+    // Configure P2: MossFormer2 speech separation (native CUDA, lazy loaded).
+    audio_cfg.separator.model_path = home + "/models/dev/vad/mossformer2_ss_16k.safetensors";
+    audio_cfg.separator.lazy_load = true;
+
+    audio_cfg.fsmn.model_path = home + "/models/dev/vad/fsmn/fsmn_vad.safetensors";
+    audio_cfg.fsmn.cmvn_path  = home + "/models/dev/vad/fsmn/am.mvn";
 
     // Configure CAM++ speaker encoder model path.
     audio_cfg.speaker.model_path = home + "/models/dev/speaker/campplus/campplus.safetensors";
-
-    // Configure WavLM ONNX speaker encoder.
-    audio_cfg.wavlm.model_path = home + "/models/dev/speaker/wavlm/wavlm_base_plus_sv.onnx";
-    audio_cfg.wavlm.name = "wavlm";
-    audio_cfg.wavlm.input_name = "input_values";
-    audio_cfg.wavlm.output_name = "onnx::Gemm_3633";
-    audio_cfg.wavlm.embedding_dim = 512;
-
-    // Configure ECAPA-TDNN-1024-LM speaker encoder (WeSpeaker, fbank input).
-    // Adapted from WeSpeaker ECAPA-TDNN with Attentive Statistical Pooling (ASTP).
-    audio_cfg.unispeech.model_path = home + "/models/dev/speaker/ecapa_tdnn/ecapa_tdnn1024_lm.onnx";
-    audio_cfg.unispeech.name = "ecapa";
-    audio_cfg.unispeech.input_name = "feats";
-    audio_cfg.unispeech.output_name = "embs";
-    audio_cfg.unispeech.embedding_dim = 192;
 
     // Configure WavLM-Large + ECAPA-TDNN native GPU speaker encoder.
     audio_cfg.wavlm_ecapa_model = home + "/models/dev/speaker/espnet_wavlm_ecapa/wavlm_ecapa.safetensors";
@@ -1611,8 +1602,6 @@ int cmd_test_ws(const std::string& webui_dir,
         lists_json += R"(,"speaker_lists":[)";
         lists_json += R"({"model":"CAM++","speakers":)" + speaker_list_json(audio.campp_db()) + "},";
         lists_json += R"({"model":"CAM++Legacy","speakers":)" + speaker_list_json(audio.speaker_db()) + "},";
-        lists_json += R"({"model":"WavLM","speakers":)" + speaker_list_json(audio.wavlm_db()) + "},";
-        lists_json += R"({"model":"ECAPA-TDNN","speakers":)" + speaker_list_json(audio.unispeech_db()) + "},";
         lists_json += R"({"model":"WL-ECAPA","speakers":)" + speaker_list_json(audio.wlecapa_db()) + "}]";
 
         char json[3200];
@@ -1623,14 +1612,9 @@ int cmd_test_ws(const std::string& webui_dir,
             R"("frcrn_active":%s,"frcrn_enabled":%s,"frcrn_loaded":%s,"frcrn_lat_ms":%.1f,)"
             R"("silero_prob":%.3f,"silero_speech":%s,"silero_threshold":%.2f,"silero_enabled":%s,)"
             R"("fsmn_prob":%.3f,"fsmn_speech":%s,"fsmn_threshold":%.2f,"fsmn_enabled":%s,)"
-            R"("ten_prob":%.3f,"ten_speech":%s,"ten_threshold":%.2f,"ten_enabled":%s,)"
             R"("vad_source":%d,)"
             R"("speaker_id":%d,"speaker_sim":%.3f,"speaker_new":%s,"speaker_count":%d,)"
             R"("speaker_name":"%s","speaker_enabled":%s,"speaker_threshold":%.2f,"speaker_active":%s,)"
-            R"("wavlm_id":%d,"wavlm_sim":%.3f,"wavlm_new":%s,"wavlm_count":%d,)"
-            R"("wavlm_name":"%s","wavlm_enabled":%s,"wavlm_threshold":%.2f,"wavlm_active":%s,)"
-            R"("unispeech_id":%d,"unispeech_sim":%.3f,"unispeech_new":%s,"unispeech_count":%d,)"
-            R"("unispeech_name":"%s","unispeech_enabled":%s,"unispeech_threshold":%.2f,"unispeech_active":%s,)"
             R"("wlecapa_id":%d,"wlecapa_sim":%.3f,"wlecapa_new":%s,"wlecapa_count":%d,)"
             R"("wlecapa_exemplars":%d,"wlecapa_hits_above":%d,)"
             R"("wlecapa_name":"%s","wlecapa_enabled":%s,"wlecapa_threshold":%.2f,"wlecapa_active":%s)",
@@ -1651,9 +1635,6 @@ int cmd_test_ws(const std::string& webui_dir,
             st.fsmn_prob, st.fsmn_speech ? "true" : "false",
             audio.fsmn_threshold(),
             audio.fsmn_enabled() ? "true" : "false",
-            st.ten_prob, st.ten_speech ? "true" : "false",
-            audio.ten_threshold(),
-            audio.ten_enabled() ? "true" : "false",
             static_cast<int>(audio.vad_source()),
             st.speaker_id, st.speaker_sim,
             st.speaker_new ? "true" : "false",
@@ -1661,18 +1642,6 @@ int cmd_test_ws(const std::string& webui_dir,
             audio.speaker_enabled() ? "true" : "false",
             audio.speaker_threshold(),
             st.speaker_active ? "true" : "false",
-            st.wavlm_id, st.wavlm_sim,
-            st.wavlm_new ? "true" : "false",
-            st.wavlm_count, st.wavlm_name,
-            audio.wavlm_enabled() ? "true" : "false",
-            audio.wavlm_threshold(),
-            st.wavlm_active ? "true" : "false",
-            st.unispeech_id, st.unispeech_sim,
-            st.unispeech_new ? "true" : "false",
-            st.unispeech_count, st.unispeech_name,
-            audio.unispeech_enabled() ? "true" : "false",
-            audio.unispeech_threshold(),
-            st.unispeech_active ? "true" : "false",
             st.wlecapa_id, st.wlecapa_sim,
             st.wlecapa_new ? "true" : "false",
             st.wlecapa_count,
@@ -1689,6 +1658,33 @@ int cmd_test_ws(const std::string& webui_dir,
             snprintf(margin_buf, sizeof(margin_buf),
                 R"(,"wlecapa_margin":%.2f)", audio.wlecapa_db().min_margin());
             full_json += margin_buf;
+        }
+
+        // P1: Overlap detection stats.
+        {
+            char od_buf[256];
+            snprintf(od_buf, sizeof(od_buf),
+                R"(,"od_enabled":%s,"od_loaded":%s,"od_detected":%s,"od_ratio":%.3f,"od_lat_ms":%.1f)",
+                audio.overlap_det_enabled() ? "true" : "false",
+                audio.overlap_det_loaded() ? "true" : "false",
+                st.overlap_detected ? "true" : "false",
+                st.overlap_ratio,
+                st.od_latency_ms);
+            full_json += od_buf;
+        }
+
+        // P2: Speech separation stats.
+        {
+            char sep_buf[256];
+            snprintf(sep_buf, sizeof(sep_buf),
+                R"(,"sep_enabled":%s,"sep_loaded":%s,"sep_active":%s,"sep_lat_ms":%.1f,"sep_src1_rms":%.4f,"sep_src2_rms":%.4f)",
+                audio.separator_enabled() ? "true" : "false",
+                audio.separator_loaded() ? "true" : "false",
+                st.separation_active ? "true" : "false",
+                st.separation_lat_ms,
+                st.sep_source1_energy,
+                st.sep_source2_energy);
+            full_json += sep_buf;
         }
 
         // ASR stats + tunable parameters.
@@ -2039,16 +2035,6 @@ int cmd_test_ws(const std::string& webui_dir,
                 R"({"type":"fsmn_threshold","value":%.2f})", t);
             server.send_text(fd, json);
             printf("[test-ws] FSMN threshold = %.2f (fd=%d)\n", t, fd);
-        } else if (msg.rfind("ten_threshold:", 0) == 0) {
-            float t = std::strtof(msg.c_str() + 14, nullptr);
-            if (t < 0.0f) t = 0.0f;
-            if (t > 1.0f) t = 1.0f;
-            audio.set_ten_threshold(t);
-            char json[128];
-            snprintf(json, sizeof(json),
-                R"({"type":"ten_threshold","value":%.2f})", t);
-            server.send_text(fd, json);
-            printf("[test-ws] TEN threshold = %.2f (fd=%d)\n", t, fd);
         } else if (msg == "silero_enable:on" || msg == "silero_enable:off") {
             bool on = msg.back() == 'n';
             audio.set_silero_enabled(on);
@@ -2073,20 +2059,11 @@ int cmd_test_ws(const std::string& webui_dir,
                 R"({"type":"fsmn_enable","enabled":%s})", on ? "true" : "false");
             server.send_text(fd, json);
             printf("[test-ws] FSMN %s (fd=%d)\n", on ? "ON" : "OFF", fd);
-        } else if (msg == "ten_enable:on" || msg == "ten_enable:off") {
-            bool on = msg.back() == 'n';
-            audio.set_ten_enabled(on);
-            char json[128];
-            snprintf(json, sizeof(json),
-                R"({"type":"ten_enable","enabled":%s})", on ? "true" : "false");
-            server.send_text(fd, json);
-            printf("[test-ws] TEN %s (fd=%d)\n", on ? "ON" : "OFF", fd);
         } else if (msg.rfind("vad_source:", 0) == 0) {
             auto val = msg.substr(11);
             VadSource src = VadSource::ANY;
             if (val == "silero") src = VadSource::SILERO;
             else if (val == "fsmn") src = VadSource::FSMN;
-            else if (val == "ten") src = VadSource::TEN;
             else src = VadSource::ANY;
             audio.set_vad_source(src);
             char json[128];
@@ -2102,22 +2079,6 @@ int cmd_test_ws(const std::string& webui_dir,
                 R"({"type":"speaker_enable","enabled":%s})", on ? "true" : "false");
             server.send_text(fd, json);
             printf("[test-ws] Speaker %s (fd=%d)\n", on ? "ON" : "OFF", fd);
-        } else if (msg == "wavlm_enable:on" || msg == "wavlm_enable:off") {
-            bool on = msg.back() == 'n';
-            audio.set_wavlm_enabled(on);
-            char json[128];
-            snprintf(json, sizeof(json),
-                R"({"type":"wavlm_enable","enabled":%s})", on ? "true" : "false");
-            server.send_text(fd, json);
-            printf("[test-ws] WavLM %s (fd=%d)\n", on ? "ON" : "OFF", fd);
-        } else if (msg == "unispeech_enable:on" || msg == "unispeech_enable:off") {
-            bool on = msg.back() == 'n';
-            audio.set_unispeech_enabled(on);
-            char json[128];
-            snprintf(json, sizeof(json),
-                R"({"type":"unispeech_enable","enabled":%s})", on ? "true" : "false");
-            server.send_text(fd, json);
-            printf("[test-ws] UniSpeech %s (fd=%d)\n", on ? "ON" : "OFF", fd);
         } else if (msg.rfind("speaker_threshold:", 0) == 0) {
             float t = std::strtof(msg.c_str() + 18, nullptr);
             if (t < 0.0f) t = 0.0f;
@@ -2128,38 +2089,10 @@ int cmd_test_ws(const std::string& webui_dir,
                 R"({"type":"speaker_threshold","value":%.2f})", t);
             server.send_text(fd, json);
             printf("[test-ws] Speaker threshold = %.2f (fd=%d)\n", t, fd);
-        } else if (msg.rfind("wavlm_threshold:", 0) == 0) {
-            float t = std::strtof(msg.c_str() + 16, nullptr);
-            if (t < 0.0f) t = 0.0f;
-            if (t > 1.0f) t = 1.0f;
-            audio.set_wavlm_threshold(t);
-            char json[128];
-            snprintf(json, sizeof(json),
-                R"({"type":"wavlm_threshold","value":%.2f})", t);
-            server.send_text(fd, json);
-            printf("[test-ws] WavLM threshold = %.2f (fd=%d)\n", t, fd);
-        } else if (msg.rfind("unispeech_threshold:", 0) == 0) {
-            float t = std::strtof(msg.c_str() + 20, nullptr);
-            if (t < 0.0f) t = 0.0f;
-            if (t > 1.0f) t = 1.0f;
-            audio.set_unispeech_threshold(t);
-            char json[128];
-            snprintf(json, sizeof(json),
-                R"({"type":"unispeech_threshold","value":%.2f})", t);
-            server.send_text(fd, json);
-            printf("[test-ws] UniSpeech threshold = %.2f (fd=%d)\n", t, fd);
         } else if (msg == "speaker_clear") {
             audio.clear_speaker_db();
             server.send_text(fd, R"({"type":"speaker_clear"})");
             printf("[test-ws] Speaker (CAM++) DB cleared (fd=%d)\n", fd);
-        } else if (msg == "wavlm_clear") {
-            audio.clear_wavlm_db();
-            server.send_text(fd, R"({"type":"wavlm_clear"})");
-            printf("[test-ws] WavLM DB cleared (fd=%d)\n", fd);
-        } else if (msg == "unispeech_clear") {
-            audio.clear_unispeech_db();
-            server.send_text(fd, R"({"type":"unispeech_clear"})");
-            printf("[test-ws] UniSpeech DB cleared (fd=%d)\n", fd);
         } else if (msg.rfind("speaker_name:", 0) == 0) {
             // Format: speaker_name:ID:Name
             auto rest = msg.substr(13);
@@ -2173,32 +2106,6 @@ int cmd_test_ws(const std::string& webui_dir,
                     R"({"type":"speaker_name","id":%d,"name":"%s"})", id, name.c_str());
                 server.send_text(fd, json);
                 printf("[test-ws] CAM++ Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
-            }
-        } else if (msg.rfind("wavlm_name:", 0) == 0) {
-            auto rest = msg.substr(11);
-            auto colon = rest.find(':');
-            if (colon != std::string::npos) {
-                int id = std::stoi(rest.substr(0, colon));
-                std::string name = rest.substr(colon + 1);
-                audio.set_wavlm_name(id, name);
-                char json[256];
-                snprintf(json, sizeof(json),
-                    R"({"type":"wavlm_name","id":%d,"name":"%s"})", id, name.c_str());
-                server.send_text(fd, json);
-                printf("[test-ws] WavLM Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
-            }
-        } else if (msg.rfind("unispeech_name:", 0) == 0) {
-            auto rest = msg.substr(15);
-            auto colon = rest.find(':');
-            if (colon != std::string::npos) {
-                int id = std::stoi(rest.substr(0, colon));
-                std::string name = rest.substr(colon + 1);
-                audio.set_unispeech_name(id, name);
-                char json[256];
-                snprintf(json, sizeof(json),
-                    R"({"type":"unispeech_name","id":%d,"name":"%s"})", id, name.c_str());
-                server.send_text(fd, json);
-                printf("[test-ws] UniSpeech Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
             }
         } else if (msg == "wlecapa_enable:on" || msg == "wlecapa_enable:off") {
             bool on = msg.back() == 'n';
@@ -2376,7 +2283,6 @@ int cmd_test_ws(const std::string& webui_dir,
             VadSource src = VadSource::ANY;
             if (val == "silero") src = VadSource::SILERO;
             else if (val == "fsmn") src = VadSource::FSMN;
-            else if (val == "ten") src = VadSource::TEN;
             else if (val == "direct") src = VadSource::DIRECT;
             else src = VadSource::ANY;
             audio.set_asr_vad_source(src);

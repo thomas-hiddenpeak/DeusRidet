@@ -578,6 +578,7 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
             // Dynamic admission margin: stricter when exemplar set is small
             // (early exemplars define the speaker's cluster center and must
             // be high-quality to prevent cross-speaker contamination).
+            // v13b: restored to 0.10 default (v13's 0.15 froze centroids).
             float admit_margin = kExemplarAdmitMargin;  // default 0.10
             if (spk.exemplar_count < 5)
                 admit_margin = 0.20f;  // very strict early on
@@ -602,7 +603,25 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
                 }
             }
 
-            if (best.similarity >= admit_thresh && div >= kDiversityThresh && hit_ratio_ok) {
+            // v13: Margin gate — when best and second-best are close,
+            // this embedding is ambiguous and could contaminate the centroid.
+            // Only add exemplars when the speaker identity is clear.
+            // v13b: relaxed from 0.10 to 0.05 — 0.10 blocked 454 exemplars
+            // and froze centroids, dropping accuracy to 39%.
+            bool margin_ok = true;
+            if (second_best_id >= 0 && (int)speakers_.size() >= 3) {
+                float margin = best.similarity - second_best_sim;
+                if (margin < 0.05f) {
+                    margin_ok = false;
+                    LOG_INFO(label_.c_str(),
+                             "Exemplar blocked by margin for #%d: "
+                             "best=%.3f 2nd=#%d(%.3f) margin=%.3f < 0.05",
+                             spk.external_id, best.similarity,
+                             second_best_id, second_best_sim, margin);
+                }
+            }
+
+            if (best.similarity >= admit_thresh && div >= kDiversityThresh && hit_ratio_ok && margin_ok) {
                 // This embedding is sufficiently different from all existing exemplars.
                 if (spk.exemplar_count < max_exemplars_) {
                     // Room available — add directly.
@@ -1297,10 +1316,12 @@ bool SpeakerVectorStore::load(const std::string& dir) {
     return true;
 }
 
-int SpeakerVectorStore::absorb_fragments(float absorption_threshold) {
+int SpeakerVectorStore::absorb_fragments(float absorption_threshold, int max_minor_matches) {
     // Fragment absorption: iteratively merge speaker pairs with high centroid similarity.
     // Uses mean of all exemplars (centroid) instead of single anchor for robustness.
     // Absorbs smaller (fewer matches) into larger speaker.
+    // If max_minor_matches > 0, only merge if the smaller speaker has
+    // <= max_minor_matches matches (prevents merging established speakers).
     int merges = 0;
     while (true) {
         int dst_id = -1, src_id = -1;
@@ -1346,6 +1367,12 @@ int SpeakerVectorStore::absorb_fragments(float absorption_threshold) {
             // Find pair with highest mutual centroid similarity.
             for (int i = 0; i < n_spk; ++i) {
                 for (int j = i + 1; j < n_spk; ++j) {
+                    // Guard: skip if smaller speaker is well-established.
+                    int minor_count = std::min(speakers_[i].match_count,
+                                               speakers_[j].match_count);
+                    if (max_minor_matches > 0 && minor_count > max_minor_matches)
+                        continue;
+
                     float sim = 0;
                     for (int d = 0; d < dim_; ++d)
                         sim += centroids[i][d] * centroids[j][d];

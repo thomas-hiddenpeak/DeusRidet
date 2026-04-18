@@ -42,6 +42,34 @@ at minimum has no syntax errors).
 No exceptions. Skipping these steps produces polluted baselines and meaningless
 measurements. This applies to every single invocation — not just the first one.
 
+## Speaker Separation & Identification Benchmark
+
+This is a **first-class acceptance criterion** for DeusRidet. The goal is
+production-ready quality, not a demo.
+
+- **Baseline audio**: `tests/test.mp3` (3615s, 4 speakers: 朱杰, 徐子景, 石一, 唐云峰)
+- **Ground truth**: `tests/asrTest2Final.txt` (hand-transcribed with timestamps)
+- **Target**: ≥ 90% speaker-attribution accuracy across the full recording.
+  Short tokens the pipeline marks as unknown (`spk-1` / `?`) are allowed and
+  are **not** counted against accuracy — better to abstain than to misattribute
+- **Streaming speed**: If the stream rate overwhelms the pipeline (ring buffer
+  overflow, KV saturation, dropped ASR segments), **lower the speed** (e.g.
+  `--speed 4.0`, `2.0`, or `1.0`) until the backend keeps up. Recording
+  coverage matters more than throughput for this benchmark
+- **Evaluation method**: The agent reads the pipeline log **directly** and
+  compares against `asrTest2Final.txt` segment by segment. No grep/awk/Python
+  evaluation scripts — direct, human-style reading only. This is
+  non-negotiable per owner's explicit instruction
+- **Authority & scope**: Until the 90% target is met, the agent has full
+  authority to iterate on thresholds, kernels, VAD tuning, register/match
+  logic, scorer weights, diarizer clustering — anything in the audio path.
+  Every tuning cycle must be logged in `docs/en/DEVLOG.md` with the delta
+  and observed accuracy impact
+- **Forbidden shortcuts**: Do not raise accuracy by suppressing hard cases
+  (e.g. always predict the most frequent speaker, always abstain). The
+  abstain rate must itself stay reasonable — spot-check that abstentions
+  are concentrated on genuinely short / overlapping / low-SNR regions
+
 ## Post-Change Verification
 
 **After every code change that affects the build**, the following steps are

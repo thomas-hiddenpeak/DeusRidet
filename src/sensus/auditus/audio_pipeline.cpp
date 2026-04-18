@@ -44,6 +44,20 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
         }
     }
 
+    // Initialize P1: overlap detector (optional — non-fatal).
+    if (!cfg_.overlap_det.model_path.empty() && cfg_.overlap_det.enabled) {
+        if (!tracker_.init_overlap_det(cfg_.overlap_det)) {
+            LOG_WARN("AudioPipe", "Overlap detector init failed — using heuristic fallback");
+        }
+    }
+
+    // Initialize P2: speech separator (optional — lazy loaded).
+    if (!cfg_.separator.model_path.empty()) {
+        if (!tracker_.init_separator(cfg_.separator)) {
+            LOG_WARN("AudioPipe", "Speech separator init failed");
+        }
+    }
+
     // Initialize Silero VAD (optional — non-fatal if model not found).
     if (!cfg_.silero.model_path.empty()) {
         if (!silero_.init(cfg_.silero)) {
@@ -58,13 +72,6 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
         }
     }
 
-    // Initialize TEN VAD (optional — non-fatal).
-    if (!cfg_.ten.model_path.empty()) {
-        if (!ten_.init(cfg_.ten)) {
-            LOG_WARN("AudioPipe", "TEN VAD init failed");
-        }
-    }
-
     // Initialize speaker encoder (optional — non-fatal).
     bool need_fbank = false;
     if (!cfg_.speaker.model_path.empty()) {
@@ -75,31 +82,12 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
         }
     }
 
-    // ECAPA-TDNN also requires fbank features.
-    if (!cfg_.unispeech.model_path.empty()) {
-        need_fbank = true;
-    }
-
     if (need_fbank) {
         // Initialize 80-dim fbank (shared between CAM++ and ECAPA-TDNN).
         // Povey window + [-1,1] PCM normalization — matches WeSpeaker/Kaldi defaults.
         if (!speaker_fbank_.init(80, 400, 160, 512, 16000,
                                  FbankWindowType::POVEY, true)) {
             LOG_WARN("AudioPipe", "Speaker fbank init failed");
-        }
-    }
-
-    // Initialize WavLM ONNX speaker encoder (optional — non-fatal).
-    if (!cfg_.wavlm.model_path.empty()) {
-        if (!wavlm_enc_.init(cfg_.wavlm)) {
-            LOG_WARN("AudioPipe", "WavLM speaker encoder init failed");
-        }
-    }
-
-    // Initialize UniSpeech-SAT ONNX speaker encoder (optional — non-fatal).
-    if (!cfg_.unispeech.model_path.empty()) {
-        if (!unispeech_enc_.init(cfg_.unispeech)) {
-            LOG_WARN("AudioPipe", "UniSpeech-SAT speaker encoder init failed");
         }
     }
 
@@ -118,13 +106,11 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
     }
 
     speaker_threshold_.store(cfg_.speaker_threshold, std::memory_order_relaxed);
-    speaker_register_threshold_.store(0.55f, std::memory_order_relaxed);
+    speaker_register_threshold_.store(0.60f, std::memory_order_relaxed);
 
     // v24: threshold set from config (default 0.50 in header, 0.45 in machina.conf).
     // Recency bonus (-0.05) applies dynamically during FULL identification.
     // No threshold override needed — dual encoder mode uses cfg value directly.
-    wavlm_threshold_.store(cfg_.wavlm_threshold, std::memory_order_relaxed);
-    unispeech_threshold_.store(cfg_.unispeech_threshold, std::memory_order_relaxed);
     wlecapa_threshold_.store(cfg_.wavlm_ecapa_threshold, std::memory_order_relaxed);
 
     // Initialize ASR engine (optional — non-fatal, but heavy: ~4.7 GB weights).
@@ -307,16 +293,11 @@ void AudioPipeline::process_loop() {
     std::vector<float> pcm_float;  // reused buffer for gain-applied float PCM
     std::vector<float> silero_buf; // carries remainder samples across chunks
 
-    // TEN VAD processes 160-sample hops (10ms).
-    int ten_hop = ten_.initialized() ? cfg_.ten.hop_size : 0;
-    std::vector<int16_t> ten_buf;  // carries remainder for TEN VAD
-
-    LOG_INFO("AudioPipe", "Process loop: chunk=%d samples (%d ms), frcrn=%s silero=%s fsmn=%s ten=%s",
+    LOG_INFO("AudioPipe", "Process loop: chunk=%d samples (%d ms), frcrn=%s silero=%s fsmn=%s",
              chunk_samples, cfg_.process_chunk_ms,
              frcrn_.initialized() ? "ON" : "OFF",
              silero_.initialized() ? "ON" : "OFF",
-             fsmn_.initialized() ? "ON" : "OFF",
-             ten_.initialized() ? "ON" : "OFF");
+             fsmn_.initialized() ? "ON" : "OFF");
 
     int diag_counter = 0;
 
@@ -408,37 +389,14 @@ void AudioPipeline::process_loop() {
             stats_.fsmn_speech = fvr.is_speech;
         }
 
-        // Run TEN VAD on raw PCM (160-sample hops).
-        if (ten_.initialized() && ten_hop > 0 &&
-            enable_ten_.load(std::memory_order_relaxed)) {
-            ten_buf.insert(ten_buf.end(), pcm_buf.data(),
-                           pcm_buf.data() + n_samples);
-            int consumed = 0;
-            while (consumed + ten_hop <= (int)ten_buf.size()) {
-                TenVadResult tvr = ten_.process(
-                    ten_buf.data() + consumed, ten_hop);
-                consumed += ten_hop;
-                stats_.ten_prob = tvr.probability;
-                stats_.ten_speech = tvr.is_speech;
-            }
-            if (consumed > 0) {
-                ten_buf.erase(ten_buf.begin(),
-                              ten_buf.begin() + consumed);
-            }
-        }
-
         // Buffer PCM for speaker identification during speech (VAD-gated).
         bool any_speaker_enabled =
             (speaker_enc_.initialized() && enable_speaker_.load(std::memory_order_relaxed)) ||
-            (wavlm_enc_.initialized() && enable_wavlm_.load(std::memory_order_relaxed)) ||
-            (unispeech_enc_.initialized() && enable_unispeech_.load(std::memory_order_relaxed)) ||
             (wlecapa_enc_.initialized() && enable_wlecapa_.load(std::memory_order_relaxed));
         bool need_segment_pcm = any_speaker_enabled;
 
         // Clear active flags each tick — only set true when extraction happens.
         stats_.speaker_active = false;
-        stats_.wavlm_active = false;
-        stats_.unispeech_active = false;
         stats_.wlecapa_active = false;
         stats_.wlecapa_change_valid = false;
         stats_.asr_active = false;
@@ -450,11 +408,10 @@ void AudioPipeline::process_loop() {
             switch (src) {
                 case VadSource::SILERO: vad_speech = stats_.silero_speech; break;
                 case VadSource::FSMN:   vad_speech = stats_.fsmn_speech; break;
-                case VadSource::TEN:    vad_speech = stats_.ten_speech; break;
                 case VadSource::ANY:
                 default:
                     vad_speech = stats_.is_speech || stats_.silero_speech ||
-                                 stats_.fsmn_speech || stats_.ten_speech;
+                                 stats_.fsmn_speech;
                     break;
             }
             if (vad_speech && !in_speech_segment_) {
@@ -470,6 +427,8 @@ void AudioPipeline::process_loop() {
                 speech_pcm_buf_.clear();
                 speaker_fbank_.reset();
                 seg_fbank_buf_.clear();
+                seg_overlap_chunks_ = 0;
+                seg_total_chunks_ = 0;
 
                 // SAAS: short-segment speaker inheritance.
                 // If this new segment starts within a short gap of the previous one,
@@ -522,10 +481,11 @@ void AudioPipeline::process_loop() {
             if (in_speech_segment_) {
                 speech_pcm_buf_.insert(speech_pcm_buf_.end(),
                                        pcm_buf.data(), pcm_buf.data() + n_samples);
+                // Track overlap during this speech segment.
+                seg_total_chunks_++;
+                if (stats_.overlap_detected) seg_overlap_chunks_++;
                 if ((speaker_enc_.initialized() &&
-                     enable_speaker_.load(std::memory_order_relaxed)) ||
-                    (unispeech_enc_.initialized() &&
-                     enable_unispeech_.load(std::memory_order_relaxed))) {
+                     enable_speaker_.load(std::memory_order_relaxed))) {
                     speaker_fbank_.push_pcm(pcm_buf.data(), n_samples);
                     // Accumulate fbank frames for CAM++ EARLY/FULL extraction.
                     int avail = speaker_fbank_.frames_ready();
@@ -801,9 +761,7 @@ void AudioPipeline::process_loop() {
                                     // Reset fbank for new sub-segment
                                     speaker_fbank_.reset();
                                     if (((speaker_enc_.initialized() &&
-                                          enable_speaker_.load(std::memory_order_relaxed)) ||
-                                         (unispeech_enc_.initialized() &&
-                                          enable_unispeech_.load(std::memory_order_relaxed))) &&
+                                        enable_speaker_.load(std::memory_order_relaxed))) &&
                                         !speech_pcm_buf_.empty()) {
                                         speaker_fbank_.push_pcm(speech_pcm_buf_.data(),
                                                                 (int)speech_pcm_buf_.size());
@@ -904,7 +862,135 @@ void AudioPipeline::process_loop() {
 
                         auto emb = speaker_enc_.extract(seg_fbank_buf_.data(), fbank_frames);
                         if (!emb.empty()) {
-                            bool auto_reg = true;  // always allow registration
+                            // Tiered overlap gate:
+                            // - >60% overlap: skip entirely (embedding is garbage)
+                            // - >20% overlap: identify but never register new speaker
+                            //   (prevents store pollution from mixed-speaker embeddings)
+                            // - <=20%: normal processing
+                            float ovlp_ratio = seg_total_chunks_ > 0
+                                ? (float)seg_overlap_chunks_ / seg_total_chunks_ : 0;
+                            bool overlap_skip = (ovlp_ratio > 0.60f);
+                            bool overlap_noregister = (ovlp_ratio > 0.20f);
+                            if (overlap_skip) {
+                                // Try separator recovery: separate, extract, identify each source.
+                                if (tracker_.separator_ready() && speech_pcm_buf_.size() >= 4800) {
+                                    // Convert int16 PCM to float32 for separator.
+                                    int n_samp = (int)speech_pcm_buf_.size();
+                                    std::vector<float> pcm_f(n_samp);
+                                    for (int j = 0; j < n_samp; ++j)
+                                        pcm_f[j] = speech_pcm_buf_[j] / 32768.0f;
+                                    auto sep = tracker_.separate(pcm_f.data(), n_samp);
+                                    if (sep.valid && sep.source1.size() == (size_t)n_samp) {
+                                        // Extract fbank from each separated source and identify.
+                                        for (int src_idx = 0; src_idx < 2; ++src_idx) {
+                                            const auto& src = (src_idx == 0) ? sep.source1 : sep.source2;
+                                            float rms = 0;
+                                            for (float v : src) rms += v * v;
+                                            rms = sqrtf(rms / src.size());
+                                            if (rms < 0.005f) continue;  // skip silent source
+
+                                            // Convert back to int16 for fbank extraction.
+                                            std::vector<int16_t> src_i16(n_samp);
+                                            for (int j = 0; j < n_samp; ++j)
+                                                src_i16[j] = (int16_t)std::max(-32768.0f, std::min(32767.0f, src[j] * 32768.0f));
+
+                                            // Extract fbank features using the pipeline's fbank.
+                                            speaker_fbank_.reset();
+                                            speaker_fbank_.push_pcm(src_i16.data(), n_samp);
+                                            int sep_frames = speaker_fbank_.frames_ready();
+                                            if (sep_frames < 150) continue;
+                                            std::vector<float> sep_fb(sep_frames * 80);
+                                            speaker_fbank_.read_fbank(sep_fb.data(), sep_frames);
+
+                                            auto sep_emb = speaker_enc_.extract(sep_fb.data(), sep_frames);
+                                            if (sep_emb.empty()) continue;
+
+                                            // Build embedding for identify.
+                                            std::vector<float> id_emb;
+                                            if (use_dual_encoder_ && n_samp >= 16000) {
+                                                // Dual-encoder: CAM++ + WL-ECAPA → 384D.
+                                                auto wl = wlecapa_enc_.extract(src.data(), n_samp);
+                                                if (!wl.empty()) {
+                                                    id_emb.resize(384);
+                                                    std::copy(sep_emb.begin(), sep_emb.end(), id_emb.begin());
+                                                    std::copy(wl.begin(), wl.end(), id_emb.begin() + 192);
+                                                    float n2 = 0;
+                                                    for (float v : id_emb) n2 += v * v;
+                                                    float inv = 1.0f / sqrtf(n2 + 1e-12f);
+                                                    for (float& v : id_emb) v *= inv;
+                                                }
+                                            }
+                                            if (id_emb.empty()) {
+                                                // Fallback to CAM++ only.
+                                                id_emb = sep_emb;
+                                            }
+
+                                            // Identify-only, never register.
+                                            // Use higher threshold for separated sources — overlap
+                                            // extraction is noisier than clean segments.
+                                            static constexpr float kSepThreshold = 0.60f;
+                                            auto& db = use_dual_encoder_ ? dual_db_ : campp_db_;
+                                            SpeakerMatch m = db.identify(id_emb, kSepThreshold, false);
+                                            float seg_t = (float)(total_samples_in_ - (int64_t)speech_pcm_buf_.size() / 2) / 16000.0f;
+                                            LOG_INFO("AudioPipe", "SEP-ID src%d: t=%.1f id=%d sim=%.3f %s (rms=%.4f, frames=%d)",
+                                                     src_idx, seg_t, m.speaker_id, m.similarity,
+                                                     m.name.empty() ? "(unk)" : m.name.c_str(),
+                                                     rms, sep_frames);
+
+                                            // Feed to timeline if matched.
+                                            if (m.speaker_id >= 0) {
+                                                int64_t seg_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
+                                                SpeakerEvent ev{};
+                                                ev.audio_start = seg_start;
+                                                ev.audio_end   = total_samples_in_;
+                                                ev.source      = SpkEventSource::SAAS_FULL;
+                                                ev.speaker_id  = m.speaker_id;
+                                                ev.similarity  = m.similarity;
+                                                strncpy(ev.name, m.name.c_str(), sizeof(ev.name) - 1);
+                                                spk_timeline_.push(ev);
+                                            }
+                                        }
+                                        LOG_INFO("AudioPipe", "OVERLAP-SEP: %.0f%% overlap, separated and identified (%d samples, lat=%.0fms)",
+                                                 ovlp_ratio * 100, n_samp, 0.0f);
+                                    } else {
+                                        LOG_INFO("AudioPipe", "OVERLAP-SKIP: %.0f%% overlap, separator failed — abstain",
+                                                 ovlp_ratio * 100);
+                                    }
+                                } else {
+                                    LOG_INFO("AudioPipe", "OVERLAP-SKIP: %.0f%% overlap (%d/%d chunks), fbank=%d — abstain",
+                                             ovlp_ratio * 100, seg_overlap_chunks_, seg_total_chunks_, fbank_frames);
+                                }
+                                goto skip_full_identify;
+                            }
+                            if (overlap_noregister) {
+                                LOG_INFO("AudioPipe", "OVERLAP-NOREG: %.0f%% overlap (%d/%d chunks) — identify only",
+                                         ovlp_ratio * 100, seg_overlap_chunks_, seg_total_chunks_);
+                            }
+
+                            // v25: disable auto-registration after warmup spectral
+                            // clustering completes. The warmup already establishes
+                            // the expected speaker set (4 speakers via spectral
+                            // clustering); any further "new" speakers registered
+                            // post-warmup are false-split fragments that destroy
+                            // accuracy. Unmatched segments abstain as spk-1 instead.
+                            bool auto_reg = !warmup_done_;
+
+                            // v29→v30: Late registration cap — after 100 FULL
+                            // identifications all speakers should be registered.
+                            // Further registrations are drift clones (e.g. spk5
+                            // at 1872s in v8) that create false attributions.
+                            // v30: lowered from 200→100 because spk5 registered
+                            // at count=181 in v9.
+                            static constexpr int kMaxAutoRegCount = 100;
+                            if (campp_full_count_ >= kMaxAutoRegCount) {
+                                auto_reg = false;
+                            }
+                            // Overlap guard: never register new speakers from
+                            // overlapping segments — the mixed embedding would
+                            // pollute the speaker store.
+                            if (overlap_noregister) {
+                                auto_reg = false;
+                            }
                             float match_thresh = thresh;
 
                             // v24d: Discovery phase — use higher threshold during
@@ -920,11 +1006,18 @@ void AudioPipeline::process_loop() {
                             float seg_mid_time = (float)(total_samples_in_ - (int64_t)speech_pcm_buf_.size() / 2) / 16000.0f;
                             float time_since_prev = seg_mid_time - prev_full_time_;
                             static constexpr float kRecencyWindow = 15.0f;
+                            // v32: reverted to 0.05 — v31's 0.03 hurt spk2
+                            // (徐子景 28 vs GT 73). 0.05 was fine in v9.
                             static constexpr float kRecencyBonus  = 0.05f;
                             bool recency_active = (prev_full_speaker_id_ >= 0 &&
                                                    time_since_prev < kRecencyWindow);
                             if (recency_active) {
                                 match_thresh -= kRecencyBonus;
+                                // v32: restored from v30 — lowered threshold
+                                // must NOT allow new-speaker registration.
+                                // v12 showed spk1 registering at mt=0.47 and
+                                // merging into spk0, scrambling all mappings.
+                                auto_reg = false;
                             }
 
                             SpeakerMatch match;
@@ -982,6 +1075,105 @@ void AudioPipeline::process_loop() {
                                 }
                             }
 
+                            // v25/v27: absorb over-split fragments immediately after a
+                            // new speaker is registered. If the new centroid is too
+                            // close to any existing centroid (sim >= 0.60), the
+                            // smaller speaker is merged into the larger one.
+                            // v27: max_minor_matches=5 prevents merging two
+                            // established speakers when a third registration
+                            // triggers absorb (was causing 朱杰→唐云峰 at sim=0.655).
+                            if (match.is_new) {
+                                int merged = use_dual_encoder_
+                                    ? dual_db_.absorb_fragments(0.60f, 5)
+                                    : campp_db_.absorb_fragments(0.60f, 5);
+                                if (merged > 0) {
+                                    LOG_INFO("AudioPipe",
+                                             "Absorbed %d fragments after registering #%d",
+                                             merged, match.speaker_id);
+                                }
+                            }
+
+                            // v28: periodic absorb — centroids stabilize over time,
+                            // so re-check every 50 FULL identifies. This catches
+                            // slow-drift splits like 石一→spk3+spk4 where initial
+                            // exemplars were too few for centroid similarity ≥ 0.60.
+                            // max_minor_matches=12: only merge fragments (small speakers),
+                            // never merge two established speakers (both >12 matches).
+                            // v28: lowered from 20→12 to prevent wrong merge of
+                            // established speakers (e.g. 唐云峰→徐子景 at sim=0.658
+                            // where both had 15-20 matches at absorb time).
+                            static constexpr int kPeriodicAbsorbInterval = 50;
+                            if (campp_full_count_ > 0 &&
+                                campp_full_count_ % kPeriodicAbsorbInterval == 0) {
+                                int merged = use_dual_encoder_
+                                    ? dual_db_.absorb_fragments(0.58f, 12)
+                                    : campp_db_.absorb_fragments(0.58f, 12);
+                                if (merged > 0) {
+                                    LOG_INFO("AudioPipe",
+                                             "Periodic absorb @%d: merged %d fragments",
+                                             campp_full_count_, merged);
+                                }
+                            }
+
+                            // v26: short-segment low-similarity abstain — segments
+                            // shorter than 2s with similarity below 0.55 are likely
+                            // interjections from a different speaker lumped into the
+                            // current segment. Abstain rather than misattribute.
+                            if (!match.is_new && match.speaker_id >= 0 &&
+                                speech_duration < 2.0f && match.similarity < 0.55f) {
+                                LOG_INFO("AudioPipe",
+                                         "Short-seg abstain: dur=%.2fs sim=%.3f id=%d",
+                                         speech_duration, match.similarity, match.speaker_id);
+                                match.speaker_id = -1;
+                                match.name = "?";
+                                match.similarity = 0.0f;
+                            }
+
+                            // v13b: margin-based abstain tuned to catch ambiguous
+                            // cases without over-suppressing. margin<0.05 is tight
+                            // enough to avoid losing valid matches but catches the
+                            // tightest 石一/唐云峰 confusions.
+                            static constexpr float kMarginAbstainThresh = 0.05f;
+                            static constexpr float kMarginAbstainMaxSim = 0.58f;
+                            if (!match.is_new && match.speaker_id >= 0 &&
+                                match.second_best_id >= 0 &&
+                                match.similarity < kMarginAbstainMaxSim &&
+                                (match.similarity - match.second_best_sim) < kMarginAbstainThresh) {
+                                LOG_INFO("AudioPipe",
+                                         "Margin abstain: #%d(%.3f) vs #%d(%.3f) margin=%.3f",
+                                         match.speaker_id, match.similarity,
+                                         match.second_best_id, match.second_best_sim,
+                                         match.similarity - match.second_best_sim);
+                                match.speaker_id = -1;
+                                match.name = "?";
+                                match.similarity = 0.0f;
+                            }
+
+                            // v15d: Run-length aware sticky bias.
+                            // Stronger than v32 sticky: considers how many
+                            // consecutive segments had the same speaker.
+                            static constexpr float kStickyBase    = 0.10f;
+                            static constexpr float kStickyPerRun  = 0.03f; // extra per consecutive segment
+                            static constexpr int   kStickyMaxRun  = 5;     // cap run-length bonus
+                            static constexpr float kStickyWindow  = 10.0f;
+                            if (!match.is_new && match.speaker_id >= 0 &&
+                                match.speaker_id != prev_full_speaker_id_ &&
+                                prev_full_speaker_id_ >= 0 &&
+                                time_since_prev < kStickyWindow) {
+                                int run = std::min(speaker_run_length_, kStickyMaxRun);
+                                float bonus = kStickyBase + kStickyPerRun * run;
+                                if (match.second_best_id == prev_full_speaker_id_ &&
+                                    match.second_best_sim + bonus > match.similarity) {
+                                    LOG_INFO("AudioPipe",
+                                             "Sticky: #%d(%.3f)+%.2f(run=%d) > #%d(%.3f), swap to prev",
+                                             match.second_best_id, match.second_best_sim,
+                                             bonus, speaker_run_length_,
+                                             match.speaker_id, match.similarity);
+                                    match.speaker_id = match.second_best_id;
+                                    match.similarity = match.second_best_sim;
+                                }
+                            }
+
                             stats_.speaker_id = match.speaker_id;
                             stats_.speaker_sim = match.similarity;
                             stats_.speaker_new = match.is_new;
@@ -993,7 +1185,8 @@ void AudioPipeline::process_loop() {
                             campp_full_count_++;
 
                             // v24b: Collect embeddings for warmup spectral clustering.
-                            if (!warmup_done_) {
+                            // Only collect clean segments (no overlap detected).
+                            if (!warmup_done_ && !overlap_noregister) {
                                 warmup_embeddings_.push_back(emb);
                                 warmup_timestamps_.push_back(seg_mid_time);
                                 // Reuse already-extracted WL-ECAPA embedding.
@@ -1008,18 +1201,60 @@ void AudioPipeline::process_loop() {
                             strncpy(stats_.speaker_name, match.name.c_str(),
                                     sizeof(stats_.speaker_name) - 1);
                             stats_.speaker_name[sizeof(stats_.speaker_name) - 1] = '\0';
-                            LOG_INFO("AudioPipe", "FULL: id=%d sim=%.3f %s%s (fbank=%d, ex=%d, recency=%s, mt=%.2f)",
+                            LOG_INFO("AudioPipe", "FULL: id=%d sim=%.3f 2nd=#%d(%.3f) m=%.3f %s%s (fbank=%d, ex=%d, recency=%s, mt=%.2f)",
                                      match.speaker_id, match.similarity,
+                                     match.second_best_id, match.second_best_sim,
+                                     match.similarity - match.second_best_sim,
                                      match.is_new ? "NEW " : "",
                                      match.name.empty() ? "(unnamed)" : match.name.c_str(),
                                      fbank_frames, match.exemplar_count,
                                      recency_active ? "ON" : "off", match_thresh);
                             if (on_speaker_) on_speaker_(match);
 
-                            // Update recency tracking.
+                            // DEBUG: dump embedding for offline clustering analysis.
+                            // Format per record (1560 bytes):
+                            //   float32 timestamp, int32 speaker_id, int32 fbank_frames,
+                            //   float32 similarity, float32[192] campp, float32[192] wavlm
+                            {
+                                static FILE* emb_fp = nullptr;
+                                if (!emb_fp) emb_fp = fopen("/tmp/spk_embeddings.bin", "ab");
+                                if (emb_fp) {
+                                    float ts_val = seg_mid_time;
+                                    int32_t sid = match.speaker_id;
+                                    int32_t fb = fbank_frames;
+                                    float sim = match.similarity;
+                                    fwrite(&ts_val, 4, 1, emb_fp);
+                                    fwrite(&sid, 4, 1, emb_fp);
+                                    fwrite(&fb, 4, 1, emb_fp);
+                                    fwrite(&sim, 4, 1, emb_fp);
+                                    // CAM++ 192D (already L2-normalized by encoder)
+                                    if (emb.size() == 192) {
+                                        fwrite(emb.data(), 4, 192, emb_fp);
+                                    } else {
+                                        float zeros[192] = {};
+                                        fwrite(zeros, 4, 192, emb_fp);
+                                    }
+                                    // WavLM-ECAPA 192D
+                                    if (wl_emb.size() == 192) {
+                                        fwrite(wl_emb.data(), 4, 192, emb_fp);
+                                    } else {
+                                        float zeros[192] = {};
+                                        fwrite(zeros, 4, 192, emb_fp);
+                                    }
+                                    fflush(emb_fp);
+                                }
+                            }
+
+                            // Update recency tracking + run-length.
                             if (match.speaker_id >= 0) {
+                                if (match.speaker_id == prev_full_speaker_id_) {
+                                    speaker_run_length_++;
+                                } else {
+                                    speaker_run_length_ = 1;
+                                }
                                 prev_full_speaker_id_ = match.speaker_id;
                                 prev_full_time_ = seg_mid_time;
+                                prev_full_speaker_name_ = match.name;  // v29
                             }
 
                             // SAAS: feed result into speaker timeline.
@@ -1078,13 +1313,17 @@ void AudioPipeline::process_loop() {
                                     for (float& v : cluster_input[i]) v *= inv;
                                 }
 
-                                // Spectral clustering with PCA (no temporal fusion
-                                // for segment-based extraction — adjacent segments are
-                                // from different speakers in conversation format).
+                                // Spectral clustering with PCA dimension reduction.
+                                // Full 384D has noise dims that confuse clustering.
+                                // PCA to 32D focuses on discriminative directions.
+                                // No temporal fusion — conversation segments alternate
+                                // speakers, so temporal proximity would merge different
+                                // speakers who spoke close in time.
                                 SpectralClusterConfig sc_cfg;
                                 sc_cfg.temporal_alpha = 0.0f;   // pure embedding clustering
-                                sc_cfg.pca_dim = cluster_dim;   // no PCA — keep full dims
-                                sc_cfg.merge_threshold = 1.0f;  // NO auto-merge, we do manual merge below
+                                sc_cfg.pca_dim = cluster_dim;   // v15c: full dim (384D)
+                                                                // PCA 32D changed cluster balance but didn't help
+                                sc_cfg.merge_threshold = 1.0f;  // NO auto-merge
                                 sc_cfg.max_k = 6;               // allow up to 6
                                 auto cr = spectral_cluster(cluster_input,
                                                            warmup_timestamps_,
@@ -1109,7 +1348,7 @@ void AudioPipeline::process_loop() {
 
                                 // No forced merge — keep K from eigengap.
 
-                                // Rebuild dual_db_ (or campp_db_) with ALL warmup embeddings as exemplars.
+                                // Rebuild dual_db_ (or campp_db_) with cluster centroids.
                                 if (use_dual_w) {
                                     dual_db_.clear();
                                     for (int c = 0; c < cr.K; ++c) {
@@ -1120,13 +1359,14 @@ void AudioPipeline::process_loop() {
 
                                         if (members.empty()) continue;
 
-                                        // Register with first member's embedding.
+                                        // v15d: First-member registration (same as v14).
+                                        // Medoid was too generic (v15c: 41% vs v14: 54%).
+                                        int anchor = members[0];
                                         std::vector<float> first_emb(384);
                                         for (int d = 0; d < 192; ++d) {
-                                            first_emb[d] = warmup_embeddings_[members[0]][d];
-                                            first_emb[192 + d] = warmup_wlecapa_embs_[members[0]][d];
+                                            first_emb[d] = warmup_embeddings_[anchor][d];
+                                            first_emb[192 + d] = warmup_wlecapa_embs_[anchor][d];
                                         }
-                                        // L2-normalize.
                                         float n2 = 0;
                                         for (float v : first_emb) n2 += v * v;
                                         float inv = 1.0f / sqrtf(n2 + 1e-12f);
@@ -1134,13 +1374,14 @@ void AudioPipeline::process_loop() {
 
                                         int id = dual_db_.register_speaker("", first_emb);
 
-                                        // Add remaining members as exemplars (cap at 15).
-                                        int added = 1;
-                                        for (size_t m = 1; m < members.size() && added < 15; ++m) {
+                                        // Add up to 14 more exemplars from cluster members.
+                                        int added = 0;
+                                        for (size_t m = 1; m < members.size() && added < 14; ++m) {
+                                            int mi = members[m];
                                             std::vector<float> emb(384);
                                             for (int d = 0; d < 192; ++d) {
-                                                emb[d] = warmup_embeddings_[members[m]][d];
-                                                emb[192 + d] = warmup_wlecapa_embs_[members[m]][d];
+                                                emb[d] = warmup_embeddings_[mi][d];
+                                                emb[192 + d] = warmup_wlecapa_embs_[mi][d];
                                             }
                                             float n2e = 0;
                                             for (float v : emb) n2e += v * v;
@@ -1193,6 +1434,7 @@ void AudioPipeline::process_loop() {
                                 // Reset state for new ID space.
                                 prev_full_speaker_id_ = -1;
                                 prev_full_time_ = -100.0f;
+                                speaker_run_length_ = 0;
                                 seg_ref_speaker_id_ = -1;
                                 spk_timeline_.clear();
 
@@ -1207,66 +1449,8 @@ void AudioPipeline::process_loop() {
                             }
                         }
                 }
+                skip_full_identify:;
 
-
-                // WavLM speaker encoder (uses raw PCM waveform).
-                if (wavlm_enc_.initialized() &&
-                    enable_wavlm_.load(std::memory_order_relaxed) &&
-                    speech_samples >= 24000) {  // minimum ~1.5s for Gemm output
-                    auto emb = wavlm_enc_.extract_int16(speech_pcm_buf_.data(), speech_samples);
-                    if (!emb.empty()) {
-                        float enorm = 0;
-                        for (float v : emb) enorm += v * v;
-                        enorm = sqrtf(enorm);
-                        LOG_INFO("AudioPipe", "WavLM emb: norm=%.4f e[0..3]=[%.4f,%.4f,%.4f,%.4f]",
-                                 enorm, emb[0], emb[1], emb[2], emb[3]);
-                        float thresh = wavlm_threshold_.load(std::memory_order_relaxed);
-                        SpeakerMatch match = wavlm_db_.identify(emb, thresh);
-                        stats_.wavlm_id = match.speaker_id;
-                        stats_.wavlm_sim = match.similarity;
-                        stats_.wavlm_new = match.is_new;
-                        stats_.wavlm_count = wavlm_db_.count();
-                        stats_.wavlm_active = true;
-                        strncpy(stats_.wavlm_name, match.name.c_str(),
-                                sizeof(stats_.wavlm_name) - 1);
-                        stats_.wavlm_name[sizeof(stats_.wavlm_name) - 1] = '\0';
-                        LOG_INFO("AudioPipe", "WavLM: id=%d sim=%.3f %s%s (%d samples)",
-                                 match.speaker_id, match.similarity,
-                                 match.is_new ? "NEW " : "",
-                                 match.name.empty() ? "(unnamed)" : match.name.c_str(),
-                                 speech_samples);
-                    }
-                }
-
-                // ECAPA-TDNN speaker encoder (uses fbank features, not raw PCM).
-                // Adapted from WeSpeaker ECAPA-TDNN-1024-LM with ASTP attention pooling.
-                if (unispeech_enc_.initialized() &&
-                    enable_unispeech_.load(std::memory_order_relaxed) &&
-                    fbank_frames >= 100) {  // minimum ~1.0s for ECAPA-TDNN
-                    auto emb = unispeech_enc_.extract_fbank(seg_fbank_buf_.data(), fbank_frames, 80);
-                    if (!emb.empty()) {
-                        float enorm = 0;
-                        for (float v : emb) enorm += v * v;
-                        enorm = sqrtf(enorm);
-                        LOG_INFO("AudioPipe", "ECAPA emb: norm=%.4f e[0..3]=[%.4f,%.4f,%.4f,%.4f]",
-                                 enorm, emb[0], emb[1], emb[2], emb[3]);
-                        float thresh = unispeech_threshold_.load(std::memory_order_relaxed);
-                        SpeakerMatch match = unispeech_db_.identify(emb, thresh);
-                        stats_.unispeech_id = match.speaker_id;
-                        stats_.unispeech_sim = match.similarity;
-                        stats_.unispeech_new = match.is_new;
-                        stats_.unispeech_count = unispeech_db_.count();
-                        stats_.unispeech_active = true;
-                        strncpy(stats_.unispeech_name, match.name.c_str(),
-                                sizeof(stats_.unispeech_name) - 1);
-                        stats_.unispeech_name[sizeof(stats_.unispeech_name) - 1] = '\0';
-                        LOG_INFO("AudioPipe", "ECAPA: id=%d sim=%.3f %s%s (fbank=%d)",
-                                 match.speaker_id, match.similarity,
-                                 match.is_new ? "NEW " : "",
-                                 match.name.empty() ? "(unnamed)" : match.name.c_str(),
-                                 fbank_frames);
-                    }
-                }
 
                 // WavLM-Large + ECAPA-TDNN native GPU speaker encoder (uses raw PCM).
                 int min_spk_samples = min_speech_samples_.load(std::memory_order_relaxed);
@@ -1359,11 +1543,10 @@ void AudioPipeline::process_loop() {
             switch (src) {
                 case VadSource::SILERO: tracker_vad = stats_.silero_speech; break;
                 case VadSource::FSMN:   tracker_vad = stats_.fsmn_speech; break;
-                case VadSource::TEN:    tracker_vad = stats_.ten_speech; break;
                 case VadSource::ANY:
                 default:
                     tracker_vad = stats_.is_speech || stats_.silero_speech ||
-                                  stats_.fsmn_speech || stats_.ten_speech;
+                                  stats_.fsmn_speech;
                     break;
             }
             tracker_.feed(pcm_buf.data(), n_samples, tracker_vad);
@@ -1384,6 +1567,17 @@ void AudioPipeline::process_loop() {
                     spk_timeline_.push(ev);
                 }
             }
+            // Copy P1/P2 stats from tracker to pipeline stats.
+            {
+                auto& ts = tracker_.stats();
+                stats_.overlap_detected   = ts.overlap_detected;
+                stats_.overlap_ratio      = ts.overlap_ratio;
+                stats_.od_latency_ms      = ts.od_latency_ms;
+                stats_.separation_active  = ts.separation_active;
+                stats_.separation_lat_ms  = ts.separation_lat_ms;
+                stats_.sep_source1_energy = ts.sep_source1_energy;
+                stats_.sep_source2_energy = ts.sep_source2_energy;
+            }
         }
 
         // ASR: accumulate ALL audio continuously. Whisper encoder naturally handles
@@ -1402,12 +1596,11 @@ void AudioPipeline::process_loop() {
             switch (asr_src) {
                 case VadSource::SILERO: asr_vad_speech = stats_.silero_speech; break;
                 case VadSource::FSMN:   asr_vad_speech = stats_.fsmn_speech; break;
-                case VadSource::TEN:    asr_vad_speech = stats_.ten_speech; break;
                 case VadSource::DIRECT: asr_vad_speech = true; break;  // always "speech" — trigger on buffer duration
                 case VadSource::ANY:
                 default:
                     asr_vad_speech = stats_.is_speech || stats_.silero_speech ||
-                                     stats_.fsmn_speech || stats_.ten_speech;
+                                     stats_.fsmn_speech;
                     break;
             }
 
@@ -1790,9 +1983,9 @@ void AudioPipeline::process_loop() {
 
         // Periodic diagnostic log (~every 1s = 10 chunks at 100ms).
         if (++diag_counter % 10 == 0) {
-            LOG_INFO("AudioPipe", "DIAG rms=%.4f silero=%.3f fsmn=%.3f ten=%.3f speech=%d gain=%.1f spk=%d(%.2f)",
+            LOG_INFO("AudioPipe", "DIAG rms=%.4f silero=%.3f fsmn=%.3f speech=%d gain=%.1f spk=%d(%.2f)",
                      stats_.last_rms, stats_.silero_prob,
-                     stats_.fsmn_prob, stats_.ten_prob,
+                     stats_.fsmn_prob,
                      (int)stats_.is_speech,
                      gain_.load(std::memory_order_relaxed),
                      stats_.speaker_id, stats_.speaker_sim);
@@ -1803,6 +1996,18 @@ void AudioPipeline::process_loop() {
 // ==================== SpeakerTracker Implementation ====================
 
 SpeakerTracker::SpeakerTracker() = default;
+
+bool SpeakerTracker::init_overlap_det(const OverlapDetectorConfig& cfg) {
+    if (!overlap_det_.init(cfg)) return false;
+    enable_overlap_det_.store(true, std::memory_order_relaxed);
+    return true;
+}
+
+bool SpeakerTracker::init_separator(const SpeechSeparatorConfig& cfg) {
+    if (!separator_.init(cfg)) return false;
+    enable_separator_.store(true, std::memory_order_relaxed);
+    return true;
+}
 
 void SpeakerTracker::init(WavLMEcapaEncoder* enc, int dim) {
     enc_ = enc;
@@ -2115,7 +2320,26 @@ bool SpeakerTracker::check() {
 
         bool speaker_changed = (low_sim_count_ >= change_confirm_count_) ||
                                (declining_count_ >= 3);
-        bool overlap_suspected = (jitter > 0.15f && low_sim_count_ >= 1);
+
+        // P1: Learned overlap detection (replaces heuristic).
+        bool overlap_suspected = false;
+        if (overlap_det_.initialized() && enable_overlap_det_.load(std::memory_order_relaxed)) {
+            // Feed PCM (already float) to overlap detector.
+            if (n > 0) {
+                OverlapResult odr;
+                auto od_t0 = std::chrono::steady_clock::now();
+                if (overlap_det_.feed(pcm_f32.data(), n, odr)) {
+                    auto od_t1 = std::chrono::steady_clock::now();
+                    overlap_suspected = odr.is_overlap;
+                    stats_.overlap_detected = odr.is_overlap;
+                    stats_.overlap_ratio = odr.overlap_ratio;
+                    stats_.od_latency_ms = std::chrono::duration<float, std::milli>(od_t1 - od_t0).count();
+                }
+            }
+        } else {
+            // Heuristic fallback.
+            overlap_suspected = (jitter > 0.15f && low_sim_count_ >= 1);
+        }
 
         if (speaker_changed) {
             // Close current timeline entry.
@@ -2185,6 +2409,26 @@ bool SpeakerTracker::check() {
             declining_count_ = 0;
         } else if (overlap_suspected) {
             state_ = TrackerState::OVERLAP;
+
+            // P2: Speech separation — separate overlapping speakers.
+            if (separator_.initialized() && enable_separator_.load(std::memory_order_relaxed)) {
+                if (n >= 3200) {  // minimum 200ms for meaningful separation
+                    auto sep_t0 = std::chrono::steady_clock::now();
+                    auto sep_result = separator_.separate(pcm_f32.data(), n);
+                    auto sep_t1 = std::chrono::steady_clock::now();
+
+                    stats_.separation_active = true;
+                    stats_.separation_lat_ms = std::chrono::duration<float, std::milli>(sep_t1 - sep_t0).count();
+
+                    if (sep_result.valid) {
+                        stats_.sep_source1_energy = sep_result.energy1;
+                        stats_.sep_source2_energy = sep_result.energy2;
+
+                        LOG_INFO("Tracker", "Overlap separation: src1_rms=%.4f src2_rms=%.4f lat=%.1fms",
+                                 sep_result.energy1, sep_result.energy2, stats_.separation_lat_ms);
+                    }
+                }
+            }
         } else {
             // Same speaker continues.
             current_sim_ = sim_to_ref;

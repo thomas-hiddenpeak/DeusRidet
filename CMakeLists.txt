@@ -61,7 +61,7 @@ file(GLOB_RECURSE COMMUNIS_SOURCES
 list(FILTER COMMUNIS_SOURCES EXCLUDE REGEX "timeline_logger\\.cpp$")
 
 add_library(communis STATIC ${COMMUNIS_SOURCES})
-target_link_libraries(communis PRIVATE CUDA::cudart nvinfer nvonnxparser)
+target_link_libraries(communis PRIVATE CUDA::cudart)
 
 # ============================================================================
 # Network layer static library (nexus — WebSocket + HTTP server)
@@ -74,20 +74,6 @@ add_library(nexus STATIC ${NEXUS_SOURCES})
 target_link_libraries(nexus PRIVATE communis)
 
 # ============================================================================
-# TEN VAD static library (third_party — Agora TEN Framework VAD)
-# ============================================================================
-file(GLOB TEN_VAD_CC_SOURCES "third_party/ten_vad/src/*.cc")
-file(GLOB TEN_VAD_C_SOURCES  "third_party/ten_vad/src/*.c")
-add_library(ten_vad STATIC ${TEN_VAD_CC_SOURCES} ${TEN_VAD_C_SOURCES})
-target_include_directories(ten_vad PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ten_vad/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ten_vad/src
-)
-target_link_libraries(ten_vad PRIVATE onnxruntime m)
-# Suppress warnings in third-party code.
-target_compile_options(ten_vad PRIVATE -w)
-
-# ============================================================================
 # Senses library (sensus — audio pipeline, Mel, VAD)
 # ============================================================================
 file(GLOB_RECURSE SENSUS_SOURCES
@@ -96,7 +82,7 @@ file(GLOB_RECURSE SENSUS_SOURCES
 )
 
 add_library(sensus STATIC ${SENSUS_SOURCES})
-target_link_libraries(sensus PRIVATE communis machina CUDA::cudart CUDA::cublas CUDA::cufft cudnn onnxruntime ten_vad)
+target_link_libraries(sensus PRIVATE communis machina CUDA::cudart CUDA::cublas CUDA::cufft cudnn)
 
 # ============================================================================
 # Speaker identification static library (orator — CAM++ speaker encoder)
@@ -107,7 +93,7 @@ file(GLOB_RECURSE ORATOR_SOURCES
 )
 
 add_library(orator STATIC ${ORATOR_SOURCES})
-target_link_libraries(orator PRIVATE communis CUDA::cudart CUDA::cublas cudnn onnxruntime)
+target_link_libraries(orator PRIVATE communis CUDA::cudart CUDA::cublas cudnn)
 
 # ============================================================================
 # Memory management static library (memoria — KV cache, block pool, SSD swap)
@@ -159,3 +145,49 @@ set_target_properties(test_frcrn_gpu PROPERTIES
     INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
     LINK_FLAGS "-Wl,--disable-new-dtags"
 )
+
+# Test: MossFormer2 native CUDA numerical validation
+# ============================================================================
+add_executable(test_mossformer2 tests/test_mossformer2.cpp)
+target_include_directories(test_mossformer2 PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_mossformer2 PRIVATE sensus machina communis CUDA::cudart CUDA::cublas)
+set_target_properties(test_mossformer2 PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+# Test: P1 Overlap Detector + P2 Speech Separator
+
+# Benchmark: MossFormer2 native CUDA performance
+add_executable(bench_mossformer2 tools/bench_mossformer2.cpp)
+target_include_directories(bench_mossformer2 PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(bench_mossformer2 PRIVATE sensus machina communis CUDA::cudart CUDA::cublas)
+set_target_properties(bench_mossformer2 PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+# ============================================================================
+add_executable(test_overlap_separator tests/test_overlap_separator.cpp)
+target_include_directories(test_overlap_separator PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_overlap_separator PRIVATE sensus communis CUDA::cudart)
+
+# Tool: Overlap → Separation → Speaker ID pipeline test
+# ============================================================================
+add_executable(test_overlap_spkid tools/test_overlap_spkid.cpp)
+target_include_directories(test_overlap_spkid PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_overlap_spkid PRIVATE sensus orator communis CUDA::cudart CUDA::cublas CUDA::cufft cudnn)
+
+# Test: PyannoteSeg3 native CUDA validation
+add_executable(test_pyannote_seg3 tests/test_pyannote_seg3.cpp)
+target_include_directories(test_pyannote_seg3 PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_pyannote_seg3 PRIVATE sensus machina communis CUDA::cudart CUDA::cublas cudnn)
+
+add_executable(test_silero_vad tests/test_silero_vad.cpp)
+target_include_directories(test_silero_vad PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_silero_vad PRIVATE sensus machina communis CUDA::cudart CUDA::cublas cudnn)
+
+add_executable(test_fsmn_vad tests/test_fsmn_vad.cpp)
+target_include_directories(test_fsmn_vad PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_fsmn_vad PRIVATE sensus machina communis CUDA::cudart CUDA::cublas cudnn)

@@ -3,7 +3,6 @@
 // Wires: WS PCM input → Ring Buffer → Gain → Mel (GPU) → Energy VAD
 //                                          └→ Silero VAD (ONNX, CPU)
 //                                          └→ FSMN VAD (ONNX, GPU fbank)
-//                                          └→ TEN VAD (ONNX, CPU)
 //                                          └→ Speaker Encoder (CAM++ GPU)
 //                                          └→ ASR (Qwen3-ASR, native CUDA)
 // Runs a processing thread that pulls from the ring buffer, computes
@@ -13,15 +12,15 @@
 
 #include "mel_gpu.h"
 #include "frcrn_enhancer.h"
+#include "overlap_detector.h"
+#include "speech_separator.h"
 #include "silero_vad.h"
 #include "fsmn_vad.h"
 #include "fsmn_fbank_gpu.h"
-#include "ten_vad_wrapper.h"
 #include "vad.h"
 #include "asr/asr_engine.h"
 #include "../../communis/ring_buffer.h"
 #include "../../orator/speaker_encoder.h"
-#include "../../orator/onnx_speaker_encoder.h"
 #include "../../orator/wavlm_ecapa_encoder.h"
 #include "../../orator/speaker_db.h"
 #include "../../orator/speaker_vector_store.h"
@@ -43,29 +42,25 @@ namespace deusridet {
 enum class VadSource : int {
     SILERO = 0,
     FSMN   = 1,
-    TEN    = 2,
-    ANY    = 3,  // OR of all enabled VADs
-    DIRECT = 4,  // bypass VAD — ASR triggers on buffer duration only
+    ANY    = 2,  // OR of all enabled VADs
+    DIRECT = 3,  // bypass VAD — ASR triggers on buffer duration only
 };
 
 struct AudioPipelineConfig {
     MelConfig mel;
     VadConfig vad;
     FrcrnConfig frcrn;                  // FRCRN speech enhancement (P0)
+    OverlapDetectorConfig overlap_det;  // pyannote overlap detection (P1)
+    SpeechSeparatorConfig separator;    // MossFormer2 speech separation (P2)
     SileroVadConfig silero;             // Silero VAD model config
     FsmnVadConfig fsmn;                 // FSMN VAD model config
-    TenVadConfig  ten;                  // TEN VAD model config
     SpeakerEncoderConfig speaker;       // CAM++ speaker encoder config
-    OnnxSpeakerConfig wavlm;              // WavLM speaker encoder config
-    OnnxSpeakerConfig unispeech;          // ECAPA-TDNN speaker encoder config (uses fbank, not raw PCM)
     std::string wavlm_ecapa_model;         // WavLM-Large+ECAPA-TDNN safetensors path (native GPU)
     float wavlm_ecapa_threshold = 0.55f;   // default cosine sim threshold
     std::string asr_model_path;            // Qwen3-ASR model directory (empty = disabled)
-    size_t ring_buffer_bytes = 1 << 20;  // 1 MB (~32 seconds of int16 mono 16kHz)
+    size_t ring_buffer_bytes = 1 << 22;  // 4 MB (~128 seconds of int16 mono 16kHz)
     int process_chunk_ms     = 100;      // process in 100ms chunks (10 mel frames)
     float speaker_threshold  = 0.45f;    // dual 384D cosine sim match threshold (v22c level)
-    float wavlm_threshold    = 0.80f;    // WavLM Gemm threshold (same ~0.86-0.93, diff ~0.36-0.76)
-    float unispeech_threshold= 0.55f;    // ECAPA-TDNN threshold (same ~0.57, diff ~0.03-0.45)
 };
 
 struct AudioPipelineStats {
@@ -78,15 +73,21 @@ struct AudioPipelineStats {
     // FRCRN speech enhancement.
     bool     frcrn_active;     // true when FRCRN is processing
     float    frcrn_lat_ms;     // latest FRCRN inference latency (ms)
+    // Overlap detection (P1).
+    bool     overlap_detected;   // true when overlap detected in current window
+    float    overlap_ratio;      // fraction of frames with overlap [0,1]
+    float    od_latency_ms;      // OD inference latency (ms)
+    // Speech separation (P2).
+    bool     separation_active;    // true when separation is running
+    float    separation_lat_ms;    // separation latency (ms)
+    float    sep_source1_energy;   // RMS energy of separated source 1
+    float    sep_source2_energy;   // RMS energy of separated source 2
     // Silero VAD.
     float    silero_prob;      // latest Silero speech probability [0,1]
     bool     silero_speech;    // Silero VAD speech state
     // FSMN VAD.
     float    fsmn_prob;        // latest FSMN speech probability [0,1]
     bool     fsmn_speech;      // FSMN VAD speech state
-    // TEN VAD.
-    float    ten_prob;         // latest TEN speech probability [0,1]
-    bool     ten_speech;       // TEN VAD speech state
     // Speaker identification (CAM++).
     int      speaker_id;       // current speaker ID (-1 = unknown)
     float    speaker_sim;      // best cosine similarity
@@ -95,18 +96,6 @@ struct AudioPipelineStats {
     int      speaker_exemplars;  // exemplar count for matched speaker
     int      speaker_hits_above; // exemplars above threshold in this match
     char     speaker_name[64]; // current speaker name (empty if unnamed)
-    // Speaker identification (WavLM).
-    int      wavlm_id;         // WavLM speaker ID
-    float    wavlm_sim;        // WavLM best similarity
-    bool     wavlm_new;
-    int      wavlm_count;
-    char     wavlm_name[64];
-    // Speaker identification (UniSpeech-SAT).
-    int      unispeech_id;
-    float    unispeech_sim;
-    bool     unispeech_new;
-    int      unispeech_count;
-    char     unispeech_name[64];
     // Speaker identification (WavLM-Large + ECAPA-TDNN, native GPU).
     int      wlecapa_id;
     float    wlecapa_sim;
@@ -117,8 +106,6 @@ struct AudioPipelineStats {
     char     wlecapa_name[64];
     // Active flags — true only on the tick when extraction happened.
     bool     speaker_active;
-    bool     wavlm_active;
-    bool     unispeech_active;
     bool     wlecapa_active;
     // WL-ECAPA latency breakdown (ms), set after each extraction.
     float    wlecapa_lat_cnn_ms;
@@ -299,10 +286,11 @@ public:
         }
 
         // Context fill: no overlapping events. Check nearest before/after.
-        // If both agree on same speaker AND gap is < 5s (80000 samples), fill.
-        // If only one side has a result within 3s (48000 samples), use it.
-        static constexpr int64_t kFillBothMaxGap  = 80000;  // 5s
-        static constexpr int64_t kFillSingleMaxGap = 48000;  // 3s
+        // Widened gaps to cover processing-lag-induced timeline holes.
+        // If both agree on same speaker AND gap is < 30s, fill.
+        // If only one side within 20s, use it.  Last resort: nearest event.
+        static constexpr int64_t kFillBothMaxGap   = 480000;  // 30s
+        static constexpr int64_t kFillSingleMaxGap  = 320000;  // 20s
 
         if (nearest_before_spk >= 0 && nearest_after_spk >= 0 &&
             nearest_before_spk == nearest_after_spk &&
@@ -343,6 +331,27 @@ public:
             result.similarity = nearest_after_sim;
             memcpy(result.name, nearest_after_name, 64);
             result.source = nearest_after_src;
+            return result;
+        }
+
+        // Last resort: use nearest event regardless of distance.
+        // This prevents SNAPSHOT fallback when processing lag creates
+        // large timeline gaps (observed >100s in 60-min tests).
+        if (nearest_before_spk >= 0 || nearest_after_spk >= 0) {
+            ResolvedSpeaker result;
+            if (nearest_before_spk >= 0 &&
+                (nearest_after_spk < 0 || nearest_before_dist <= nearest_after_dist)) {
+                result.speaker_id = nearest_before_spk;
+                result.similarity = nearest_before_sim;
+                memcpy(result.name, nearest_before_name, 64);
+                result.source = nearest_before_src;
+            } else {
+                result.speaker_id = nearest_after_spk;
+                result.similarity = nearest_after_sim;
+                memcpy(result.name, nearest_after_name, 64);
+                result.source = nearest_after_src;
+            }
+            result.confidence = 0.05f;  // very low — last resort
             return result;
         }
 
@@ -422,6 +431,15 @@ struct TrackerStats {
     bool     reg_event     = false;  // true on tick when new speaker registered
     int      reg_id        = -1;
     char     reg_name[64]  = {};
+    // P1: Overlap detection stats.
+    bool     overlap_detected = false;
+    float    overlap_ratio  = 0.0f;
+    float    od_latency_ms  = 0.0f;
+    // P2: Speech separation stats.
+    bool     separation_active = false;
+    float    separation_lat_ms = 0.0f;
+    float    sep_source1_energy = 0.0f;
+    float    sep_source2_energy = 0.0f;
 };
 
 class SpeakerTracker {
@@ -471,6 +489,22 @@ public:
     void clear();
 
     void set_speaker_name(int id, const std::string& name) { db_.set_name(id, name); }
+
+    // P1: Overlap detection init and control.
+    bool init_overlap_det(const OverlapDetectorConfig& cfg);
+    void set_overlap_det_enabled(bool e) { enable_overlap_det_.store(e, std::memory_order_relaxed); }
+    bool overlap_det_enabled() const { return enable_overlap_det_.load(std::memory_order_relaxed); }
+    bool overlap_det_loaded() const { return overlap_det_.initialized(); }
+
+    // P2: Speech separator init and control.
+    bool init_separator(const SpeechSeparatorConfig& cfg);
+    void set_separator_enabled(bool e) { enable_separator_.store(e, std::memory_order_relaxed); }
+    bool separator_enabled() const { return enable_separator_.load(std::memory_order_relaxed); }
+    bool separator_loaded() const { return separator_.loaded(); }
+
+    // Expose separator for FULL-extraction overlap recovery.
+    SeparationResult separate(const float* pcm, int n) { return separator_.separate(pcm, n); }
+    bool separator_ready() const { return separator_.loaded() && enable_separator_.load(std::memory_order_relaxed); }
 
 private:
     // Estimate F0 (fundamental frequency) from PCM using autocorrelation.
@@ -565,12 +599,20 @@ private:
     float identify_threshold_   = 0.55f;
     float change_threshold_     = 0.35f;
     int   change_confirm_count_ = 2;
-    int   register_confirm_     = 3;
-    float self_consistency_     = 0.78f;
+    int   register_confirm_     = 2;
+    float self_consistency_     = 0.55f;
     float w_emb_                = 0.50f;
     float w_centroid_           = 0.30f;
     float w_f0_                 = 0.20f;
     int   fast_path_samples_    = 8000;  // 0.5s for VAD-onset fast path
+
+    // P1: Learned overlap detection.
+    OverlapDetector overlap_det_;
+    std::atomic<bool> enable_overlap_det_{false};
+
+    // P2: MossFormer2 speech separation.
+    SpeechSeparator separator_;
+    std::atomic<bool> enable_separator_{false};
 };
 
 class AudioPipeline {
@@ -627,39 +669,35 @@ public:
     bool frcrn_enabled() const { return enable_frcrn_.load(std::memory_order_relaxed); }
     bool frcrn_loaded() const { return frcrn_.initialized(); }
 
+    // P1: Overlap detection enable/disable — delegates to tracker.
+    void set_overlap_det_enabled(bool e) { tracker_.set_overlap_det_enabled(e); }
+    bool overlap_det_enabled() const { return tracker_.overlap_det_enabled(); }
+    bool overlap_det_loaded() const { return tracker_.overlap_det_loaded(); }
+
+    // P2: Speech separation enable/disable — delegates to tracker.
+    void set_separator_enabled(bool e) { tracker_.set_separator_enabled(e); }
+    bool separator_enabled() const { return tracker_.separator_enabled(); }
+    bool separator_loaded() const { return tracker_.separator_loaded(); }
+
     // FSMN VAD threshold.
     void set_fsmn_threshold(float t) { fsmn_.set_threshold(t); }
     float fsmn_threshold() const { return fsmn_.threshold(); }
-
-    // TEN VAD threshold.
-    void set_ten_threshold(float t) { ten_.set_threshold(t); }
-    float ten_threshold() const { return ten_.threshold(); }
 
     // Per-VAD enable/disable (thread-safe).
     void set_silero_enabled(bool e) { enable_silero_.store(e, std::memory_order_relaxed); }
     bool silero_enabled() const { return enable_silero_.load(std::memory_order_relaxed); }
     void set_fsmn_enabled(bool e) { enable_fsmn_.store(e, std::memory_order_relaxed); }
     bool fsmn_enabled() const { return enable_fsmn_.load(std::memory_order_relaxed); }
-    void set_ten_enabled(bool e) { enable_ten_.store(e, std::memory_order_relaxed); }
-    bool ten_enabled() const { return enable_ten_.load(std::memory_order_relaxed); }
 
     // Speaker encoder enable/disable (thread-safe).
     void set_speaker_enabled(bool e) { enable_speaker_.store(e, std::memory_order_relaxed); }
     bool speaker_enabled() const { return enable_speaker_.load(std::memory_order_relaxed); }
-    void set_wavlm_enabled(bool e) { enable_wavlm_.store(e, std::memory_order_relaxed); }
-    bool wavlm_enabled() const { return enable_wavlm_.load(std::memory_order_relaxed); }
-    void set_unispeech_enabled(bool e) { enable_unispeech_.store(e, std::memory_order_relaxed); }
-    bool unispeech_enabled() const { return enable_unispeech_.load(std::memory_order_relaxed); }
     void set_wlecapa_enabled(bool e) { enable_wlecapa_.store(e, std::memory_order_relaxed); }
     bool wlecapa_enabled() const { return enable_wlecapa_.load(std::memory_order_relaxed); }
 
     // Per-backend threshold control.
     void set_speaker_threshold(float t) { speaker_threshold_.store(t, std::memory_order_relaxed); }
     float speaker_threshold() const { return speaker_threshold_.load(std::memory_order_relaxed); }
-    void set_wavlm_threshold(float t) { wavlm_threshold_.store(t, std::memory_order_relaxed); }
-    float wavlm_threshold() const { return wavlm_threshold_.load(std::memory_order_relaxed); }
-    void set_unispeech_threshold(float t) { unispeech_threshold_.store(t, std::memory_order_relaxed); }
-    float unispeech_threshold() const { return unispeech_threshold_.load(std::memory_order_relaxed); }
     void set_wlecapa_threshold(float t) { wlecapa_threshold_.store(t, std::memory_order_relaxed); }
     float wlecapa_threshold() const { return wlecapa_threshold_.load(std::memory_order_relaxed); }
 
@@ -743,8 +781,6 @@ public:
     // Per-backend speaker database access.
     SpeakerDb& speaker_db() { return speaker_db_; }
     SpeakerVectorStore& campp_db() { return campp_db_; }
-    SpeakerDb& wavlm_db() { return wavlm_db_; }
-    SpeakerDb& unispeech_db() { return unispeech_db_; }
     SpeakerVectorStore& wlecapa_db() { return wlecapa_db_; }
 
     // Speaker Tracker (independent pipeline for comparison).
@@ -760,20 +796,6 @@ public:
         stats_.speaker_active = true;  // trigger UI refresh
         stats_.speaker_name[0] = '\0';
     }
-    void clear_wavlm_db() {
-        wavlm_db_.clear();
-        stats_.wavlm_id = -1; stats_.wavlm_sim = 0;
-        stats_.wavlm_new = false; stats_.wavlm_count = 0;
-        stats_.wavlm_active = true;  // trigger UI refresh
-        stats_.wavlm_name[0] = '\0';
-    }
-    void clear_unispeech_db() {
-        unispeech_db_.clear();
-        stats_.unispeech_id = -1; stats_.unispeech_sim = 0;
-        stats_.unispeech_new = false; stats_.unispeech_count = 0;
-        stats_.unispeech_active = true;  // trigger UI refresh
-        stats_.unispeech_name[0] = '\0';
-    }
     void clear_wlecapa_db() {
         wlecapa_db_.clear();
         stats_.wlecapa_id = -1; stats_.wlecapa_sim = 0;
@@ -783,8 +805,6 @@ public:
         stats_.wlecapa_name[0] = '\0';
     }
     void set_speaker_name(int id, const std::string& name) { speaker_db_.set_name(id, name); }
-    void set_wavlm_name(int id, const std::string& name) { wavlm_db_.set_name(id, name); }
-    void set_unispeech_name(int id, const std::string& name) { unispeech_db_.set_name(id, name); }
     void set_wlecapa_name(int id, const std::string& name) { wlecapa_db_.set_name(id, name); }
     bool remove_wlecapa_speaker(int id) { return wlecapa_db_.remove_speaker(id); }
     bool merge_wlecapa_speakers(int dst_id, int src_id) { return wlecapa_db_.merge_speakers(dst_id, src_id); }
@@ -812,10 +832,10 @@ private:
     RingBuffer* ring_ = nullptr;
     MelSpectrogram mel_;
     FrcrnEnhancer frcrn_;
+
     VoiceActivityDetector vad_;
     SileroVad silero_;
     FsmnVad fsmn_;
-    TenVadWrapper ten_;
     SpeakerEncoder speaker_enc_;
     SpeakerVectorStore campp_db_{"CamppDb", 192, 0.15f};
     SpeakerDb speaker_db_{"CAM++Db"};  // legacy — kept for UI/API backward compat
@@ -836,6 +856,10 @@ private:
     // threshold to reduce false negatives that cause fragmentation.
     int prev_full_speaker_id_ = -1;
     float prev_full_time_ = -100.0f;  // seconds, init far past
+    std::string prev_full_speaker_name_;  // v29: for temporal coherence swap
+    int speaker_run_length_ = 0;  // v15d: consecutive same-speaker count
+    int seg_overlap_chunks_ = 0;  // count overlap-detected chunks in current segment
+    int seg_total_chunks_ = 0;    // total chunks in current segment
 
     // Warm-up spectral clustering: collect embeddings during warm-up,
     // then run one-shot spectral clustering to find speaker count and centroids.
@@ -843,16 +867,13 @@ private:
     // Dual-encoder warm-up: collect both CAM++ (192D) and WL-ECAPA (192D)
     // embeddings, concatenate to 384D for better clustering, then store
     // only CAM++ centroids for online matching.
-    static constexpr int kWarmupCount = 999999;  // v24c: disable warmup clustering
+    static constexpr int kWarmupCount = 999999;  // disabled — warmup with K=5 hurts (81.3% vs 90.5%).
+                                                  // v14 pre-warmup (63.7%) > post-warmup (54%).
     std::vector<std::vector<float>> warmup_embeddings_;       // CAM++ 192D
     std::vector<std::vector<float>> warmup_wlecapa_embs_;     // WL-ECAPA 192D (if available)
     std::vector<float> warmup_timestamps_;   // mid-time in seconds
     bool warmup_done_ = false;
 
-    OnnxSpeakerEncoder wavlm_enc_;
-    SpeakerDb wavlm_db_{"WavLMDb", 0.1f};       // low EMA to resist centroid contamination
-    OnnxSpeakerEncoder unispeech_enc_;
-    SpeakerDb unispeech_db_{"ECAPADb", 0.15f};  // ECAPA-TDNN: higher EMA for stable centroids
     WavLMEcapaEncoder wlecapa_enc_;
     SpeakerVectorStore wlecapa_db_{"WLEcapaDb", 192, 0.15f};
 
@@ -867,16 +888,12 @@ private:
     std::atomic<int> asr_vad_source_{static_cast<int>(VadSource::SILERO)};  // ASR defaults to SILERO (same as speaker)
     std::atomic<bool> enable_silero_{true};
     std::atomic<bool> enable_frcrn_{false};    // FRCRN speech enhancement (P0) — disabled until TRT acceleration
+
     std::atomic<bool> enable_fsmn_{false};
-    std::atomic<bool> enable_ten_{false};
     std::atomic<bool> enable_speaker_{true};    // CAM++ — primary SAAS encoder
-    std::atomic<bool> enable_wavlm_{false};
-    std::atomic<bool> enable_unispeech_{false};
     std::atomic<bool> enable_wlecapa_{false};    // WL-ECAPA — disabled (CAM++ is primary)
     std::atomic<float> speaker_threshold_{0.50f}; // CAM++ matching threshold
-    std::atomic<float> speaker_register_threshold_{0.55f}; // pending pool confirmation threshold
-    std::atomic<float> wavlm_threshold_{0.80f};
-    std::atomic<float> unispeech_threshold_{0.55f};
+    std::atomic<float> speaker_register_threshold_{0.60f}; // pending pool confirmation threshold (0.60: separates true 4-spk at 0.62+ from false splits at 0.56-0.58)
     std::atomic<float> wlecapa_threshold_{0.55f};
     std::atomic<int>   early_trigger_samples_{27200};  // 1.7s default
     std::atomic<bool>  enable_early_{true};              // early trigger on/off
@@ -886,14 +903,14 @@ private:
     std::atomic<bool>  enable_spk_recheck_{true};         // on by default
     std::atomic<float> spk_change_threshold_{0.35f};      // cosine sim below this = different speaker
     std::atomic<int>   spk_recheck_window_samples_{24000}; // 1.5s window for re-check embedding
-    std::atomic<bool>  enable_asr_{true};                // ASR on/off
-    std::atomic<int>   asr_post_silence_ms_{300};         // post-silence trigger (ms) — base value
+    std::atomic<bool>  enable_asr_{false};                // ASR off for speaker-only testing
+    std::atomic<int>   asr_post_silence_ms_{500};         // post-silence trigger (ms) — base value
     std::atomic<int>   asr_max_buf_samples_{480000};      // max buffer (30s @ 16kHz)
 
     // SAAS: adaptive post-silence parameters.
     // Actual post-silence = base * multiplier, where multiplier depends on segment length.
     std::atomic<bool>  asr_adaptive_silence_{true};        // enable adaptive post-silence
-    std::atomic<int>   asr_adaptive_short_ms_{700};        // post-silence for short segments (<0.8s)
+    std::atomic<int>   asr_adaptive_short_ms_{800};        // post-silence for short segments (<0.8s)
     std::atomic<int>   asr_adaptive_long_ms_{200};         // post-silence for long segments (5-15s)
     std::atomic<int>   asr_adaptive_vlong_ms_{150};        // post-silence for very long segments (>15s)
     std::atomic<int>   asr_min_samples_{8000};            // min audio for ASR (0.5s)

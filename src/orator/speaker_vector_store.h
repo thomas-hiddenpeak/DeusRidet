@@ -99,8 +99,10 @@ public:
 
     // Fragment absorption: check all speaker pairs, merge any with mutual
     // centroid similarity > absorption_threshold. Absorbs smaller speaker
-    // into larger one. Returns number of merges performed.
-    int absorb_fragments(float absorption_threshold = 0.55f);
+    // into larger one. If max_minor_matches > 0, skip pairs where the
+    // smaller speaker has more than that many matches (established speakers).
+    // Returns number of merges performed.
+    int absorb_fragments(float absorption_threshold = 0.55f, int max_minor_matches = 0);
 
     // ---- Margin guard ----
     void  set_min_margin(float m) { min_margin_ = m; }

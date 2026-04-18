@@ -1,5 +1,45 @@
 # DeusRidet 开发日志
 
+## 2026-04-15 — 音频增强 P1 + P2：重叠检测与语音分离
+
+### 背景
+
+P0（FRCRN CUDA 降噪，commit `1e8e59b`）完成后，实现了 PLAN_AUDIO_ENHANCEMENT.md 三阶段
+计划中的 P1（学习型重叠检测）和 P2（语音分离）。
+
+### P1：重叠检测（pyannote/segmentation-3.0）
+
+**模型**：PyanNet（SincNet + LSTM + Linear），5.7 MB ONNX，MIT 许可。
+从 `onnx-community/pyannote-segmentation-3.0`（非门控 HuggingFace 仓库）下载。
+
+输入 (1, 1, 160000) = 10s@16kHz → 输出 (1, 589, 7) powerset logits。
+7 个类别：[非语音, spk1, spk2, spk3, spk1+2, spk1+3, spk2+3]。
+argmax ∈ {4,5,6} 且 softmax 概率 > 阈值时检测为重叠。
+
+**集成**：`OverlapDetector` 类，ONNX Runtime CPU EP，流式 10s 窗口 5s 步进。
+运行于 `SpeakerTracker::check()` 中，替换原有启发式重叠检测（F0 抖动 + 低相似度计数），
+启发式保留为后备方案。
+
+**性能**：Orin CPU EP 上每 10s 窗口约 65ms。
+
+### P2：语音分离（MossFormer2_SS_16K）
+
+**模型**：ClearerVoice-Studio 的 MossFormer2，230.1 MB ONNX，Apache-2.0 许可。
+通过 `tools/export_mossformer2_onnx.py` 从 ClearVoice checkpoint 导出。
+
+输入 "mixture" (1, time) → 输出 "source1" + "source2" 各 (1, time)。
+Conv1d 编码器 → 24× MossFormer2 块 → ConvTranspose1d 解码器。2 说话人分离。
+
+**集成**：`SpeechSeparator` 类，ONNX Runtime CPU EP，延迟加载。
+长音频（>2s）使用 Hann 窗交叉渐变分段处理。在重叠检测触发时调用。
+
+**性能**：Orin CPU 上约 5.4s/1s 音频（5.4× 实时）。用于异步分析可接受。
+
+### 测试结果
+
+独立测试通过：P1 静音/单音/流式正确，P2 短/长/静音正确。
+集成测试：P1 + P2 正常加载，HTTP 200，WS 101。
+
 ## 2026-07-19 — GPTQ GEMM 优化轮次：4 个实验，1 个成功
 
 ### 背景

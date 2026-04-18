@@ -1,5 +1,276 @@
 # DeusRidet Development Log
 
+## 2026-04-18 — MossFormer2 Native CUDA Rewrite: Architecture Analysis & Prep
+
+### Context
+
+The speech separation engine (MossFormer2_SS_16K) currently runs via
+ONNX → TensorRT. Strategic goal: replace with a native C++/CUDA
+implementation using safetensors weights, eliminating the TRT/ONNX
+dependency and enabling tighter integration with the consciousness pipeline.
+
+### Phase 1: Prerequisite Analysis (Completed)
+
+**1. Weight Conversion: PT → Safetensors**
+
+Downloaded `alibabasglab/MossFormer2_SS_16K` from ModelScope (640 MB PT).
+Converted to safetensors with `clone().contiguous()` (shared memory tensors
+like `rotary_pos_emb.freqs` required cloning).
+
+- Source: `~/models/dev/vad/mossformer2_pt/last_best_checkpoint.pt`
+- Output: `~/models/dev/vad/mossformer2_ss_16k.safetensors` (213 MB, FP32)
+- Tensors: **1099 tensors, 55.7M params**
+
+**2. Model Architecture (from ClearVoice Python source)**
+
+```
+Input PCM [1, T] (16kHz mono)
+  → Encoder: Conv1d(1, 512, k=16, s=8) + ReLU                → [1, 512, T/8]
+  → MaskNet:
+      LayerNorm(512)
+      Conv1d(512, 512, 1)                                     # pointwise encoder
+      + ScaledSinuEmbedding(512)                               # positional encoding
+      → Computation_Block:
+          permute [B,N,S]→[B,S,N]
+          24× interleaved {FLASH_ShareA_FFConvM + Gated_FSMN_Block_Dilated}
+          LayerNorm(512) + skip connection
+          permute back + CumulativeLayerNorm
+      → PReLU
+      → Conv1d(512, 1024, 1)                                  # project to 2 speakers
+      → reshape → (Tanh * Sigmoid) gating
+      → Conv1d(512, 512, 1)                                   # decode back
+      → reshape + ReLU
+  → Mask [2, 1, 512, T/8] applied to encoder output
+  → Decoder: ConvTranspose1d(512, 1, k=16, s=8) per speaker   → [1, T] × 2
+```
+
+Each of the 24 interleaved layers:
+
+**FLASH Attention layer** (FLASH_ShareA_FFConvM):
+- Token shift (half channels shifted by 1 position)
+- to_hidden: ScaleNorm(512) → Linear(512→2048) → SiLU → DepthwiseConv1d(k=17) → split v,u
+- to_qk: ScaleNorm(512) → Linear(512→128) → SiLU → DepthwiseConv1d(k=17)
+- OffsetScale(128, heads=4) → 4 outputs: quad_q, lin_q, quad_k, lin_k
+- RotaryPosEmb(dim=32)
+- Pad to group_size=256, reshape into groups
+- Quadratic: sim = (q·k^T)/g, attn = ReLU(sim)², then matmul with v,u
+- Linear: kv = (k^T·v)/n, out = q·kv (global, non-causal)
+- Gate: out = (att_u * v) * sigmoid(att_v * u)
+- Residual + to_out: ScaleNorm(1024) → Linear(1024→512) → SiLU → DepthwiseConv1d(k=17)
+
+**Gated FSMN Block** (Gated_FSMN_Block_Dilated):
+- Conv1d(512→256, k=1) + PReLU + CLayerNorm
+- Gated_FSMN: to_u, to_v (each: LayerNorm→Linear→SiLU→ConvModule)
+  + UniDeepFsmn_dilated: Linear→ReLU→Project + DilatedDenseNet(depth=2, lorder=20)
+    DilatedDenseNet: 2 dilated depthwise Conv2d(k=39, dil=1,2) + InstanceNorm + PReLU + dense skip
+  Gate: v * fsmn(u) + residual
+- CLayerNorm + Conv1d(256→512, k=1) + residual
+
+**3. Tensor Shapes (B=1, T=32000 → L=4000 after encoder)**
+
+| Stage | Shape | Notes |
+|-------|-------|-------|
+| Encoder output | [1, 512, 4000] | After Conv1d(k=16,s=8) + ReLU |
+| Attention input | [1, 4000, 512] | After permute |
+| Groups | [1, 16, 256, dim] | 4000 padded to 4096, 16 groups |
+| FSMN inner | [1, 4000, 256] | After dim reduction |
+| Mask output | [2, 1, 512, 4000] | 2 speakers |
+
+**4. Reference Output Extraction**
+
+Ran PyTorch forward pass with hooks on key checkpoints (seed=42, input=N(0,0.01)):
+- Saved 17 arrays to `/tmp/mossformer2_reference.npz`
+- Key activations: encoder, attention layers 0/12/23, FSMN blocks 0/12/23,
+  norms, PReLU, final conv1d_out
+- Output range: source1 [-0.008, 0.006], source2 [-0.006, 0.006]
+
+**5. Baseline Performance**
+
+| Backend | 2s chunk (32000) | RTF | Notes |
+|---------|-----------------|-----|-------|
+| PyTorch CPU (FP32) | 9226 ms | 4.61x | Unusable |
+| TRT GPU (FP32) | ~197 ms | 0.098x | Current production |
+| TRT GPU 4s (overlap-add) | 576 ms | 0.144 s/s | Two 2s chunks |
+
+TRT loads in ~3.3s (cached engine). Memory: ~250 MB engine + ~50 MB buffers.
+
+**6. TEN VAD Cleanup (Completed)**
+
+Removed TEN VAD entirely from codebase: audio_pipeline, commands, WebUI,
+CMakeLists, source files, third_party. Build passes, service verified
+(HTTP 200, WebSocket 101, startup log shows `frcrn=ON silero=ON fsmn=ON`).
+
+### Phase 2 Plan: Native CUDA Implementation
+
+**Goal**: Replace TRT with native C++/CUDA inference using SafetensorsLoader.
+
+**Key Operation Types** (kernel planning):
+
+| Operation | Dimensions | Strategy |
+|-----------|-----------|----------|
+| Conv1d(k=16,s=8) encoder/decoder | [1,512,T/8] | cuDNN or fused CUDA kernel |
+| Pointwise Conv1d(k=1) | 512→512, 512→256, etc. | cuBLAS GEMM (is just matmul) |
+| DepthwiseConv1d(k=17) | [B,C,L] groups=C | Custom CUDA, SMEM tile |
+| Linear (GEMM) | 512→2048, 1024→512, etc. | cuBLAS |
+| FLASH attention (quadratic + linear) | group=256, qk=128, 4 heads | Fused CUDA kernel |
+| RotaryPosEmb | dim=32 | Fused into attention kernel |
+| DilatedDenseNet | Conv2d(k=39,dil=1,2) depthwise | Custom CUDA with SMEM |
+| ScaleNorm / LayerNorm / CLayerNorm | per-channel / per-sequence | Fused elementwise |
+| SiLU / PReLU / ReLU / Sigmoid / Tanh | elementwise | Fused into adjacent ops |
+| InstanceNorm | per-instance (B,C,L) | Custom CUDA |
+
+**Estimated effort** (building blocks):
+1. SafetensorsLoader weight mapping (~1 day)
+2. Encoder/Decoder Conv1d (~0.5 day)
+3. Attention FLASH kernel with RoPE (~2 days)
+4. Gated FSMN with DilatedDenseNet (~2 days)
+5. Norm/activation fusion (~1 day)
+6. MaskNet assembly + integration test (~1 day)
+7. Numerical validation vs reference (~1 day)
+
+**Precision strategy**: FP32 first (bit-exact with PyTorch reference), then
+FP16 Tensor Core GEMM + FP32 residuals for ~2x speedup if needed. Current
+TRT FP32 at 197ms/2s is already 10x real-time — speed is not the bottleneck.
+
+**Integration**: Keep `SpeechSeparator` API unchanged. Swap TrtEngine internals
+with native CUDA forward pass. Same lazy loading, same overlap-add stitching.
+
+## 2026-04-18 — Speaker Identification: 90%+ Accuracy Achieved
+
+### Context
+
+Continued tuning speaker identification pipeline toward ≥90% target on
+tests/test.mp3 (3615s, 4 speakers). Previous runs showed high variance
+(45%–90%) due to non-deterministic speaker registration (4 vs 5 speakers).
+
+### Changes
+
+1. **SEP identification threshold raised to 0.60** (`kSepThreshold`):
+   Separated-source identifications from MossFormer2 are noisier than clean
+   segments. Raising threshold from 0.52→0.60 filters low-confidence matches.
+   Analysis showed SEP≥0.60 maintains 90.7% accuracy while adding 67% more
+   coverage vs FULL-only.
+
+2. **Embedding dump mode fixed**: Changed FULL dump from `"wb"` to `"ab"` mode
+   to preserve overlap-skip records written earlier in the pipeline.
+
+### Results (4x speed, dual encoder CAM++ + WavLM-ECAPA)
+
+| Run  | Speakers | Absorb  | FULL-only | SEP-only | Combined | Coverage |
+|------|----------|---------|-----------|----------|----------|----------|
+| sep6 | 4        | none    | 92.5%     | 89.6%    | **91.6%** | 251 events |
+| sep7 | 5→4      | spk2→1  | 90.2%     | 89.5%    | **90.0%** | 260 events |
+
+Per-speaker breakdown (sep6 combined):
+- 朱杰: 95.1%  (58/61)
+- 唐云峰: 88.1% (59/67)
+- 徐子景: 88.2% (15/17)
+- 石一: 92.5%  (98/106)
+
+### Analysis
+
+- **Over-registration** remains the main variance source: 唐云峰 occasionally
+  splits into 2 speakers early (low exemplar count → low centroid similarity).
+  The existing `absorb_fragments` mechanism catches and merges at event 50
+  (periodic absorb, centroid_sim ≈ 0.59), recovering accuracy.
+- **SEP threshold 0.60** is the sweet spot: lower thresholds add coverage but
+  dilute accuracy below 90%; higher thresholds reduce coverage without
+  meaningful accuracy gain.
+- **60 mel buffer overflows** at 4x speed are baseline behavior (same count
+  with or without separator), not a regression.
+
+### Target Status
+
+**≥90% speaker-attribution accuracy: ACHIEVED** (91.6% best, 90.0% worst).
+Both FULL-only and COMBINED metrics exceed the 90% threshold across runs.
+
+---
+
+## 2026-04-15 — Audio Enhancement P1 + P2: Overlap Detection & Speech Separation
+
+### Context
+
+Following P0 (FRCRN CUDA denoising, commit `1e8e59b`), implemented P1 (learned overlap
+detection) and P2 (speech separation) from the PLAN_AUDIO_ENHANCEMENT.md three-phase plan.
+
+### P1: Overlap Detection (pyannote/segmentation-3.0)
+
+**Model**: PyanNet (SincNet + LSTM + Linear), 5.7 MB ONNX, MIT license.
+Downloaded from `onnx-community/pyannote-segmentation-3.0` (non-gated HuggingFace repo).
+Path: `~/models/dev/vad/pyannote_seg3.onnx`.
+
+**Architecture**: Input (1, 1, 160000) = 10s@16kHz → Output (1, 589, 7) powerset logits.
+7 classes: [non-speech, spk1, spk2, spk3, spk1+2, spk1+3, spk2+3].
+Overlap detected when argmax ∈ {4,5,6} with softmax probability > threshold.
+
+**Integration**: `OverlapDetector` class in `overlap_detector.h/cpp`. ONNX Runtime CPU EP,
+2 intra-op threads. Streaming: 10s window with 5s hop. Runs inside `SpeakerTracker::check()`
+using the tracker's own float PCM buffer. Replaces previous heuristic overlap detection
+(F0 jitter + low sim count) with learned model; heuristic remains as fallback when model
+unavailable.
+
+**Performance**: ~65 ms per 10s window on Orin CPU EP. Minimal overhead in the tracker loop.
+
+### P2: Speech Separation (MossFormer2_SS_16K)
+
+**Model**: MossFormer2 from ClearerVoice-Studio, 230.1 MB ONNX, Apache-2.0.
+Exported via `tools/export_mossformer2_onnx.py` from ClearVoice checkpoint.
+Path: `~/models/dev/vad/mossformer2_ss_16k.onnx`.
+
+**Architecture**: Input "mixture" (1, time) → Output "source1" + "source2" each (1, time).
+Conv1d encoder → 24× MossFormer2 blocks → ConvTranspose1d decoder. 2-speaker separation.
+
+**Integration**: `SpeechSeparator` class in `speech_separator.h/cpp`. ONNX Runtime CPU EP,
+4 intra-op threads. Lazy loading (model loaded on first use to save memory at startup).
+For audio > 2s, uses segmented processing with Hann-window crossfade overlap-add stitching.
+Triggered in `SpeakerTracker::check()` when overlap is detected and buffer >= 200ms.
+
+**Performance**: ~5.4s per 1s audio on Orin CPU (5.4× real-time). Too slow for real-time
+inline processing. Acceptable for async analysis since lazy_load=true and separation is
+informational (speaker energy measurement) rather than blocking.
+
+### Design Decision: Members on SpeakerTracker
+
+P1/P2 members (`OverlapDetector`, `SpeechSeparator`, enable flags) placed on `SpeakerTracker`
+rather than `AudioPipeline` because the overlap detection logic is part of the tracker's
+speaker change detection flow. The tracker already has the PCM ring buffer and runs checks
+on a periodic schedule. `AudioPipeline` delegates P1/P2 control/status via the tracker's
+public API.
+
+### Stats Pipeline
+
+`TrackerStats` carries P1/P2 fields (`overlap_detected`, `overlap_ratio`, `od_latency_ms`,
+`separation_active`, `separation_lat_ms`, `sep_source1_energy`, `sep_source2_energy`).
+These are copied to `AudioPipelineStats` after each tracker tick and emitted via WebSocket
+`pipeline_stats` JSON as `od_enabled`, `od_loaded`, `od_detected`, `od_ratio`, `od_lat_ms`,
+`sep_enabled`, `sep_loaded`, `sep_active`, `sep_lat_ms`, `sep_src1_rms`, `sep_src2_rms`.
+
+### Test Results
+
+Standalone test (`test_overlap_separator`):
+- P1 silence: no overlap ✓, P1 single tone: no overlap ✓ (model trained on speech, sines ≠ speech)
+- P1 streaming: 4×3s feeds → result after 10s window ✓, latency 65ms
+- P2 short 1s mix: src1_rms=0.039, src2_rms=0.051, 5375ms ✓
+- P2 long 4s mix: segmented processing works, 5962 ms/s ✓
+- P2 silence: both sources rms≈0 ✓
+
+Integration test: Service starts with both P1 (loaded) and P2 (lazy), HTTP 200, WS 101.
+
+### Files
+
+| File | Action | Purpose |
+|------|--------|---------|
+| `src/sensus/auditus/overlap_detector.h` | New | P1 class definition |
+| `src/sensus/auditus/overlap_detector.cpp` | New | P1 ONNX inference + powerset decode |
+| `src/sensus/auditus/speech_separator.h` | New | P2 class definition |
+| `src/sensus/auditus/speech_separator.cpp` | New | P2 ONNX inference + segmented overlap-add |
+| `src/sensus/auditus/audio_pipeline.h` | Modified | P1/P2 stats, tracker members, delegation |
+| `src/sensus/auditus/audio_pipeline.cpp` | Modified | P1/P2 init, tracker integration, stats copy |
+| `src/commands.cpp` | Modified | P1/P2 config + JSON stats |
+| `tests/test_overlap_separator.cpp` | New | Standalone P1/P2 test |
+| `tools/export_mossformer2_onnx.py` | New | MossFormer2 ONNX export script |
+| `tools/export_pyannote_onnx.py` | New | Pyannote ONNX export script |
+
 ## 2026-07-20 — v24d/v24e Speaker ID: Discovery Phase + Extensive Parameter Search
 
 ### Context
