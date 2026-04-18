@@ -7,3 +7,5 @@ hub/
 logs/
 __pycache__/
 models/
+checkpoints/MossFormer2_SS_16K/last_best_checkpoint
+checkpoints/MossFormer2_SS_16K/last_best_checkpoint.pt
