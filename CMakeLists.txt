@@ -173,9 +173,9 @@ add_executable(test_overlap_separator tests/test_overlap_separator.cpp)
 target_include_directories(test_overlap_separator PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(test_overlap_separator PRIVATE sensus communis CUDA::cudart)
 
-# Tool: Overlap → Separation → Speaker ID pipeline test
+# Test: Overlap → Separation → Speaker ID pipeline
 # ============================================================================
-add_executable(test_overlap_spkid tools/test_overlap_spkid.cpp)
+add_executable(test_overlap_spkid tests/test_overlap_spkid.cpp)
 target_include_directories(test_overlap_spkid PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(test_overlap_spkid PRIVATE sensus orator communis CUDA::cudart CUDA::cublas CUDA::cufft cudnn)
 

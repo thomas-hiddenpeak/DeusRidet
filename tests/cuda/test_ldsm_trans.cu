@@ -1,5 +1,5 @@
 // test_ldsm_trans.cu — Verify ldmatrix.x2.trans fragment layout on SM87
-// Build: nvcc -O3 -gencode arch=compute_87,code=sm_87 -o build/test_ldsm_trans tools/test_ldsm_trans.cu
+// Build: nvcc -O3 -gencode arch=compute_87,code=sm_87 -o build/test_ldsm_trans tests/cuda/test_ldsm_trans.cu
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
