@@ -1282,8 +1282,11 @@ int cmd_test_ws(const std::string& webui_dir,
     PersonaConfig persona_cfg;
 
     bool llm_loaded = false;
+    const char* test_ws_enable_llm = std::getenv("DEUSRIDET_TEST_WS_ENABLE_LLM");
+    bool enable_llm_in_test_ws =
+        (test_ws_enable_llm != nullptr) && std::string(test_ws_enable_llm) == "1";
 
-    if (!llm_model_dir.empty()) {
+    if (enable_llm_in_test_ws && !llm_model_dir.empty()) {
         printf("[test-ws] Loading LLM from %s ...\n", llm_model_dir.c_str());
 
         // Load persona config
@@ -1391,6 +1394,11 @@ int cmd_test_ws(const std::string& webui_dir,
 
         printf("[test-ws] Consciousness stream ready (entity=%s)\n",
                persona_cfg.name.c_str());
+    } else {
+        if (enable_llm_in_test_ws && llm_model_dir.empty()) {
+            printf("[test-ws] LLM load requested but model dir is empty, skip\n");
+        }
+        printf("[test-ws] LLM load disabled for speaker-only benchmark stage\n");
     }
 
     WsServer server;
@@ -1433,8 +1441,18 @@ int cmd_test_ws(const std::string& webui_dir,
     audio_cfg.wavlm_ecapa_model = model_root + "/speaker/espnet_wavlm_ecapa/wavlm_ecapa.safetensors";
     audio_cfg.wavlm_ecapa_threshold = 0.55f;
 
-    // Configure Qwen3-ASR engine.
-    audio_cfg.asr_model_path = model_root + "/asr/Qwen/Qwen3-ASR-1.7B";
+    // Speaker-ID benchmark stage: keep ASR fully disabled by default to avoid
+    // extra GPU/queue pressure that can distort diarization-focused metrics.
+    const char* test_ws_enable_asr = std::getenv("DEUSRIDET_TEST_WS_ENABLE_ASR");
+    bool enable_asr_in_test_ws =
+        (test_ws_enable_asr != nullptr) && std::string(test_ws_enable_asr) == "1";
+    if (enable_asr_in_test_ws) {
+        audio_cfg.asr_model_path = model_root + "/asr/Qwen/Qwen3-ASR-1.7B";
+        printf("[test-ws] ASR load enabled by DEUSRIDET_TEST_WS_ENABLE_ASR=1\n");
+    } else {
+        audio_cfg.asr_model_path.clear();
+        printf("[test-ws] ASR load disabled for speaker-only benchmark stage\n");
+    }
 
     // Track WS-level stats.
     std::atomic<uint64_t> total_frames{0};

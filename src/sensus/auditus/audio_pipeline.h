@@ -440,6 +440,14 @@ struct TrackerStats {
     float    separation_lat_ms = 0.0f;
     float    sep_source1_energy = 0.0f;
     float    sep_source2_energy = 0.0f;
+    // Overlap speaker confirmation from separated sources.
+    bool     overlap_confirm_valid = false;
+    int      overlap_spk1_id = -1;
+    float    overlap_spk1_sim = 0.0f;
+    char     overlap_spk1_name[64] = {};
+    int      overlap_spk2_id = -1;
+    float    overlap_spk2_sim = 0.0f;
+    char     overlap_spk2_name[64] = {};
 };
 
 class SpeakerTracker {
@@ -599,7 +607,7 @@ private:
     float identify_threshold_   = 0.55f;
     float change_threshold_     = 0.35f;
     int   change_confirm_count_ = 2;
-    int   register_confirm_     = 2;
+    int   register_confirm_     = 3;
     float self_consistency_     = 0.55f;
     float w_emb_                = 0.50f;
     float w_centroid_           = 0.30f;

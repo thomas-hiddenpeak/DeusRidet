@@ -870,7 +870,7 @@ void AudioPipeline::process_loop() {
                             float ovlp_ratio = seg_total_chunks_ > 0
                                 ? (float)seg_overlap_chunks_ / seg_total_chunks_ : 0;
                             bool overlap_skip = (ovlp_ratio > 0.60f);
-                            bool overlap_noregister = (ovlp_ratio > 0.20f);
+                            bool overlap_noregister = (ovlp_ratio > 0.35f);
                             if (overlap_skip) {
                                 // Try separator recovery: separate, extract, identify each source.
                                 if (tracker_.separator_ready() && speech_pcm_buf_.size() >= 4800) {
@@ -981,7 +981,7 @@ void AudioPipeline::process_loop() {
                             // at 1872s in v8) that create false attributions.
                             // v30: lowered from 200→100 because spk5 registered
                             // at count=181 in v9.
-                            static constexpr int kMaxAutoRegCount = 100;
+                            static constexpr int kMaxAutoRegCount = 1000;
                             if (campp_full_count_ >= kMaxAutoRegCount) {
                                 auto_reg = false;
                             }
@@ -1566,6 +1566,47 @@ void AudioPipeline::process_loop() {
                     strncpy(ev.name, ts.speaker_name, sizeof(ev.name) - 1);
                     spk_timeline_.push(ev);
                 }
+
+                // Timeline: overlap-confirmed speaker from separated sources.
+                // Use Tracker source weight (lower authority than SAAS_FULL).
+                if (ts.overlap_confirm_valid) {
+                    int sel_id = -1;
+                    float sel_sim = 0.0f;
+                    const char* sel_name = "";
+
+                    if (ts.overlap_spk1_id >= 0 && ts.overlap_spk2_id >= 0) {
+                        if (ts.overlap_spk1_sim >= ts.overlap_spk2_sim) {
+                            sel_id = ts.overlap_spk1_id;
+                            sel_sim = ts.overlap_spk1_sim;
+                            sel_name = ts.overlap_spk1_name;
+                        } else {
+                            sel_id = ts.overlap_spk2_id;
+                            sel_sim = ts.overlap_spk2_sim;
+                            sel_name = ts.overlap_spk2_name;
+                        }
+                    } else if (ts.overlap_spk1_id >= 0) {
+                        sel_id = ts.overlap_spk1_id;
+                        sel_sim = ts.overlap_spk1_sim;
+                        sel_name = ts.overlap_spk1_name;
+                    } else if (ts.overlap_spk2_id >= 0) {
+                        sel_id = ts.overlap_spk2_id;
+                        sel_sim = ts.overlap_spk2_sim;
+                        sel_name = ts.overlap_spk2_name;
+                    }
+
+                    if (sel_id >= 0) {
+                        int win = tracker_.window_ms() * 16;
+                        SpeakerEvent ev{};
+                        ev.audio_start = total_samples_in_ - win;
+                        if (ev.audio_start < 0) ev.audio_start = 0;
+                        ev.audio_end   = total_samples_in_;
+                        ev.source      = SpkEventSource::TRACKER;
+                        ev.speaker_id  = sel_id;
+                        ev.similarity  = sel_sim;
+                        strncpy(ev.name, sel_name, sizeof(ev.name) - 1);
+                        spk_timeline_.push(ev);
+                    }
+                }
             }
             // Copy P1/P2 stats from tracker to pipeline stats.
             {
@@ -2104,6 +2145,13 @@ bool SpeakerTracker::check() {
 
     stats_.check_active = false;
     stats_.reg_event = false;
+    stats_.overlap_confirm_valid = false;
+    stats_.overlap_spk1_id = -1;
+    stats_.overlap_spk1_sim = 0.0f;
+    stats_.overlap_spk1_name[0] = '\0';
+    stats_.overlap_spk2_id = -1;
+    stats_.overlap_spk2_sim = 0.0f;
+    stats_.overlap_spk2_name[0] = '\0';
 
     // Determine if check is needed.
     bool do_check = false;
@@ -2423,6 +2471,47 @@ bool SpeakerTracker::check() {
                     if (sep_result.valid) {
                         stats_.sep_source1_energy = sep_result.energy1;
                         stats_.sep_source2_energy = sep_result.energy2;
+
+                        // Confirm speakers from separated sources (match-only).
+                        // Do not auto-register on overlap chunks to avoid DB pollution.
+                        static constexpr float kMinSepEnergy = 0.005f;
+                        if (sep_result.energy1 > kMinSepEnergy) {
+                            auto emb1 = enc_->extract(sep_result.source1.data(), n);
+                            if (!emb1.empty()) {
+                                auto m1 = db_.identify(emb1, identify_threshold_, false, identify_threshold_);
+                                if (m1.speaker_id >= 0) {
+                                    stats_.overlap_spk1_id = m1.speaker_id;
+                                    stats_.overlap_spk1_sim = m1.similarity;
+                                    strncpy(stats_.overlap_spk1_name, m1.name.c_str(),
+                                            sizeof(stats_.overlap_spk1_name) - 1);
+                                    stats_.overlap_spk1_name[sizeof(stats_.overlap_spk1_name) - 1] = '\0';
+                                }
+                            }
+                        }
+
+                        if (sep_result.energy2 > kMinSepEnergy) {
+                            auto emb2 = enc_->extract(sep_result.source2.data(), n);
+                            if (!emb2.empty()) {
+                                auto m2 = db_.identify(emb2, identify_threshold_, false, identify_threshold_);
+                                if (m2.speaker_id >= 0) {
+                                    stats_.overlap_spk2_id = m2.speaker_id;
+                                    stats_.overlap_spk2_sim = m2.similarity;
+                                    strncpy(stats_.overlap_spk2_name, m2.name.c_str(),
+                                            sizeof(stats_.overlap_spk2_name) - 1);
+                                    stats_.overlap_spk2_name[sizeof(stats_.overlap_spk2_name) - 1] = '\0';
+                                }
+                            }
+                        }
+
+                        stats_.overlap_confirm_valid =
+                            (stats_.overlap_spk1_id >= 0 || stats_.overlap_spk2_id >= 0);
+
+                        if (stats_.overlap_confirm_valid) {
+                            LOG_INFO("Tracker",
+                                     "Overlap confirm: s1=%d(%.3f) s2=%d(%.3f)",
+                                     stats_.overlap_spk1_id, stats_.overlap_spk1_sim,
+                                     stats_.overlap_spk2_id, stats_.overlap_spk2_sim);
+                        }
 
                         LOG_INFO("Tracker", "Overlap separation: src1_rms=%.4f src2_rms=%.4f lat=%.1fms",
                                  sep_result.energy1, sep_result.energy2, stats_.separation_lat_ms);

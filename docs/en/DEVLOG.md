@@ -271,7 +271,7 @@ Integration test: Service starts with both P1 (loaded) and P2 (lazy), HTTP 200, 
 | `tools/export_mossformer2_onnx.py` | New | MossFormer2 ONNX export script |
 | `tools/export_pyannote_onnx.py` | New | Pyannote ONNX export script |
 
-## 2026-07-20 — v24d/v24e Speaker ID: Discovery Phase + Extensive Parameter Search
+## 2026-04-19 — v24d/v24e Speaker ID: Discovery Phase + Extensive Parameter Search
 
 ### Context
 
@@ -337,7 +337,7 @@ The ceiling for this encoder combination (CAM++ 192D + WL-ECAPA 192D) on 4 simil
 Chinese male speakers is approximately 65% average, 75% peak. Further improvement
 requires either better embeddings, temporal post-processing, or additional modalities.
 
-## 2026-07-19 — GPTQ GEMM Optimization Round: 4 Experiments, 1 Win
+## 2026-04-19 — GPTQ GEMM Optimization Round: 4 Experiments, 1 Win
 
 ### Context
 
@@ -413,7 +413,7 @@ SASS: 744 instructions, 32 HMMA (4.3%). Registers: 96 (<5>, 5 blocks/SM),
    32 HMMA (4.3%). Further improvements require reducing dequant instruction
    count, which likely means a different weight memory layout (pre-permuted).
 
-## 2026-07-18 — Prefill Optimization Analysis: Near Hardware Limits (88 ms, M=11)
+## 2026-04-18 — Prefill Optimization Analysis: Near Hardware Limits (88 ms, M=11)
 
 ### Context
 
@@ -518,7 +518,7 @@ effort on larger M values (where Marlin scales better) and decode path improveme
 Prefill at M=11 is fundamentally limited by kernel launch overhead and near-peak
 DRAM utilization.
 
-## 2026-07-17 — Decode Fusion + INT4 Marlin Attention: 113→89 ms/tok (21% Speedup)
+## 2026-04-17 — Decode Fusion + INT4 Marlin Attention: 113→89 ms/tok (21% Speedup)
 
 ### Context
 
@@ -2608,7 +2608,7 @@ All PTX MMA kernel code removed. Dispatch restored to V1 WMMA.
 
 ---
 
-## 2026-07-16 — Marlin Optimization: SMEM Right-Sizing + Fused Add + Tile Config
+## 2026-04-16 — Marlin Optimization: SMEM Right-Sizing + Fused Add + Tile Config
 
 ### Background
 
