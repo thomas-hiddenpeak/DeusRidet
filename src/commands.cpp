@@ -1426,6 +1426,14 @@ int cmd_test_ws(const std::string& webui_dir,
     // Configure P1: pyannote overlap detection (native CUDA).
     audio_cfg.overlap_det.model_path = model_root + "/vad/pyannote_seg3.safetensors";
     audio_cfg.overlap_det.enabled = true;
+    // Override overlap confidence threshold (softmax) via env for S4 sweep.
+    // Default (0.5) is tuned in overlap_detector.h; accepts [0.0, 1.0].
+    if (const char* thr_env = std::getenv("DEUSRIDET_OVERLAP_THRESHOLD")) {
+        float thr = std::atof(thr_env);
+        if (thr > 0.0f && thr <= 1.0f) {
+            audio_cfg.overlap_det.overlap_threshold = thr;
+        }
+    }
 
     // Configure P2: MossFormer2 speech separation (native CUDA, lazy loaded).
     audio_cfg.separator.model_path = model_root + "/vad/mossformer2_ss_16k.safetensors";
