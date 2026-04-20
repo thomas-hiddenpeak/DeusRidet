@@ -16,8 +16,15 @@ import struct
 import sys
 import threading
 import time
+from typing import Optional
 
 import websocket
+
+
+# Runtime shared state for lightweight timeline logging.
+_SENT_SAMPLES = 0
+_STATS_LOG_FH: Optional[object] = None
+_LAST_MULTI_STATE: Optional[bool] = None
 
 
 def decode_to_pcm(path: str) -> bytes:
@@ -70,6 +77,30 @@ def on_message(ws, message):
             print(f"  SPK: {tag}{label} (id={sid} sim={sim:.3f})")
 
         elif msg_type == "pipeline_stats":
+            global _LAST_MULTI_STATE
+
+            audio_sec = _SENT_SAMPLES / 16000.0
+            multi = bool(data.get("multi_speaker", False))
+            multi_score = float(data.get("multi_score", 0.0) or 0.0)
+            multi_source = data.get("multi_source", "")
+
+            if _STATS_LOG_FH is not None:
+                rec = {
+                    "type": "pipeline_stats",
+                    "audio_sec": round(audio_sec, 3),
+                    "recv_ts": round(time.time(), 3),
+                    "multi_speaker": multi,
+                    "multi_score": multi_score,
+                    "multi_source": multi_source,
+                }
+                _STATS_LOG_FH.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                _STATS_LOG_FH.flush()
+
+            if _LAST_MULTI_STATE is None or _LAST_MULTI_STATE != multi:
+                print(f"  MULTI: {'ON' if multi else 'OFF'} @~{audio_sec:.1f}s "
+                      f"(score={multi_score:.2f} src={multi_source})")
+                _LAST_MULTI_STATE = multi
+
             # Periodic stats — only print speaker-relevant fields if active.
             wl_active = data.get("wlecapa_active", False)
             if wl_active:
@@ -113,6 +144,9 @@ def on_open(ws):
 
 
 def main():
+    global _SENT_SAMPLES
+    global _STATS_LOG_FH
+
     parser = argparse.ArgumentParser(description="Send audio to DeusRidet WS")
     parser.add_argument("audio_file", help="Path to audio file (mp3, wav, etc.)")
     parser.add_argument("--url", default="ws://localhost:8080/ws",
@@ -121,7 +155,12 @@ def main():
                         help="Playback speed multiplier (default: 1.0 = real-time)")
     parser.add_argument("--chunk", type=int, default=512,
                         help="Samples per WS frame (default: 512 = 32ms)")
+    parser.add_argument("--stats-log", default="",
+                        help="Optional JSONL file to save pipeline multi-speaker timeline")
     args = parser.parse_args()
+
+    if args.stats_log:
+        _STATS_LOG_FH = open(args.stats_log, "w", encoding="utf-8")
 
     print(f"Decoding {args.audio_file} ...")
     pcm = decode_to_pcm(args.audio_file)
@@ -175,6 +214,7 @@ def main():
 
             ws.send(chunk, opcode=websocket.ABNF.OPCODE_BINARY)
             sent += chunk_samples
+            _SENT_SAMPLES = sent
 
             # Real-time pacing.
             elapsed = time.time() - t0
@@ -195,6 +235,8 @@ def main():
     time.sleep(5)
 
     ws.close()
+    if _STATS_LOG_FH is not None:
+        _STATS_LOG_FH.close()
     print("Finished.")
 
 

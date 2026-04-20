@@ -1618,6 +1618,8 @@ int cmd_test_ws(const std::string& webui_dir,
         return s;
     };
 
+    bool multi_speaker_last = false;
+    bool multi_speaker_initialized = false;
     audio.set_on_stats([&](const AudioPipelineStats& st) {
         // Build speaker lists JSON — always included so the roster stays current.
         std::string lists_json;
@@ -1697,7 +1699,7 @@ int cmd_test_ws(const std::string& webui_dir,
 
         // P2: Speech separation stats.
         {
-            char sep_buf[256];
+            char sep_buf[384];
             snprintf(sep_buf, sizeof(sep_buf),
                 R"(,"sep_enabled":%s,"sep_loaded":%s,"sep_active":%s,"sep_lat_ms":%.1f,"sep_src1_rms":%.4f,"sep_src2_rms":%.4f)",
                 audio.separator_enabled() ? "true" : "false",
@@ -1772,8 +1774,21 @@ int cmd_test_ws(const std::string& webui_dir,
         }
 
         // SpeakerTracker stats.
+        bool tracker_overlap_state = false;
+        bool sep_confirm_overlap = false;
+        int tracker_speaker_count = 0;
+        int sep_spk1_id = -1;
+        int sep_spk2_id = -1;
         {
             auto& ts = audio.tracker().stats();
+            tracker_overlap_state = (ts.state == TrackerState::OVERLAP);
+            tracker_speaker_count = ts.speaker_count;
+            sep_confirm_overlap = ts.overlap_confirm_valid &&
+                                  ts.overlap_spk1_id >= 0 &&
+                                  ts.overlap_spk2_id >= 0 &&
+                                  ts.overlap_spk1_id != ts.overlap_spk2_id;
+            sep_spk1_id = ts.overlap_spk1_id;
+            sep_spk2_id = ts.overlap_spk2_id;
             char trk[512];
             snprintf(trk, sizeof(trk),
                 R"(,"tracker_enabled":%s,"tracker_state":%d,"tracker_spk_id":%d,"tracker_spk_sim":%.3f)"
@@ -1809,6 +1824,54 @@ int cmd_test_ws(const std::string& webui_dir,
 
             // Tracker speaker list.
             full_json += R"(,"tracker_speakers":)" + speaker_list_json(audio.tracker().db());
+        }
+
+        // Multi-speaker assessment stage (next step after VAD + speaker tracking):
+        // fuse OD, tracker overlap state, and separator-confirmed dual speaker IDs.
+        bool od_overlap = st.overlap_detected && st.overlap_ratio >= 0.15f;
+        bool multi_by_count = (tracker_speaker_count >= 2) || (st.speaker_count >= 2);
+        bool multi_speaker = od_overlap || tracker_overlap_state || sep_confirm_overlap || multi_by_count;
+        float multi_score = st.overlap_ratio;
+        if (tracker_overlap_state && multi_score < 0.60f) multi_score = 0.60f;
+        if (sep_confirm_overlap) multi_score = 1.00f;
+        if (multi_by_count && multi_score < 0.50f) multi_score = 0.50f;
+
+        char multi_source[64];
+        multi_source[0] = '\0';
+        if (od_overlap) strcat(multi_source, "od");
+        if (tracker_overlap_state) {
+            if (multi_source[0] != '\0') strcat(multi_source, "+");
+            strcat(multi_source, "tracker");
+        }
+        if (sep_confirm_overlap) {
+            if (multi_source[0] != '\0') strcat(multi_source, "+");
+            strcat(multi_source, "sep_confirm");
+        }
+        if (multi_by_count) {
+            if (multi_source[0] != '\0') strcat(multi_source, "+");
+            strcat(multi_source, "speaker_count");
+        }
+        if (multi_source[0] == '\0') strcpy(multi_source, "none");
+
+        char ms[256];
+        snprintf(ms, sizeof(ms),
+            R"(,"multi_speaker":%s,"multi_score":%.3f,"multi_source":"%s","multi_sep_spk1":%d,"multi_sep_spk2":%d)",
+            multi_speaker ? "true" : "false",
+            multi_score,
+            multi_source,
+            sep_spk1_id,
+            sep_spk2_id);
+        full_json += ms;
+
+        if (!multi_speaker_initialized || multi_speaker != multi_speaker_last) {
+            multi_speaker_initialized = true;
+            multi_speaker_last = multi_speaker;
+            printf("[test-ws] MULTI-SPEAKER %s (score=%.2f source=%s sep=[%d,%d])\n",
+                   multi_speaker ? "ON" : "OFF",
+                   multi_score,
+                   multi_source,
+                   sep_spk1_id,
+                   sep_spk2_id);
         }
 
         full_json += lists_json;
@@ -2596,6 +2659,17 @@ int cmd_test_ws(const std::string& webui_dir,
                    (unsigned long)st.speech_frames, st.last_energy);
         }
     });
+
+    // Default runtime policy for next-stage tests:
+    // Silero as primary VAD, FSMN kept available but disabled by default.
+    // Tuned baseline from current Silero-only sweep.
+    audio.set_vad_source(VadSource::SILERO);
+    audio.set_asr_vad_source(VadSource::SILERO);
+    audio.set_silero_enabled(true);
+    audio.set_fsmn_enabled(false);
+    audio.set_gain(4.0f);
+    audio.set_silero_threshold(0.001f);
+    printf("[test-ws] Default VAD policy: source=silero, silero=ON, fsmn=OFF, gain=4.0, silero_threshold=0.001\n");
 
     // Start audio pipeline.
     if (!audio.start(audio_cfg)) {

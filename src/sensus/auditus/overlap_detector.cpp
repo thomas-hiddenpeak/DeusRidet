@@ -202,9 +202,14 @@ void OverlapDetector::decode_powerset(const float* logits, int num_frames,
         }
     }
 
-    result.is_overlap = (overlap_count > 0);
     result.overlap_ratio = (num_frames > 0) ?
         (float)overlap_count / (float)num_frames : 0.0f;
+    // Require minimum 5% of frames to be overlap before declaring
+    // the window as overlapping. A single frame (1/589 = 0.17%) is
+    // too sensitive — noise, reverberation, and speaker transitions
+    // within the 10s window cause false positives.
+    static constexpr float kMinOverlapRatio = 0.05f;
+    result.is_overlap = (result.overlap_ratio >= kMinOverlapRatio);
 }
 
 } // namespace deusridet

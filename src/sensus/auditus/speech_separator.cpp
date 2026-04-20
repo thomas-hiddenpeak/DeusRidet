@@ -145,14 +145,14 @@ SeparationResult SpeechSeparator::separate(const float* pcm, int n_samples) {
         if (result.energy1 > 1e-8f) {
             float scale1 = rms_input / result.energy1;
             for (float& v : result.source1) v *= scale1;
-            result.energy1 = rms_input;
         }
         if (result.energy2 > 1e-8f) {
             float scale2 = rms_input / result.energy2;
             for (float& v : result.source2) v *= scale2;
-            result.energy2 = rms_input;
         }
     }
+    // Keep pre-normalization energy for reporting: post-norm is always
+    // == rms_input since both sources are scaled to match input RMS.
 
     result.valid = true;
     return result;

@@ -392,15 +392,18 @@ __global__ void k_cat_ch(const float* a, const float* b, float* o,
 // FLASH-specific kernels
 // ============================================================================
 
-// Sinusoidal pos embedding: [L,D]
+// Sinusoidal pos embedding: [L,D] — concatenated layout matching PyTorch:
+//   out[l, 0..D/2-1] = sin(l * inv_freq[d]) * scale
+//   out[l, D/2..D-1]  = cos(l * inv_freq[d]) * scale
 __global__ void k_sinuemb(float* out, const float* inv_freq,
                           const float* scale, int L, int D) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= L * D) return;
     int l = idx / D, d = idx % D;
-    float ang = (float)l * inv_freq[d / 2];
+    int half = D / 2;
+    float ang = (float)l * inv_freq[d < half ? d : d - half];
     float s = scale[0];
-    out[idx] = (d & 1) ? __cosf(ang) * s : __sinf(ang) * s;
+    out[idx] = (d < half) ? __sinf(ang) * s : __cosf(ang) * s;
 }
 
 // OffsetScale: qk[L,D] → 4 outputs, gamma/beta [4,D]

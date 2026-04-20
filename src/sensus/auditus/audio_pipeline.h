@@ -440,6 +440,18 @@ struct TrackerStats {
     float    separation_lat_ms = 0.0f;
     float    sep_source1_energy = 0.0f;
     float    sep_source2_energy = 0.0f;
+    float    sep_energy_ratio = 0.0f;   // min(e1,e2)/max(e1,e2), 0=single-spk
+    float    sep_cross_sim = 0.0f;      // cosine sim between separated sources
+    // Separation quality score: combines energy balance + speaker match confidence.
+    // Range [0,1]: 0=definitely false positive, 1=perfect separation.
+    float    sep_quality = 0.0f;
+    enum class OdReject : uint8_t {
+        NONE = 0,          // not rejected
+        ENERGY_RATIO,      // src2/src1 too low (single speaker)
+        CROSS_SIM,         // separated sources are same speaker
+        OVERLAP_RATIO,     // Seg3 overlap_ratio below threshold
+    };
+    OdReject od_reject_reason = OdReject::NONE;
     // Overlap speaker confirmation from separated sources.
     bool     overlap_confirm_valid = false;
     int      overlap_spk1_id = -1;
@@ -895,7 +907,7 @@ private:
     std::atomic<int> vad_source_{static_cast<int>(VadSource::SILERO)};
     std::atomic<int> asr_vad_source_{static_cast<int>(VadSource::SILERO)};  // ASR defaults to SILERO (same as speaker)
     std::atomic<bool> enable_silero_{true};
-    std::atomic<bool> enable_frcrn_{false};    // FRCRN speech enhancement (P0) — disabled until TRT acceleration
+    std::atomic<bool> enable_frcrn_{true};     // FRCRN speech enhancement
 
     std::atomic<bool> enable_fsmn_{false};
     std::atomic<bool> enable_speaker_{true};    // CAM++ — primary SAAS encoder
