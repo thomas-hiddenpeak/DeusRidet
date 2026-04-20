@@ -1,5 +1,121 @@
 # DeusRidet Development Log
 
+## 2026-04-20 — S1–S4 Cycle: Semantic Metric + S3 FRCRN-Bypass + Seg3 Threshold Sweep
+
+### Context
+
+Following the test8 three-stage result (92.4% frame-accuracy, 6 catastrophic
+overlap misattributions), we launched a 4-step investigation:
+
+- **S1** — dead-code cleanup (commit `8b0b332`, prior session)
+- **S2** — introduce a *semantic* evaluation metric that counts
+  mis-attribution inside overlap regions as "catastrophic" (lying) and
+  treats abstention in overlap as neutral, alongside the classical
+  non-overlap true-accuracy
+- **S3** — feed the MossFormer2 separator with *pre-FRCRN* audio, under
+  the hypothesis that FRCRN denoising was scrubbing out the exact
+  residual cues the separator uses for masking
+- **S4** — sweep the pyannote Seg3 overlap-confidence threshold
+  (`DEUSRIDET_OVERLAP_THRESHOLD` ∈ {0.5, 0.7, 0.85}) to find the knee
+
+### S2: Semantic Evaluator (commit `cf3f886`)
+
+`tools/eval_speaker_attribution.sh` now emits a two-tuple
+`(true_accuracy, catastrophic_count)`. Overlap regions are loaded from
+`tests/asrTest2OverlapTimeline.txt` (46 regions) and:
+
+- Any prediction **inside** an overlap region matching **neither**
+  ground-truth speaker is catastrophic (high/medium/low confidence by
+  margin to 2nd-best)
+- Abstention (`id=-1`) inside overlap is **neutral** (better to admit
+  uncertainty than to lie)
+- Non-overlap accuracy uses the existing boundary-tolerance logic
+
+This inverts the prior ordering: test6/7 looked good on frame accuracy
+but were hiding catastrophic misattributions at overlap boundaries.
+Under the semantic metric, OD-ON with aggressive cross-sim rejection
+is the correct default.
+
+### S3: Parallel Raw Ring Buffer (commit `2d14de3`)
+
+`SpeakerTracker` gained `ring_raw_` — a second parallel ring buffer
+written with the pre-FRCRN PCM. `feed()` takes an optional `pcm_raw`
+param; `check()` lazily extracts both buffers so the separator sees
+raw audio while embedding computation still sees FRCRN-enhanced audio.
+This is net-additive: no existing behavior changes unless the caller
+passes `pcm_raw`.
+
+### S4: Threshold Env Override + Mapper (commit `6da740f`)
+
+- `src/commands.cpp` now honors `DEUSRIDET_OVERLAP_THRESHOLD=<f>` before
+  constructing the audio pipeline
+- `tools/map_log_to_mapped.py` converts server logs to `mapped.txt`
+  (FULL + FULL-margin-abstain events, anchored to the last
+  `[WS] Client connected` before the first speaker event so HTTP probes
+  don't skew the anchor). Validated byte-for-byte against the canonical
+  test8 mapped file
+
+### Benchmark Results (all runs: tests/test.mp3, --speed 2.0)
+
+| run    | Config                         | true_acc | catastrophic |
+|--------|--------------------------------|---------:|-------------:|
+| test8  | baseline (no S3, OD=0.5)       |  92.4 %  |  **6**       |
+| test9  | S3 active, OD=0.5              |  93.3 %  |   10         |
+| test10 | S3 active, OD=**0.7**          | **93.4 %** |  7         |
+| test11 | S3 active, OD=0.85             |  92.5 %  |   9         |
+
+Artifacts preserved in `tests/test{9,10,11}_*_mapped.txt`.
+
+### Analysis
+
+1. **S3 hypothesis rejected.** Feeding raw audio to MossFormer2 does
+   NOT reduce catastrophic misattributions. Test9 under the same OD=0.5
+   went from 6 → 10 catastrophic vs the pre-S3 baseline. MossFormer2
+   appears to benefit from FRCRN's noise normalization — a clean,
+   SNR-consistent input produces better separated branches than a
+   variance-rich raw input. The S3 infrastructure (parallel raw ring)
+   will remain in place (it is useful for other experiments and is a
+   no-op when unused), but the intended routing change is reverted by
+   default.
+
+2. **OD threshold 0.7 is the knee.** At threshold 0.5 the detector is
+   too eager — every brief energy peak gets sent through MossFormer2,
+   multiplying embedding variance and catastrophic count. At 0.85 it
+   becomes too conservative — genuine overlaps get missed, and the
+   downstream dual-encoder scores drift. At 0.7 the detector fires on
+   high-confidence overlaps only, and catastrophic drops by 3 while
+   non-overlap accuracy stays at the session best (93.4 %).
+
+3. **The baseline (test8: OD=0.5, no S3) still has the lowest
+   catastrophic count (6).** The S4 sweep under S3 does not reach 6.
+   The practical recommendation is therefore:
+   - Keep OD-ON (it reduces catastrophic vs OD-OFF, confirmed last
+     session)
+   - **Revert the S3 routing change** — the parallel ring
+     infrastructure stays, but callers should continue passing
+     FRCRN-enhanced audio to the separator
+   - Tune OD threshold to 0.7 as the default going forward if the
+     catastrophic count delta (7 vs 6) is acceptable in exchange for
+     the +1 pp true-accuracy gain; otherwise keep 0.5
+
+### Next Steps
+
+- Decide on S3 revert (keep infrastructure, restore default routing)
+- Push OD threshold 0.7 as the new default in `OverlapDetector`
+  defaults if confirmed in a fresh baseline run
+- Investigate the 6 remaining catastrophic misattributions case-by-case
+  (direct log-reading per owner's directive) — are they all in the
+  same hard overlap regions, or genuinely random?
+
+### Commits
+
+- `cf3f886` — test: semantic speaker-attribution evaluator (S2)
+- `2d14de3` — feat(audio): parallel raw ring buffer for separator (S3)
+- `6da740f` — tooling: log-to-mapped converter + OD threshold env (S4 infra)
+- `5fd9a0d` — bench: S3 test9 result (93.3 %, 10)
+- `ee66e25` — bench: S4 test10 OD=0.7 result (93.4 %, 7)
+- `0326add` — bench: S4 test11 OD=0.85 result (92.5 %, 9)
+
 ## 2026-04-19 — Overlap Detection Re-enabled: Test6 & Test7 Results
 
 ### Context

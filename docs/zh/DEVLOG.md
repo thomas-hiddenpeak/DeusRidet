@@ -1,5 +1,108 @@
 # DeusRidet 开发日志
 
+## 2026-04-20 — S1–S4 循环：语义指标 + S3 绕过 FRCRN + Seg3 阈值扫描
+
+### 背景
+
+在 test8 三阶段结果（帧准确率 92.4 %，6 次重叠区重大错归因）之后，
+启动了一轮四步调查：
+
+- **S1** — 死代码清理（提交 `8b0b332`，上一会话完成）
+- **S2** — 引入*语义*评估指标：把重叠区内的错归因判为 "catastrophic"
+  （撒谎），把重叠区内的弃权视为中性；非重叠区继续使用经典的真实
+  准确率
+- **S3** — 把 **FRCRN 降噪前** 的原始 PCM 送入 MossFormer2 分离器，
+  假设 FRCRN 降噪把分离器做掩码所需的残余声学线索抹掉了
+- **S4** — 扫描 pyannote Seg3 的重叠置信阈值
+  （`DEUSRIDET_OVERLAP_THRESHOLD` ∈ {0.5, 0.7, 0.85}）寻找拐点
+
+### S2：语义评估器（提交 `cf3f886`）
+
+`tools/eval_speaker_attribution.sh` 现在输出二元组
+`(true_accuracy, catastrophic_count)`。重叠区从
+`tests/asrTest2OverlapTimeline.txt`（46 个区间）读取：
+
+- 预测落在重叠区内、与**两个** GT 说话人**都不匹配** → catastrophic
+  （按与次选的 margin 分成 high/medium/low 置信度）
+- 预测为 `id=-1`（弃权）落在重叠区内 → **中性**（宁愿承认不知道，
+  也不要撒谎）
+- 非重叠区沿用原有的边界容忍逻辑
+
+这个指标颠倒了之前的排序：test6/7 的帧准确率看起来不错，但其实
+在重叠边界上藏了大量 catastrophic 错归因。在语义指标下，
+OD-ON + 跨源相似度拒绝才是正确默认。
+
+### S3：并行原始环形缓冲（提交 `2d14de3`）
+
+`SpeakerTracker` 新增 `ring_raw_` —— 一个与 `ring_` 并行、同步
+写入 FRCRN **前** PCM 的环形缓冲。`feed()` 多了一个可选的
+`pcm_raw` 参数；`check()` 分别取两份缓冲，使得分离器看到原始音频，
+而嵌入提取仍看到 FRCRN 增强后的音频。该改动是纯增量的：调用方
+不传 `pcm_raw` 时行为不变。
+
+### S4：阈值环境变量 + 日志映射器（提交 `6da740f`）
+
+- `src/commands.cpp` 在构造 audio pipeline 前读取
+  `DEUSRIDET_OVERLAP_THRESHOLD=<f>`
+- `tools/map_log_to_mapped.py` 把 server 日志转成 `mapped.txt`
+  （FULL + FULL margin-abstain 事件，锚点选在第一个说话人事件
+  之前**最后一次** `[WS] Client connected`，避免被 HTTP 探活
+  扰乱）。与 test8 权威 mapped 文件逐字节一致
+
+### 基准结果（均为 tests/test.mp3，--speed 2.0）
+
+| 测试   | 配置                            | true_acc | catastrophic |
+|--------|---------------------------------|---------:|-------------:|
+| test8  | 基线（无 S3，OD=0.5）           |  92.4 %  |  **6**       |
+| test9  | S3 开启，OD=0.5                 |  93.3 %  |   10         |
+| test10 | S3 开启，OD=**0.7**             | **93.4 %** |  7         |
+| test11 | S3 开启，OD=0.85                |  92.5 %  |   9         |
+
+产物保存于 `tests/test{9,10,11}_*_mapped.txt`。
+
+### 分析
+
+1. **S3 假设被否决。** 把原始音频送进 MossFormer2 **不能** 降低
+   catastrophic 次数。同样 OD=0.5 下，test9 从基线的 6 次升到
+   10 次。看起来 MossFormer2 反而受益于 FRCRN 的噪声归一化 ——
+   干净、信噪比一致的输入能产生更好的分离分支，而方差丰富的原始
+   输入反而害事。S3 的基础设施（并行原始环形缓冲）将保留
+   （对其他实验有用，且不启用时是 no-op），但默认的路由改动应当
+   回退。
+
+2. **OD 阈值 0.7 是拐点。** 阈值 0.5 时检测器过激 —— 每一个
+   短促的能量峰都进了 MossFormer2，放大了嵌入方差和 catastrophic
+   计数。阈值 0.85 时又过保守 —— 真实重叠被漏掉，下游双编码器
+   分数出现漂移。阈值 0.7 只对高置信重叠触发，catastrophic 降 3，
+   非重叠区准确率保持本会话最高（93.4 %）。
+
+3. **基线 test8（OD=0.5，无 S3）仍然是 catastrophic 最少的一组
+   （6 次）。** 即使做 S4 扫描，S3 启用下没有任何一组能达到 6。
+   所以实际的建议是：
+   - 保留 OD-ON（上一会话已确认它比 OD-OFF 的 catastrophic 更少）
+   - **回退 S3 路由改动** —— 基础设施保留，调用方继续把 FRCRN 增强
+     后的音频送进分离器
+   - 若能接受 catastrophic 从 6 到 7（+1）的代价换取 true_acc +1 pp
+     的提升，把 OD 阈值默认值从 0.5 改为 0.7；否则保持 0.5
+
+### 下一步
+
+- 决定是否在代码中回退 S3 的默认路由（保留基础设施）
+- 若经一次全新基线确认后，把 `OverlapDetector` 默认阈值从 0.5
+  改为 0.7
+- 直接逐条阅读日志，分析剩下 6 次 catastrophic 是否集中在同一批
+  困难重叠区，还是真随机（owner 明示必须人类式直接阅读，不准脚本
+  评估）
+
+### 提交记录
+
+- `cf3f886` — test: 语义说话人归因评估器（S2）
+- `2d14de3` — feat(audio): 分离器并行原始环形缓冲（S3）
+- `6da740f` — tooling: 日志映射器 + OD 阈值环境变量（S4 基础设施）
+- `5fd9a0d` — bench: S3 test9 结果（93.3 %，10）
+- `ee66e25` — bench: S4 test10 OD=0.7 结果（93.4 %，7）
+- `0326add` — bench: S4 test11 OD=0.85 结果（92.5 %，9）
+
 ## 2026-04-19 — v24d/v24e 说话人识别：发现阶段 + 大规模参数搜索
 
 ### 背景
