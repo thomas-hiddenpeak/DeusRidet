@@ -340,8 +340,16 @@ void AudioPipeline::process_loop() {
         // FRCRN speech enhancement: denoise PCM before all downstream processing.
         // Uses direct per-chunk enhancement (no accumulation latency).
         // FRCRN internally pads to valid STFT alignment.
+        //
+        // NOTE: the speaker tracker also needs the *pre-FRCRN* signal for
+        // MossFormer2 separation in overlap regions (S3: FRCRN suppresses
+        // the weaker speaker, which defeats separation). We stash a raw
+        // copy here and hand it to tracker_.feed() alongside the denoised
+        // buffer below. The copy is skipped entirely when FRCRN is off.
         stats_.frcrn_active = false;
+        std::vector<int16_t> pcm_raw_buf;
         if (frcrn_.initialized() && enable_frcrn_.load(std::memory_order_relaxed)) {
+            pcm_raw_buf.assign(pcm_buf.begin(), pcm_buf.begin() + n_samples);
             frcrn_.enhance_inplace(pcm_buf.data(), n_samples);
             stats_.frcrn_active = true;
             stats_.frcrn_lat_ms = frcrn_.last_latency_ms();
@@ -1376,7 +1384,8 @@ void AudioPipeline::process_loop() {
                                   stats_.fsmn_speech;
                     break;
             }
-            tracker_.feed(pcm_buf.data(), n_samples, tracker_vad);
+            tracker_.feed(pcm_buf.data(), n_samples, tracker_vad,
+                          pcm_raw_buf.empty() ? nullptr : pcm_raw_buf.data());
             if (tracker_.check()) {
                 // Timeline: Tracker identification event.
                 // Skip when dual encoder active — tracker uses its own DB with
@@ -1840,6 +1849,7 @@ void SpeakerTracker::init(WavLMEcapaEncoder* enc, int dim) {
     enc_ = enc;
     ring_capacity_ = window_samples_ * 2;
     ring_.resize(ring_capacity_, 0);
+    ring_raw_.resize(ring_capacity_, 0);
     ring_write_ = 0;
     ring_count_ = 0;
     clear();
@@ -1878,12 +1888,17 @@ void SpeakerTracker::clear() {
     memset(&stats_, 0, sizeof(stats_));
 }
 
-void SpeakerTracker::feed(const int16_t* pcm, int n_samples, bool vad_speech) {
+void SpeakerTracker::feed(const int16_t* pcm, int n_samples, bool vad_speech,
+                          const int16_t* pcm_raw) {
     if (!enc_ || !enabled_.load(std::memory_order_relaxed)) return;
 
-    // Push PCM to circular ring buffer.
+    // Push PCM to circular ring buffer. Also mirror to `ring_raw_` using
+    // the pre-FRCRN copy when provided — otherwise mirror the primary
+    // audio so separator falls back transparently when FRCRN is off.
+    const bool have_raw = (pcm_raw != nullptr);
     for (int i = 0; i < n_samples; i++) {
-        ring_[ring_write_] = pcm[i];
+        ring_[ring_write_]     = pcm[i];
+        ring_raw_[ring_write_] = have_raw ? pcm_raw[i] : pcm[i];
         ring_write_ = (ring_write_ + 1) % ring_capacity_;
         if (ring_count_ < ring_capacity_) ring_count_++;
     }
@@ -1969,6 +1984,12 @@ bool SpeakerTracker::check() {
     int read_pos = (ring_write_ - n + ring_capacity_) % ring_capacity_;
     for (int i = 0; i < n; i++)
         pcm_f32[i] = ring_[(read_pos + i) % ring_capacity_] / 32768.0f;
+
+    // Parallel raw (pre-FRCRN) window. MossFormer2 separation runs on
+    // this buffer when overlap is suspected so FRCRN does not suppress
+    // the weaker speaker. Populated lazily below only if the separator
+    // actually runs, to avoid the per-check copy when OD is negative.
+    std::vector<float> pcm_raw_f32;
 
     auto t0 = std::chrono::steady_clock::now();
 
@@ -2251,8 +2272,20 @@ bool SpeakerTracker::check() {
             // P2: Speech separation — separate overlapping speakers.
             if (separator_.initialized() && enable_separator_.load(std::memory_order_relaxed)) {
                 if (n >= 3200) {  // minimum 200ms for meaningful separation
+                    // Lazily extract the parallel raw (pre-FRCRN) window.
+                    // Using pre-FRCRN audio for MossFormer2 preserves the
+                    // weaker speaker that FRCRN tends to suppress. When
+                    // FRCRN was not applied upstream, `ring_raw_` mirrors
+                    // `ring_` so this is equivalent to the denoised path.
+                    if (pcm_raw_f32.empty()) {
+                        pcm_raw_f32.resize(n);
+                        for (int i = 0; i < n; i++) {
+                            pcm_raw_f32[i] =
+                                ring_raw_[(read_pos + i) % ring_capacity_] / 32768.0f;
+                        }
+                    }
                     auto sep_t0 = std::chrono::steady_clock::now();
-                    auto sep_result = separator_.separate(pcm_f32.data(), n);
+                    auto sep_result = separator_.separate(pcm_raw_f32.data(), n);
                     auto sep_t1 = std::chrono::steady_clock::now();
 
                     stats_.separation_active = true;

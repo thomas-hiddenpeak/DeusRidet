@@ -473,7 +473,15 @@ public:
     void init(WavLMEcapaEncoder* enc, int dim = 192);
 
     // Feed PCM chunk (called every process loop iteration).
-    void feed(const int16_t* pcm, int n_samples, bool vad_speech);
+    // `pcm`     : primary (post-FRCRN) audio used for speaker embedding,
+    //             F0 estimation, and overlap detection.
+    // `pcm_raw` : optional pre-FRCRN audio. When provided, MossFormer2
+    //             separation runs on this raw signal to avoid FRCRN
+    //             suppressing the weaker speaker in overlap regions.
+    //             Pass nullptr (or omit) when FRCRN is disabled — the
+    //             primary buffer is then used for separation as well.
+    void feed(const int16_t* pcm, int n_samples, bool vad_speech,
+              const int16_t* pcm_raw = nullptr);
 
     // Perform check if interval reached. Returns true if a check was executed.
     // Must be called after feed() in the same loop iteration.
@@ -556,6 +564,13 @@ private:
 
     // Ring buffer for recent PCM (stores window_samples_ + margin).
     std::vector<int16_t> ring_;
+    // Parallel ring buffer holding pre-FRCRN (raw) audio. Same write
+    // cursor as `ring_`. Consumed by the MossFormer2 separator so
+    // overlap regions can be separated from the un-denoised signal
+    // (FRCRN tends to suppress the weaker speaker, defeating
+    // separation). When feed() is called without a raw pointer, this
+    // ring holds the same data as `ring_`.
+    std::vector<int16_t> ring_raw_;
     int ring_capacity_ = 0;
     int ring_write_    = 0;   // next write position (circular)
     int ring_count_    = 0;   // valid samples in ring
