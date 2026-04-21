@@ -123,6 +123,7 @@ add_executable(deusridet
     src/main.cpp
     src/commands.cpp
     src/communis/timeline_logger.cpp
+    src/communis/tempus.h
 )
 target_link_libraries(deusridet PRIVATE machina memoria conscientia communis nexus sensus orator stdc++fs rt dl)
 

@@ -15,6 +15,7 @@
 #include "../machina/tokenizer.h"
 #include "../machina/layer.h"
 #include "../communis/log.h"
+#include "../communis/tempus.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -76,8 +77,15 @@ bool ConscientiStream::init(const ConscientiConfig& cfg,
 void ConscientiStream::start() {
     if (running_.load()) return;
     running_.store(true);
+    // Register the CONSCIOUSNESS business-clock anchor. T1 = Prefill frame_id;
+    // nominal pulse ~100 ms. Subjective time is legal at T1 (frames may skip
+    // under Decode preemption), T0 always ticks wall-clock.
+    tempus::anchor_register(tempus::Domain::CONSCIOUSNESS,
+                            tempus::now_t0_ns(),
+                            /*t1_zero=*/0,
+                            /*period_ns=*/100'000'000ULL);
     loop_thread_ = std::thread(&ConscientiStream::consciousness_loop, this);
-    LOG_INFO("Conscientia", "Consciousness stream started");
+    LOG_INFO("Conscientia", "Consciousness stream started (tempus CONSCIOUSNESS anchored, 100 ms/frame)");
 }
 
 void ConscientiStream::stop() {

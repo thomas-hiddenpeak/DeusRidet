@@ -5,6 +5,7 @@
 
 #include "audio_pipeline.h"
 #include "../../communis/log.h"
+#include "../../communis/tempus.h"
 #include "../../orator/spectral_cluster.h"
 
 #include <chrono>
@@ -127,6 +128,22 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
 
     // Reset stats.
     memset(&stats_, 0, sizeof(stats_));
+
+    // Register the AUDIO business-clock anchor (T1 = sample index at this
+    // pipeline's input, resolution 1/sample_rate). T0 advances wall-clock;
+    // T1 advances one unit per PCM sample. period_ns = 1e9 / sample_rate
+    // for real-time capture (62500 ns @ 16 kHz). For accelerated replay
+    // the upstream driver can re-register with a scaled period_ns.
+    const uint64_t audio_period_ns =
+        cfg_.mel.sample_rate > 0
+            ? static_cast<uint64_t>(1'000'000'000ULL / cfg_.mel.sample_rate)
+            : 62500ULL;
+    tempus::anchor_register(tempus::Domain::AUDIO,
+                            tempus::now_t0_ns(),
+                            /*t1_zero=*/0,
+                            /*period_ns=*/audio_period_ns);
+    LOG_INFO("AudioPipe", "Tempus anchor registered: domain=AUDIO period=%lu ns (sr=%d)",
+             audio_period_ns, cfg_.mel.sample_rate);
 
     running_.store(true, std::memory_order_release);
     thread_ = std::thread(&AudioPipeline::process_loop, this);
