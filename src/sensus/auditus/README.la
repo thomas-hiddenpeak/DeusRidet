@@ -32,14 +32,15 @@ cleanly it hears it, becomes what it thinks.
 - **Orator** receives speech segments for speaker embedding.
 - **Conscientia** receives token streams with attached speaker IDs.
 
-## R1 Debt
+## R1 Status
 
-Three hard-limit violations tracked in Step 9 of the refactor backlog:
-- `audio_pipeline.cpp` (2651 lines, cap 500) — urgent, 5× over.
-- `audio_pipeline.h` (1063 lines, cap 500) — urgent.
-- `mossformer2.cu`, `frcrn_gpu.cu` — CUDA files over the 800-line cap.
+R1-clean as of Step 13/14 sweep. Current line counts:
+- `audio_pipeline.cpp`: 327 (cap 500)
+- `audio_pipeline.h`: 476 (cap 500)
+- `mossformer2.cu`: 35 (cap 800)
+- `frcrn_gpu.cu`: 787 (cap 800)
 
-No new code should enter these files.
+No hard-limit violation remains in `src/sensus/auditus/`.
 
 ## Sub-subsystems
 

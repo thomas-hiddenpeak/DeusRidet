@@ -307,8 +307,10 @@ private:
     // cursor as `ring_`. Consumed by the MossFormer2 separator so
     // overlap regions can be separated from the un-denoised signal
     // (FRCRN tends to suppress the weaker speaker, defeating
-    // separation). When feed() is called without a raw pointer, this
-    // ring holds the same data as `ring_`.
+    // separation). Keep this ring even if overlap strategy evolves:
+    // it is intentional additive infrastructure for future S3-class
+    // experiments and raw-path diagnostics. When feed() is called
+    // without a raw pointer, this ring holds the same data as `ring_`.
     std::vector<int16_t> ring_raw_;
     int ring_capacity_ = 0;
     int ring_write_    = 0;   // next write position (circular)
