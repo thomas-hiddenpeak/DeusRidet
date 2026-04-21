@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include "tempus.h"
+
 #include <cstdio>
 #include <ctime>
 #include <cstring>
@@ -74,7 +76,8 @@ public:
                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                  tm.tm_hour, tm.tm_min, tm.tm_sec);
 
-        fprintf(fp_, R"({"t":"header","version":1,"started":"%s"})" "\n", iso);
+        fprintf(fp_, R"({"t":"header","version":2,"started":"%s","t0":%lu})" "\n",
+                iso, (unsigned long)tempus::now_t0_ns());
         clock_gettime(CLOCK_MONOTONIC, &t0_);
         stats_count_ = asr_count_ = vad_count_ = 0;
         return true;
@@ -99,8 +102,9 @@ public:
                  tm.tm_hour, tm.tm_min, tm.tm_sec);
 
         fprintf(fp_,
-            R"({"t":"footer","ended":"%s","duration_sec":%.1f,"counts":{"stats":%u,"asr":%u,"vad":%u}})"
-            "\n", iso, dur, stats_count_, asr_count_, vad_count_);
+            R"({"t":"footer","ended":"%s","t0":%lu,"duration_sec":%.1f,"counts":{"stats":%u,"asr":%u,"vad":%u}})"
+            "\n", iso, (unsigned long)tempus::now_t0_ns(),
+            dur, stats_count_, asr_count_, vad_count_);
         fclose(fp_);
         fp_ = nullptr;
     }

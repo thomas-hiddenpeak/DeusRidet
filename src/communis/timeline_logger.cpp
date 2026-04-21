@@ -4,6 +4,7 @@
 // and other data that doesn't change between ticks.
 
 #include "communis/timeline_logger.h"
+#include "communis/tempus.h"
 #include "sensus/auditus/audio_pipeline.h"
 
 namespace deusridet {
@@ -16,14 +17,19 @@ void TimelineLogger::log_stats(const AudioPipelineStats& st,
     if (!fp_) return;
 
     double stream_sec = st.pcm_samples_in / 16000.0;
+    // Sample-accurate T0: map AUDIO T1 (sample index) back to wall time via
+    // the tempus anchor. Falls back to 0 until AudioPipeline::start() has run.
+    uint64_t t0_ns = tempus::t1_to_t0(tempus::Domain::AUDIO,
+                                      st.pcm_samples_in);
 
     // Build compact JSON — only fields relevant for timeline analysis.
     char buf[1024];
     int n = snprintf(buf, sizeof(buf),
-        R"({"t":"stats","s":%.4f,)"
+        R"({"t":"stats","t0":%lu,"sample":%lu,"s":%.4f,)"
         R"("speech":%s,"energy":%.2f,"rms":%.4f,)"
         R"("silero_p":%.3f,"silero_sp":%s,)"
         R"("fsmn_p":%.3f,"fsmn_sp":%s,)",
+        (unsigned long)t0_ns, (unsigned long)st.pcm_samples_in,
         stream_sec,
         st.is_speech ? "true" : "false", st.last_energy, st.last_rms,
         st.silero_prob, st.silero_speech ? "true" : "false",
@@ -100,13 +106,18 @@ void TimelineLogger::log_asr(const char* text, float stream_start, float stream_
         else                 esc += *p;
     }
 
+    // T0 stamp at serialization moment. The 's'/'e' business-clock range
+    // remains the authoritative mapping back to source audio samples.
+    uint64_t t0_ns = tempus::now_t0_ns();
+
     char buf[2048];
     int n = snprintf(buf, sizeof(buf),
-        R"({"t":"asr","s":%.2f,"e":%.2f,"text":"%s",)"
+        R"({"t":"asr","t0":%lu,"s":%.2f,"e":%.2f,"text":"%s",)"
         R"("trigger":"%s","latency":%.1f,"audio":%.2f,)"
         R"("spk_id":%d,"spk_name":"%s","spk_sim":%.3f,"spk_conf":%.3f,"spk_src":"%s",)"
         R"("trk_id":%d,"trk_name":"%s","trk_sim":%.3f})"
         "\n",
+        (unsigned long)t0_ns,
         stream_start, stream_end, esc.c_str(),
         trigger ? trigger : "", latency_ms, audio_sec,
         spk_id, spk_name ? spk_name : "", spk_sim, spk_conf,
@@ -126,10 +137,16 @@ void TimelineLogger::log_vad(bool is_speech, bool segment_start, bool segment_en
     std::lock_guard<std::mutex> lk(mu_);
     if (!fp_) return;
 
+    // VAD T1 is the VAD frame index (T2-equivalent for energy VAD); T0 is
+    // stamped at emission. For sample-accurate VAD edges use log_stats'
+    // sample field at the surrounding tick.
+    uint64_t t0_ns = tempus::now_t0_ns();
+
     char buf[256];
     snprintf(buf, sizeof(buf),
-        R"({"t":"vad","event":"%s","speech":%s,"frame":%d,"energy":%.2f})"
+        R"({"t":"vad","t0":%lu,"event":"%s","speech":%s,"frame":%d,"energy":%.2f})"
         "\n",
+        (unsigned long)t0_ns,
         segment_start ? "start" : "end",
         is_speech ? "true" : "false",
         frame_idx, energy);
