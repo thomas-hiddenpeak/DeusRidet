@@ -1608,6 +1608,23 @@ int cmd_test_ws(const std::string& webui_dir,
         server.broadcast_text(json);
     });
 
+    // Audio-drop callback (ring-buffer overflow). Persist to timeline JSONL
+    // and broadcast to the WebUI so the gap is visible both in offline
+    // analysis and in the live view.
+    audio.set_on_drop([&](uint64_t t1_from, uint64_t t1_to,
+                          const char* reason, size_t bytes) {
+        timeline.log_drop(t1_from, t1_to, reason, bytes);
+        uint64_t n = (t1_to > t1_from) ? (t1_to - t1_from) : 0;
+        char json[256];
+        snprintf(json, sizeof(json),
+            R"({"type":"audio_drop","t1_from":%lu,"t1_to":%lu,"samples":%lu,)"
+            R"("sec":%.4f,"bytes":%lu,"reason":"%s"})",
+            (unsigned long)t1_from, (unsigned long)t1_to,
+            (unsigned long)n, n / 16000.0,
+            (unsigned long)bytes, reason ? reason : "unknown");
+        server.broadcast_text(json);
+    });
+
     // Helper: serialize a SpeakerDb's roster as a JSON array string.
     auto speaker_list_json = [](auto& db) -> std::string {
         auto spks = db.all_speakers();

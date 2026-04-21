@@ -157,4 +157,30 @@ void TimelineLogger::log_vad(bool is_speech, bool segment_start, bool segment_en
     vad_count_++;
 }
 
+void TimelineLogger::log_drop(uint64_t t1_from, uint64_t t1_to,
+                              const char* reason, size_t bytes) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!fp_) return;
+
+    // T0 is stamped at serialization. The authoritative gap is the T1 range
+    // [t1_from, t1_to); samples / seconds views are derived from it.
+    uint64_t t0_ns = tempus::now_t0_ns();
+    uint64_t n_samples = (t1_to > t1_from) ? (t1_to - t1_from) : 0;
+    double sec = n_samples / 16000.0;
+
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        R"({"t":"drop","t0":%lu,"domain":"AUDIO","t1_from":%lu,"t1_to":%lu,)"
+        R"("samples":%lu,"sec":%.4f,"bytes":%lu,"reason":"%s"})"
+        "\n",
+        (unsigned long)t0_ns,
+        (unsigned long)t1_from, (unsigned long)t1_to,
+        (unsigned long)n_samples, sec,
+        (unsigned long)bytes,
+        reason ? reason : "unknown");
+
+    fputs(buf, fp_);
+    drop_count_++;
+}
+
 }  // namespace deusridet

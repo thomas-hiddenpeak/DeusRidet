@@ -668,6 +668,11 @@ public:
                                              float stream_start_sec, float stream_end_sec)>;
     using OnAsrLog = std::function<void(const std::string& json)>;
     using OnAsrPartial = std::function<void(const std::string& text, float audio_sec)>;
+    // Drop event: ring-buffer overflow at push_pcm. Carries the AUDIO T1
+    // range of the samples that were discarded so consumers can splice a
+    // gap marker into the timeline instead of silently losing audio.
+    using OnDrop = std::function<void(uint64_t t1_from, uint64_t t1_to,
+                                      const char* reason, size_t bytes)>;
 
     AudioPipeline();
     ~AudioPipeline();
@@ -689,6 +694,7 @@ public:
     void set_on_transcript(OnTranscript cb) { on_transcript_ = std::move(cb); }
     void set_on_asr_log(OnAsrLog cb) { on_asr_log_ = std::move(cb); }
     void set_on_asr_partial(OnAsrPartial cb) { on_asr_partial_ = std::move(cb); }
+    void set_on_drop(OnDrop cb) { on_drop_ = std::move(cb); }
 
     const AudioPipelineStats& stats() const { return stats_; }
 
@@ -1042,6 +1048,7 @@ private:
     OnSpeaker  on_speaker_;
     OnTranscript on_transcript_;
     OnAsrLog   on_asr_log_;
+    OnDrop     on_drop_;
     OnAsrPartial on_asr_partial_;
 };
 

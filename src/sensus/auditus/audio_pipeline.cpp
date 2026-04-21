@@ -290,12 +290,28 @@ void AudioPipeline::push_pcm(const int16_t* data, int n_samples) {
     size_t bytes = n_samples * sizeof(int16_t);
     size_t written = ring_->push(reinterpret_cast<const uint8_t*>(data), bytes);
     int n_enqueued = (int)(written / sizeof(int16_t));
+    uint64_t t1_end = 0;
     if (n_enqueued > 0) {
-        audio_t1_in_.fetch_add((uint64_t)n_enqueued, std::memory_order_relaxed);
+        // fetch_add returns the previous value; t1_end = prev + n_enqueued is
+        // the exclusive end of the enqueued range.
+        uint64_t t1_start = audio_t1_in_.fetch_add((uint64_t)n_enqueued,
+                                                   std::memory_order_relaxed);
+        t1_end = t1_start + (uint64_t)n_enqueued;
+    } else {
+        t1_end = audio_t1_in_.load(std::memory_order_relaxed);
     }
     if (written < bytes) {
-        LOG_WARN("AudioPipe", "Ring buffer overflow, dropped %zu bytes",
-                 bytes - written);
+        size_t dropped_bytes = bytes - written;
+        size_t dropped_samples = dropped_bytes / sizeof(int16_t);
+        // The dropped samples would have extended the T1 range from t1_end
+        // to t1_end + dropped_samples, had there been room in the ring.
+        // Record the gap at that range so the timeline can show it.
+        LOG_WARN("AudioPipe", "Ring buffer overflow, dropped %zu bytes (%zu samples)",
+                 dropped_bytes, dropped_samples);
+        if (on_drop_) {
+            on_drop_(t1_end, t1_end + (uint64_t)dropped_samples,
+                     "ring_overflow", dropped_bytes);
+        }
     }
 }
 

@@ -76,10 +76,10 @@ public:
                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
                  tm.tm_hour, tm.tm_min, tm.tm_sec);
 
-        fprintf(fp_, R"({"t":"header","version":2,"started":"%s","t0":%lu})" "\n",
+        fprintf(fp_, R"({"t":"header","version":3,"started":"%s","t0":%lu})" "\n",
                 iso, (unsigned long)tempus::now_t0_ns());
         clock_gettime(CLOCK_MONOTONIC, &t0_);
-        stats_count_ = asr_count_ = vad_count_ = 0;
+        stats_count_ = asr_count_ = vad_count_ = drop_count_ = 0;
         return true;
     }
 
@@ -102,9 +102,9 @@ public:
                  tm.tm_hour, tm.tm_min, tm.tm_sec);
 
         fprintf(fp_,
-            R"({"t":"footer","ended":"%s","t0":%lu,"duration_sec":%.1f,"counts":{"stats":%u,"asr":%u,"vad":%u}})"
+            R"({"t":"footer","ended":"%s","t0":%lu,"duration_sec":%.1f,"counts":{"stats":%u,"asr":%u,"vad":%u,"drop":%u}})"
             "\n", iso, (unsigned long)tempus::now_t0_ns(),
-            dur, stats_count_, asr_count_, vad_count_);
+            dur, stats_count_, asr_count_, vad_count_, drop_count_);
         fclose(fp_);
         fp_ = nullptr;
     }
@@ -133,6 +133,14 @@ public:
     void log_vad(bool is_speech, bool segment_start, bool segment_end,
                  int frame_idx, float energy);
 
+    // Log an audio drop event — a range of AUDIO T1 samples that were
+    // discarded before ever entering the processing pipeline (typically
+    // because the ring buffer was full). Consumers should render this as
+    // a gap in the source-audio timeline; downstream stages (VAD, ASR,
+    // speaker ID) will have zero coverage of [t1_from, t1_to).
+    void log_drop(uint64_t t1_from, uint64_t t1_to,
+                  const char* reason, size_t bytes);
+
 private:
     FILE* fp_ = nullptr;
     std::string path_;
@@ -141,6 +149,7 @@ private:
     unsigned stats_count_ = 0;
     unsigned asr_count_ = 0;
     unsigned vad_count_ = 0;
+    unsigned drop_count_ = 0;
 };
 
 }  // namespace deusridet
