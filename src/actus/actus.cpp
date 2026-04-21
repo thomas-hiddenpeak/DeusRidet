@@ -80,8 +80,6 @@ void print_usage() {
     printf("    test-tokenizer <text>   Encode/decode round-trip test\n");
     printf("    test-weights            Load weights and print tensor summary\n");
     printf("    test-gptq               GPTQ kernel correctness test with model weights\n");
-    printf("    bench-gptq              GPTQ GEMV/GEMM benchmark (Marlin)\n");
-    printf("    bench-gptq-v2           GPTQ v2 kernel benchmark (vs Marlin)\n");
     printf("    load-model              Load all weights to device, hold for inspection\n");
     printf("    load-weights            Structured weight load (model.h) with validation\n");
     printf("    test-forward            Single-token forward pass test\n");
@@ -89,9 +87,10 @@ void print_usage() {
     printf("    profile-forward         Profile single-token forward pass timing\n");
     printf("    profile-prefill         Profile prefill pass (Marlin MLP) at various M\n");
     printf("    profile-prefill-gptq-v2 (legacy alias for profile-prefill)\n");
-    printf("    bench-prefill           Benchmark Marlin vs cuBLAS FP16 projections\n");
     printf("    test-ws                 Start WebSocket server + serve WebUI\n");
     printf("    version                 Print version and hardware info\n\n");
+    printf("  Note: bench-gptq / bench-gptq-v2 / bench-prefill have moved to\n");
+    printf("        standalone executables under build/ (run ./build/bench_gptq etc.)\n\n");
     printf("  Options:\n");
     printf("    --config <file>         Configuration file (default: configs/machina.conf)\n");
     printf("    --model-dir <path>      Override LLM model directory\n\n");

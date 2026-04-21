@@ -30,16 +30,12 @@ void print_usage();
 int cmd_test_tokenizer(const std::string& model_dir, const std::string& text);
 int cmd_test_weights(const std::string& model_dir);
 int cmd_test_gptq(const std::string& model_dir);
-int cmd_bench_gptq();
-int cmd_bench_gptq_v2();
 int cmd_load_model(const std::string& model_dir);
 int cmd_load_weights(const std::string& model_dir);
 int cmd_test_forward(const std::string& model_dir);
 int cmd_test_sample(const std::string& model_dir);
 int cmd_profile_forward(const std::string& model_dir);
 int cmd_profile_prefill(const std::string& model_dir);
-
-int cmd_bench_prefill(const std::string& model_dir);
 
 // WavLM+ECAPA layer-by-layer test
 int cmd_test_wavlm_cnn();

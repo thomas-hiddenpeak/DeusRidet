@@ -130,10 +130,7 @@ add_executable(deusridet
     src/actus/cmd_test_forward.cpp
     src/actus/cmd_test_sample.cpp
     src/actus/cmd_profile_forward.cpp
-    src/actus/cmd_bench_gptq.cpp
-    src/actus/cmd_bench_gptq_v2.cpp
     src/actus/cmd_profile_prefill.cpp
-    src/actus/cmd_bench_prefill.cpp
     src/actus/cmd_test_wavlm_cnn.cpp
     src/actus/cmd_test_ws.cpp
     src/actus/cmd_test_ws_router.cpp
@@ -183,6 +180,36 @@ add_executable(bench_mossformer2 tools/bench_mossformer2.cpp)
 target_include_directories(bench_mossformer2 PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(bench_mossformer2 PRIVATE sensus machina communis CUDA::cudart CUDA::cublas)
 set_target_properties(bench_mossformer2 PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+# ============================================================================
+# Developer instruments (Step 10a — formerly cmd_bench_* under src/actus/)
+# ============================================================================
+add_executable(bench_gptq tools/bench_gptq.cpp)
+target_include_directories(bench_gptq PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(bench_gptq PRIVATE machina communis CUDA::cudart CUDA::cublas)
+set_target_properties(bench_gptq PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+add_executable(bench_gptq_v2 tools/bench_gptq_v2.cpp)
+target_include_directories(bench_gptq_v2 PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(bench_gptq_v2 PRIVATE machina communis CUDA::cudart CUDA::cublas)
+set_target_properties(bench_gptq_v2 PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+add_executable(bench_prefill tools/bench_prefill.cpp)
+target_include_directories(bench_prefill PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(bench_prefill PRIVATE machina communis CUDA::cudart CUDA::cublas)
+set_target_properties(bench_prefill PROPERTIES
     BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
     INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
     LINK_FLAGS "-Wl,--disable-new-dtags"
