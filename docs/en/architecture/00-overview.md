@@ -81,8 +81,19 @@ the recommended execution order.
         than inside any single subsystem facade.
       - 7e (`628dd69`) 91-line `set_on_connect` hello envelope
         extracted to `cmd_test_ws_hello.{h,cpp}`.
-- [ ] **Step 8+ — Remaining subsystem facades**: Nexus, Memoria, Persona,
-      Orator where `cmd_test_ws` currently reaches into private headers.
+- [x] **Step 8a — Conscientia facade** (2026-04-22, commit `b4ddea6`):
+      three consciousness→WS broadcast lambdas (decode / speech_token /
+      state, 83 inline lines) extracted to
+      `src/conscientia/conscientia_facade.{h,cpp}` mirroring the
+      `auditus_facade` installer pattern. Shared JSON helpers promoted
+      to `src/communis/json_util.h`; `auditus_facade.h` now re-exports
+      `communis::{sanitize_utf8,json_escape}` via `using`, so every
+      existing call site compiles unchanged. `cmd_test_ws.cpp` 458 → 392.
+- [ ] **Step 8b+ — Remaining subsystem facades**: any further Nexus /
+      Memoria / Persona / Orator reach-in that surfaces; the 126-line
+      LLM-and-consciousness bootstrap block in `cmd_test_ws.cpp` is the
+      next Actus-layer extraction candidate (crosses machina + memoria
+      + conscientia + persona, so a peer Actus TU, not a facade).
 - [ ] **Step 9 — CUDA/audio R1 split campaign**: the 11 remaining
       oversized files in the table below.
 

@@ -75,8 +75,18 @@ DeusRidet 以 **GPLv3** 发布。任何使用、修改或整合 DeusRidet 代码
         而不入任何单子系统外观。
       - 7e（`628dd69`）91 行 `set_on_connect` hello 封装抽到
         `cmd_test_ws_hello.{h,cpp}`。
-- [ ] **第 8 步+ —— 其余子系统外观**：`cmd_test_ws` 当前直接访问
-      私有头文件的 Nexus、Memoria、Persona、Orator 等子系统。
+- [x] **第 8a 步 —— Conscientia 外观**（2026-04-22，提交 `b4ddea6`）：
+      三个意识流 → WS 广播 lambda（decode / speech_token / state，
+      83 行内联）抽到 `src/conscientia/conscientia_facade.{h,cpp}`，
+      复用 `auditus_facade` 的 `install_*` 模板。共用 JSON 工具
+      上提到 `src/communis/json_util.h`；`auditus_facade.h` 现以
+      `using communis::{sanitize_utf8,json_escape}` 再导出，
+      所有既有调用点零改动。`cmd_test_ws.cpp` 458 → 392 行。
+- [ ] **第 8b+ 步 —— 其余子系统外观**：后续可能浮现的 Nexus /
+      Memoria / Persona / Orator 反向渗透；当前 `cmd_test_ws.cpp`
+      中 126 行的 LLM+意识流引导块是下一个 Actus 层抽取候选
+      （横跨 machina + memoria + conscientia + persona，
+      应落入平级 Actus TU，而非子系统外观）。
 - [ ] **第 9 步 —— CUDA/音频 R1 拆分大行动**：下表中剩余 11 个
       超限文件。
 

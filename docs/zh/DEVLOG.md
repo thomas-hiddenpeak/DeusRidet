@@ -6,6 +6,7 @@
 
 ## 开发日志
 
+- [2026-04-22](devlog/2026-04-22.md) — 第 8a 步：Conscientia 外观抽取（cmd_test_ws.cpp 458 → 392 行；JSON 工具上提到 Communis）
 - [2026-04-21](devlog/2026-04-21.md) — 第 7 步收官：Auditus 外观 + Actus WS 路由（cmd_test_ws.cpp 1543 → 458 行）
 - [2026-04-20](devlog/2026-04-20.md) — S1–S4 循环：语义指标 + S3 绕过 FRCRN + Seg3 阈值扫描
 - [2026-04-19](devlog/2026-04-19.md) — v24d/v24e 说话人识别：发现阶段 + 大规模参数搜索 ; GPTQ GEMM 优化轮次：4 个实验，1 个成功
