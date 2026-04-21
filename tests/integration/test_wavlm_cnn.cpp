@@ -6,7 +6,7 @@
  */
 
 
-#include "actus.h"
+#include "actus/actus.h"
 #include "communis/config.h"
 #include "communis/log.h"
 #include "communis/tegra.h"
@@ -260,3 +260,10 @@ int cmd_test_wavlm_cnn() {
 }
 
 } // namespace deusridet
+
+#include "communis/tegra.h"
+int main(int /*argc*/, char** /*argv*/) {
+    int rc = deusridet::cmd_test_wavlm_cnn();
+    deusridet::tegra_cleanup();
+    return rc;
+}

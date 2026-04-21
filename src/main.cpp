@@ -105,36 +105,11 @@ int main(int argc, char** argv) {
     if (cmd == "version" || cmd == "--version" || cmd == "-v") {
         deusridet::print_version();
     }
-    else if (cmd == "test-tokenizer") {
-        std::string text = "Hello, world! 你好世界";
-        for (int i = 2; i < argc; i++) {
-            std::string arg = argv[i];
-            if (arg == "--config" || arg == "--model-dir") { i++; continue; }
-            text = arg;
-            break;
-        }
-        rc = deusridet::cmd_test_tokenizer(model_dir, text);
-    }
-    else if (cmd == "test-weights") {
-        rc = deusridet::cmd_test_weights(model_dir);
-    }
-    else if (cmd == "test-gptq") {
-        rc = deusridet::cmd_test_gptq(model_dir);
-    }
     else if (cmd == "load-model") {
         rc = deusridet::cmd_load_model(model_dir);
     }
     else if (cmd == "load-weights") {
         rc = deusridet::cmd_load_weights(model_dir);
-    }
-    else if (cmd == "test-forward") {
-        rc = deusridet::cmd_test_forward(model_dir);
-    }
-    else if (cmd == "test-sample") {
-        rc = deusridet::cmd_test_sample(model_dir);
-    }
-    else if (cmd == "test-wavlm-cnn") {
-        rc = deusridet::cmd_test_wavlm_cnn();
     }
     else if (cmd == "test-ws") {
         // Default webui dir relative to executable location.

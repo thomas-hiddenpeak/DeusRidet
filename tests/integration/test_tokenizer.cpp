@@ -6,7 +6,7 @@
  */
 
 
-#include "actus.h"
+#include "actus/actus.h"
 #include "communis/config.h"
 #include "communis/log.h"
 #include "communis/tegra.h"
@@ -72,3 +72,17 @@ int cmd_test_tokenizer(const std::string& model_dir, const std::string& text) {
 }
 
 } // namespace deusridet
+
+#include "tools/dev_main_helper.h"
+int main(int argc, char** argv) {
+    std::string model_dir = deusridet::dev::resolve_model_dir(argc, argv);
+    std::string text = "Hello, world! 你好世界";
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--config" || a == "--model-dir") { i++; continue; }
+        if (!a.empty() && a[0] != '-') { text = a; break; }
+    }
+    int rc = deusridet::cmd_test_tokenizer(model_dir, text);
+    deusridet::tegra_cleanup();
+    return rc;
+}

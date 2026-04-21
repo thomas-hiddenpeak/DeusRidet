@@ -122,14 +122,8 @@ target_link_libraries(conscientia PRIVATE machina memoria communis CUDA::cudart)
 add_executable(deusridet
     src/main.cpp
     src/actus/actus.cpp
-    src/actus/cmd_test_tokenizer.cpp
-    src/actus/cmd_test_weights.cpp
-    src/actus/cmd_test_gptq.cpp
     src/actus/cmd_load_model.cpp
     src/actus/cmd_load_weights.cpp
-    src/actus/cmd_test_forward.cpp
-    src/actus/cmd_test_sample.cpp
-    src/actus/cmd_test_wavlm_cnn.cpp
     src/actus/cmd_test_ws.cpp
     src/actus/cmd_test_ws_router.cpp
     src/actus/cmd_test_ws_hello.cpp
@@ -253,3 +247,63 @@ target_link_libraries(test_silero_vad PRIVATE sensus machina communis CUDA::cuda
 add_executable(test_fsmn_vad tests/test_fsmn_vad.cpp)
 target_include_directories(test_fsmn_vad PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(test_fsmn_vad PRIVATE sensus machina communis CUDA::cudart CUDA::cublas cudnn)
+
+# ============================================================================
+# Integration tests (Step 10d — formerly cmd_test_* under src/actus/)
+# Each one was an Actus verb only because the Step 5 split landed every
+# CLI subcommand under src/actus/. They are component-level integration
+# checks against the Machina engine, so they belong here.
+# ============================================================================
+add_executable(test_tokenizer tests/integration/test_tokenizer.cpp)
+target_include_directories(test_tokenizer PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_tokenizer PRIVATE machina communis CUDA::cudart)
+set_target_properties(test_tokenizer PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+add_executable(test_weights tests/integration/test_weights.cpp)
+target_include_directories(test_weights PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_weights PRIVATE machina communis CUDA::cudart CUDA::cublas)
+set_target_properties(test_weights PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+add_executable(test_gptq tests/integration/test_gptq.cpp)
+target_include_directories(test_gptq PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_gptq PRIVATE machina communis CUDA::cudart CUDA::cublas)
+set_target_properties(test_gptq PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+add_executable(test_forward tests/integration/test_forward.cpp)
+target_include_directories(test_forward PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_forward PRIVATE machina communis CUDA::cudart CUDA::cublas)
+set_target_properties(test_forward PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+add_executable(test_sample tests/integration/test_sample.cpp)
+target_include_directories(test_sample PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_sample PRIVATE machina communis CUDA::cudart CUDA::cublas)
+set_target_properties(test_sample PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+add_executable(test_wavlm_cnn tests/integration/test_wavlm_cnn.cpp)
+target_include_directories(test_wavlm_cnn PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_wavlm_cnn PRIVATE orator machina communis CUDA::cudart CUDA::cublas cudnn)
+set_target_properties(test_wavlm_cnn PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)

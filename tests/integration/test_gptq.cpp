@@ -6,7 +6,7 @@
  */
 
 
-#include "actus.h"
+#include "actus/actus.h"
 #include "communis/config.h"
 #include "communis/log.h"
 #include "communis/tegra.h"
@@ -250,3 +250,11 @@ int cmd_test_gptq(const std::string& model_dir) {
 }
 
 } // namespace deusridet
+
+#include "tools/dev_main_helper.h"
+int main(int argc, char** argv) {
+    std::string model_dir = deusridet::dev::resolve_model_dir(argc, argv);
+    int rc = deusridet::cmd_test_gptq(model_dir);
+    deusridet::tegra_cleanup();
+    return rc;
+}
