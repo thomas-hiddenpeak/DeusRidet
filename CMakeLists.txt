@@ -122,6 +122,20 @@ target_link_libraries(conscientia PRIVATE machina memoria communis CUDA::cudart)
 add_executable(deusridet
     src/main.cpp
     src/actus/actus.cpp
+    src/actus/cmd_test_tokenizer.cpp
+    src/actus/cmd_test_weights.cpp
+    src/actus/cmd_test_gptq.cpp
+    src/actus/cmd_load_model.cpp
+    src/actus/cmd_load_weights.cpp
+    src/actus/cmd_test_forward.cpp
+    src/actus/cmd_test_sample.cpp
+    src/actus/cmd_profile_forward.cpp
+    src/actus/cmd_bench_gptq.cpp
+    src/actus/cmd_bench_gptq_v2.cpp
+    src/actus/cmd_profile_prefill.cpp
+    src/actus/cmd_bench_prefill.cpp
+    src/actus/cmd_test_wavlm_cnn.cpp
+    src/actus/cmd_test_ws.cpp
     src/communis/timeline_logger.cpp
     src/communis/tempus.h
 )
