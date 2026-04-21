@@ -425,7 +425,7 @@ void AudioPipeline::process_loop() {
                     vr.segment_start = svr.segment_start;
                     vr.segment_end = svr.segment_end;
                     vr.energy = svr.probability;  // repurpose energy field for prob
-                    on_vad_(vr, (int)stats_.mel_frames);
+                    on_vad_(vr, (int)stats_.mel_frames, audio_t1_processed_);
                 }
             }
             // Keep remainder for next chunk.
@@ -1850,7 +1850,7 @@ void AudioPipeline::process_loop() {
             if (!silero_.initialized()) {
                 stats_.is_speech = vr.is_speech;
                 if (on_vad_ && (vr.segment_start || vr.segment_end)) {
-                    on_vad_(vr, frame_idx);
+                    on_vad_(vr, frame_idx, audio_t1_processed_);
                 }
             }
         }

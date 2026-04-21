@@ -662,7 +662,8 @@ private:
 
 class AudioPipeline {
 public:
-    using OnVadEvent  = std::function<void(const VadResult&, int frame_idx)>;
+    using OnVadEvent  = std::function<void(const VadResult&, int frame_idx,
+                                           uint64_t audio_t1)>;
     using OnStats     = std::function<void(const AudioPipelineStats&)>;
     using OnSpeaker   = std::function<void(const SpeakerMatch&)>;
     using OnTranscript = std::function<void(const asr::ASRResult& result, float audio_sec,

@@ -130,8 +130,10 @@ public:
                  int trk_id, const char* trk_name, float trk_sim);
 
     // Log VAD event (start/end only — not every frame).
+    // audio_t1 is the AUDIO sample index at the moment of emission. Combined
+    // with the anchor it gives sample-accurate wall time for the edge.
     void log_vad(bool is_speech, bool segment_start, bool segment_end,
-                 int frame_idx, float energy);
+                 int frame_idx, float energy, uint64_t audio_t1);
 
     // Log an audio drop event — a range of AUDIO T1 samples that were
     // discarded before ever entering the processing pipeline (typically

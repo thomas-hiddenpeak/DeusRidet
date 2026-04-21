@@ -132,23 +132,24 @@ void TimelineLogger::log_asr(const char* text, float stream_start, float stream_
 }
 
 void TimelineLogger::log_vad(bool is_speech, bool segment_start, bool segment_end,
-                               int frame_idx, float energy) {
+                               int frame_idx, float energy, uint64_t audio_t1) {
     // Only log segment boundaries, not every frame.
     if (!segment_start && !segment_end) return;
 
     std::lock_guard<std::mutex> lk(mu_);
     if (!fp_) return;
 
-    // VAD T1 is the VAD frame index (T2-equivalent for energy VAD); T0 is
-    // stamped at emission. For sample-accurate VAD edges use log_stats'
-    // sample field at the surrounding tick.
-    uint64_t t0_ns = tempus::now_t0_ns();
+    // T0 at event emission is the sample-accurate wall time of the VAD edge
+    // (anchor-derived, not now()). The legacy frame index is kept for
+    // debugging continuity with older tools.
+    uint64_t t0_ns = tempus::t1_to_t0(tempus::Domain::AUDIO, audio_t1);
 
     char buf[256];
     snprintf(buf, sizeof(buf),
-        R"({"t":"vad","t0":%lu,"event":"%s","speech":%s,"frame":%d,"energy":%.2f})"
+        R"({"t":"vad","t0":%lu,"audio_t1":%lu,"event":"%s","speech":%s,"frame":%d,"energy":%.2f})"
         "\n",
         (unsigned long)t0_ns,
+        (unsigned long)audio_t1,
         segment_start ? "start" : "end",
         is_speech ? "true" : "false",
         frame_idx, energy);
