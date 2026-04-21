@@ -126,6 +126,7 @@ add_executable(deusridet
     src/actus/load_weights.cpp
     src/actus/awaken.cpp
     src/actus/awaken_router.cpp
+    src/actus/awaken_router_consciousness.cpp
     src/actus/awaken_hello.cpp
     src/communis/timeline_logger.cpp
     src/communis/tempus.h

@@ -34,5 +34,14 @@ void handle_ws_text_command(int fd,
                             std::atomic<bool>& loopback,
                             bool llm_loaded);
 
+// Peer routing helper (R1 split): handles the four consciousness_* prefixes
+// plus text_input. Returns true if the message matched one of those prefixes
+// and was consumed; false otherwise so the caller can fall through. Guard
+// llm_loaded at the call site — this helper assumes the LLM is ready.
+bool handle_ws_consciousness_command(int fd,
+                                     const std::string& msg,
+                                     WsServer& server,
+                                     ConscientiStream& consciousness);
+
 }  // namespace actus
 }  // namespace deusridet
