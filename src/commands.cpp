@@ -1263,9 +1263,15 @@ int cmd_test_wavlm_cnn() {
 
 int cmd_test_ws(const std::string& webui_dir,
                 const std::string& llm_model_dir,
-                const std::string& persona_conf_path) {
+                const std::string& persona_conf_path,
+                float replay_speed) {
     printf("[test-ws] Starting WebSocket + Audio Pipeline...\n");
     printf("[test-ws] WebUI dir: %s\n", webui_dir.c_str());
+    if (replay_speed != 1.0f) {
+        printf("[test-ws] Replay speed: %.2fx (AUDIO anchor period scaled; "
+               "T0 tracks wall time, T1 tracks source-audio samples)\n",
+               (double)replay_speed);
+    }
 
     // ── LLM + Consciousness setup (optional — skip if no model dir) ──
     Tokenizer* tokenizer_ptr = nullptr;
@@ -1410,6 +1416,7 @@ int cmd_test_ws(const std::string& webui_dir,
     AudioPipeline audio;
     AudioPipelineConfig audio_cfg;
     // defaults: n_fft=400, hop=160, n_mels=128, sr=16000
+    audio_cfg.replay_speed = replay_speed;
 
     // Model root (workspace-local by default; override with DEUSRIDET_MODEL_ROOT).
     std::string model_root = getenv("DEUSRIDET_MODEL_ROOT")

@@ -157,12 +157,16 @@ int main(int argc, char** argv) {
         // Default webui dir relative to executable location.
         std::string webui_dir = cfg.get_string("webui_dir", "");
         std::string persona_conf = "configs/persona.conf";
+        float replay_speed = 1.0f;
         for (int i = 2; i < argc; i++) {
             std::string arg = argv[i];
             if (arg == "--webui" && i + 1 < argc) {
                 webui_dir = argv[++i];
             } else if (arg == "--persona" && i + 1 < argc) {
                 persona_conf = argv[++i];
+            } else if (arg == "--test-replay-speed" && i + 1 < argc) {
+                replay_speed = (float)std::atof(argv[++i]);
+                if (!(replay_speed > 0.0f)) replay_speed = 1.0f;
             }
         }
         // If not set, resolve relative to executable's directory.
@@ -179,7 +183,7 @@ int main(int argc, char** argv) {
                 webui_dir = "../src/nexus/webui";  // fallback
             }
         }
-        rc = deusridet::cmd_test_ws(webui_dir, model_dir, persona_conf);
+        rc = deusridet::cmd_test_ws(webui_dir, model_dir, persona_conf, replay_speed);
     }
     else if (cmd == "--help" || cmd == "-h" || cmd == "help") {
         deusridet::print_usage();

@@ -132,18 +132,22 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
     // Register the AUDIO business-clock anchor (T1 = sample index at this
     // pipeline's input, resolution 1/sample_rate). T0 advances wall-clock;
     // T1 advances one unit per PCM sample. period_ns = 1e9 / sample_rate
-    // for real-time capture (62500 ns @ 16 kHz). For accelerated replay
-    // the upstream driver can re-register with a scaled period_ns.
+    // for real-time capture (62500 ns @ 16 kHz). Under accelerated replay
+    // (cfg_.replay_speed > 1.0) we scale the period so that T0 tracks wall
+    // time: 1 wall-second of elapsed time corresponds to replay_speed
+    // seconds of source audio, i.e. replay_speed * sample_rate samples.
+    double effective_rate = (double)cfg_.mel.sample_rate * (double)cfg_.replay_speed;
     const uint64_t audio_period_ns =
-        cfg_.mel.sample_rate > 0
-            ? static_cast<uint64_t>(1'000'000'000ULL / cfg_.mel.sample_rate)
+        effective_rate > 0.0
+            ? (uint64_t)llround(1e9 / effective_rate)
             : 62500ULL;
     tempus::anchor_register(tempus::Domain::AUDIO,
                             tempus::now_t0_ns(),
                             /*t1_zero=*/0,
                             /*period_ns=*/audio_period_ns);
-    LOG_INFO("AudioPipe", "Tempus anchor registered: domain=AUDIO period=%lu ns (sr=%d)",
-             audio_period_ns, cfg_.mel.sample_rate);
+    LOG_INFO("AudioPipe",
+             "Tempus anchor registered: domain=AUDIO period=%lu ns (sr=%d, replay_speed=%.2f)",
+             audio_period_ns, cfg_.mel.sample_rate, (double)cfg_.replay_speed);
 
     running_.store(true, std::memory_order_release);
     thread_ = std::thread(&AudioPipeline::process_loop, this);

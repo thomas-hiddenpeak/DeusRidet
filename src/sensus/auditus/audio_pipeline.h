@@ -61,6 +61,13 @@ struct AudioPipelineConfig {
     size_t ring_buffer_bytes = 1 << 22;  // 4 MB (~128 seconds of int16 mono 16kHz)
     int process_chunk_ms     = 100;      // process in 100ms chunks (10 mel frames)
     float speaker_threshold  = 0.45f;    // dual 384D cosine sim match threshold (v22c level)
+    // Replay speed for benchmark/testing input. 1.0 = real-time; >1.0 means
+    // the upstream driver feeds samples faster than wall time (e.g. speed=2.0
+    // pushes two seconds of source audio per wall second). This ONLY affects
+    // the AUDIO T1 <-> T0 anchor: period_ns is scaled so that T0 tracks wall
+    // time regardless of replay rate, keeping cross-domain alignment honest.
+    // All pipeline logic (VAD, ASR, thresholds) remains invariant.
+    float replay_speed       = 1.0f;
 };
 
 struct AudioPipelineStats {

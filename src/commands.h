@@ -36,6 +36,7 @@ int cmd_test_wavlm_cnn();
 // WebSocket server test (with optional LLM consciousness stream)
 int cmd_test_ws(const std::string& webui_dir,
                 const std::string& llm_model_dir = "",
-                const std::string& persona_conf_path = "");
+                const std::string& persona_conf_path = "",
+                float replay_speed = 1.0f);
 
 } // namespace deusridet
