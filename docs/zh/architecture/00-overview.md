@@ -59,9 +59,22 @@ DeusRidet 以 **GPLv3** 发布。任何使用、修改或整合 DeusRidet 代码
       14 个单命令翻译单元 + 100 行注册文件（提交 `2525450`）。除
       `cmd_test_ws.cpp`（1543 行，将作为 Auditus 外观的自然目标）外
       均已满足 R1。
-- [x] **第 6 步 —— 外观评估**（本次提交）：见下方清单。
-- [ ] **第 7 步 —— Auditus 外观**：将 WS 装配代码从 `cmd_test_ws.cpp`
-      抽取到 `src/sensus/auditus/auditus_facade.{h,cpp}`。
+- [x] **第 6 步 —— 外观评估**：见下方清单（提交 `851df90`）。
+- [x] **第 7 步 —— Auditus 外观 + Actus 路由**（2026-04-21）：
+      `cmd_test_ws.cpp` 从 1543 行 降至 458 行（R1 以内）。
+      - 7a（`d96a503`）新建 `auditus_facade.{h,cpp}`；迁移
+        vad / asr_partial / drop 三个回调。
+      - 7b（`dbd9f9e`）transcript / asr_log / stats / speaker 迁移。
+      - 7c（`cd3224d`）WS 二进制 PCM 入口迁移。范围收窄：
+        connect/disconnect 广播的是 Conscientia 状态而非 Auditus
+        事件，未纳入此次迁移。
+      - 7d（`7e1c9ef`）545 行 `set_on_text` 命令路由器抽到平级
+        Actus 翻译单元 `cmd_test_ws_router.{h,cpp}`——该路由器以
+        单个 switch 跨越 Auditus + Conscientia + Persona，正是
+        Actus 的职责，因此它与 `cmd_test_ws.cpp` 同层，
+        而不入任何单子系统外观。
+      - 7e（`628dd69`）91 行 `set_on_connect` hello 封装抽到
+        `cmd_test_ws_hello.{h,cpp}`。
 - [ ] **第 8 步+ —— 其余子系统外观**：`cmd_test_ws` 当前直接访问
       私有头文件的 Nexus、Memoria、Persona、Orator 等子系统。
 - [ ] **第 9 步 —— CUDA/音频 R1 拆分大行动**：下表中剩余 11 个
@@ -86,16 +99,16 @@ DeusRidet 以 **GPLv3** 发布。任何使用、修改或整合 DeusRidet 代码
 既能让 `cmd_test_ws.cpp` 回到 R1 范围，也为后续 Nexus / Memoria /
 Orator / Persona 外观树立模板。
 
-### 超限文件（R1 违规——Actus 已解决）
+### 超限文件（R1 违规——Actus 于 2026-04-21 完结）
 
 | # | 文件 | 行数 | 建议拆分 |
 |---|------|------|----------|
-| 1 | `src/sensus/auditus/audio_pipeline.cpp` | 2651 | → `pipeline_core.cpp`、`vad_orchestrator.cpp`、`speaker_matcher.cpp`、`asr_trigger.cpp` + `auditus_facade.{h,cpp}` |
+| 1 | `src/sensus/auditus/audio_pipeline.cpp` | 2651 | → `pipeline_core.cpp`、`vad_orchestrator.cpp`、`speaker_matcher.cpp`、`asr_trigger.cpp` |
 | 2 | `src/machina/forward.cu` | 2172 | → 按算子拆分（attention/mlp/norm/residual 发射器）|
 | 3 | `src/orator/wavlm_ecapa_encoder.cu` | 2084 | → `wavlm_encoder.cu` + `ecapa_encoder.cu` + 共享 utils 头 |
 | 4 | `src/machina/gptq.cu` | 2029 | → `gptq_gemv.cu` + `gptq_gemm.cu` + `gptq_dequant.cu` |
 | 5 | `src/machina/layer.cu` | 1953 | → `ssm_layer.cu` + `attn_layer.cu` + `mlp_layer.cu` |
-| 6 | `src/actus/cmd_test_ws.cpp` | 1543 | → Auditus 外观吸收约 1100 行；cmd_test_ws 变成薄驱动 |
+| ~~6~~ | ~~`src/actus/cmd_test_ws.cpp`~~ | ~~1543~~ → **458** | **第 7 步已解决（2026-04-21）**：router + hello + auditus_facade |
 | 7 | `src/sensus/auditus/mossformer2.cu` | 1544 | → 编码器/解码器按 block 拆分 |
 | 8 | `src/orator/speaker_vector_store.cu` | 1404 | → 索引 + 核函数 + I/O 拆分 |
 | 9 | `src/sensus/auditus/frcrn_gpu.cu` | 1256 | → frcrn_encoder + frcrn_decoder |

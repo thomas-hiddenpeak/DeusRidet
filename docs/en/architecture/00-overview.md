@@ -65,9 +65,22 @@ the recommended execution order.
       into 14 per-command translation units + a 100-line registry file
       (commit `2525450`). All under R1 except `cmd_test_ws.cpp`
       (1543 lines), which is the natural Auditus-facade target.
-- [x] **Step 6 — Facade evaluation** (this commit): see inventory below.
-- [ ] **Step 7 — Auditus facade**: extract WS wiring from
-      `cmd_test_ws.cpp` → `src/sensus/auditus/auditus_facade.{h,cpp}`.
+- [x] **Step 6 — Facade evaluation**: see inventory below (commit `851df90`).
+- [x] **Step 7 — Auditus facade + Actus routing** (2026-04-21):
+      `cmd_test_ws.cpp` brought from 1543 → 458 lines (under R1).
+      - 7a (`d96a503`) `auditus_facade.{h,cpp}` introduced; vad /
+        asr_partial / drop callbacks migrated.
+      - 7b (`dbd9f9e`) transcript / asr_log / stats / speaker migrated.
+      - 7c (`cd3224d`) WS binary PCM ingress migrated. Scope narrowed:
+        connect/disconnect stayed behind as they broadcast Conscientia
+        state, not Auditus events.
+      - 7d (`7e1c9ef`) 545-line `set_on_text` command router extracted
+        to peer Actus TU `cmd_test_ws_router.{h,cpp}` — the router
+        bridges Auditus + Conscientia + Persona, which is precisely
+        the Actus charter, so it sits beside `cmd_test_ws.cpp` rather
+        than inside any single subsystem facade.
+      - 7e (`628dd69`) 91-line `set_on_connect` hello envelope
+        extracted to `cmd_test_ws_hello.{h,cpp}`.
 - [ ] **Step 8+ — Remaining subsystem facades**: Nexus, Memoria, Persona,
       Orator where `cmd_test_ws` currently reaches into private headers.
 - [ ] **Step 9 — CUDA/audio R1 split campaign**: the 11 remaining
@@ -94,16 +107,16 @@ point: Auditus. Extracting the WS wiring into `auditus_facade.{h,cpp}`
 should bring `cmd_test_ws.cpp` under R1 and simultaneously establish the
 template for subsequent Nexus / Memoria / Orator / Persona facades.
 
-### Oversized files (R1 violations — excluding Actus, now resolved)
+### Oversized files (R1 violations — Actus resolved 2026-04-21)
 
 | # | File | Lines | Proposed split |
 |---|------|-------|----------------|
-| 1 | `src/sensus/auditus/audio_pipeline.cpp` | 2651 | → `pipeline_core.cpp`, `vad_orchestrator.cpp`, `speaker_matcher.cpp`, `asr_trigger.cpp` + `auditus_facade.{h,cpp}` |
+| 1 | `src/sensus/auditus/audio_pipeline.cpp` | 2651 | → `pipeline_core.cpp`, `vad_orchestrator.cpp`, `speaker_matcher.cpp`, `asr_trigger.cpp` |
 | 2 | `src/machina/forward.cu` | 2172 | → per-op kernels (attention/mlp/norm/residual launchers) |
 | 3 | `src/orator/wavlm_ecapa_encoder.cu` | 2084 | → `wavlm_encoder.cu` + `ecapa_encoder.cu` + shared utils header |
 | 4 | `src/machina/gptq.cu` | 2029 | → `gptq_gemv.cu` + `gptq_gemm.cu` + `gptq_dequant.cu` |
 | 5 | `src/machina/layer.cu` | 1953 | → `ssm_layer.cu` + `attn_layer.cu` + `mlp_layer.cu` |
-| 6 | `src/actus/cmd_test_ws.cpp` | 1543 | → Auditus facade absorbs ~1100 lines; cmd_test_ws becomes a thin driver |
+| ~~6~~ | ~~`src/actus/cmd_test_ws.cpp`~~ | ~~1543~~ → **458** | **Resolved Step 7 (2026-04-21)**: router + hello + auditus_facade |
 | 7 | `src/sensus/auditus/mossformer2.cu` | 1544 | → encoder/decoder split by block |
 | 8 | `src/orator/speaker_vector_store.cu` | 1404 | → index + kernels + I/O split |
 | 9 | `src/sensus/auditus/frcrn_gpu.cu` | 1256 | → frcrn_encoder + frcrn_decoder |

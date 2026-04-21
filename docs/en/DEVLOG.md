@@ -6,6 +6,7 @@ To add a new entry, create `devlog/YYYY-MM-DD.md` and prepend it here.
 
 ## DEVLOG
 
+- [2026-04-21](devlog/2026-04-21.md) — Step 7 Complete: Auditus Facade + Actus WS Routing (cmd_test_ws.cpp 1543 → 458 lines)
 - [2026-04-20](devlog/2026-04-20.md) — S1–S4 Cycle: Semantic Metric + S3 FRCRN-Bypass + Seg3 Threshold Sweep ; Speaker Identification: A/B Testing & Direct Evaluation
 - [2026-04-19](devlog/2026-04-19.md) — Overlap Detection Re-enabled: Test6 & Test7 Results ; v24d/v24e Speaker ID: Discovery Phase + Extensive Parameter Search ; GPTQ GEMM Optimization Round: 4 Experiments, 1 Win
 - [2026-04-18](devlog/2026-04-18.md) — MossFormer2 Native CUDA Rewrite: Architecture Analysis & Prep ; Speaker Identification: 90%+ Accuracy Achieved ; Prefill Optimization Analysis: Near Hardware Limits (88 ms, M=11)
