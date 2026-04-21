@@ -295,31 +295,9 @@ private:
     void process_loop();
     void asr_loop();
 
-    // -------------------------------------------------------------------
-    // process_loop() stage decomposition (Step 11 A1a).
-    //   Each stage owns one coherent phase of the per-chunk pipeline.
-    //   Stage implementations live in peer TUs so that this class body
-    //   and the process_loop orchestrator both stay under R1 caps.
-    //
-    //     A1a  process_asr_pipeline_   continuous ASR accumulation,
-    //                                   VAD-driven split, speaker-change
-    //                                   resolution, trim + submit.
-    //     A1b  process_saas_full_extract_
-    //                                   end-of-segment CAM++ FULL extract
-    //                                   + dual-encoder fuse + spectral
-    //                                   clustering warm-up.
-    //     A1c  process_saas_during_speech_
-    //                                   during-speech SAAS work: buffer
-    //                                   accumulation, CAM++ EARLY, WL-ECAPA
-    //                                   EARLY, intra-segment speaker-change
-    //                                   detection with soft restart.
-    //          process_saas_segment_end_
-    //                                   end-of-segment SAAS bookkeeping
-    //                                   wrapper (save prev-speaker state,
-    //                                   debug WAV, flush fbank, dispatch to
-    //                                   process_saas_full_extract_, run
-    //                                   WL-ECAPA native path + timeline).
-    // -------------------------------------------------------------------
+    // process_loop() stage decomposition (Step 11 A1).
+    //   See docs/{en,zh}/architecture/00-overview.md §"Step 11" for the
+    //   stage map; each helper lives in its own peer TU by the same name.
     void process_asr_pipeline_(const int16_t* pcm_buf, int n_samples);
     void process_saas_full_extract_(int fbank_frames);
     void process_saas_during_speech_(const int16_t* pcm_buf, int n_samples);
