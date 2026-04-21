@@ -380,7 +380,10 @@ void install_stats_callback(AudioPipeline& audio,
             full_json += trk;
 
             if (ts.reg_event) {
-                char reg[128];
+                // Buffer sized generously: fixed template is ~60B, %d up to
+                // ~11B, reg_name up to 63B per tracker contract — 256 leaves
+                // plenty of headroom and silences -Wformat-truncation.
+                char reg[256];
                 snprintf(reg, sizeof(reg),
                     R"(,"tracker_reg_event":true,"tracker_reg_id":%d,"tracker_reg_name":"%s")",
                     ts.reg_id, ts.reg_name);
