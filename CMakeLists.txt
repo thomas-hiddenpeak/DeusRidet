@@ -131,6 +131,7 @@ add_executable(deusridet
     src/communis/tempus.h
     src/sensus/auditus/auditus_facade.h
     src/sensus/auditus/auditus_facade.cpp
+    src/sensus/auditus/auditus_facade_broadcasts.cpp
 )
 target_link_libraries(deusridet PRIVATE machina memoria conscientia communis nexus sensus orator stdc++fs rt dl)
 
