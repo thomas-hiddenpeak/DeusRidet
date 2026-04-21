@@ -32,6 +32,7 @@
 #include "sensus/auditus/auditus_facade.h"
 #include "awaken_router.h"
 #include "awaken_hello.h"
+#include "awaken_consciousness.h"
 #include "orator/wavlm_ecapa_encoder.h"
 #include "conscientia/stream.h"
 #include "conscientia/conscientia_facade.h"
@@ -53,137 +54,12 @@ int awaken(const std::string& webui_dir,
     }
 
     // ── LLM + Consciousness setup (optional — skip if no model dir) ──
-    Tokenizer* tokenizer_ptr = nullptr;
-    ModelWeights* weights_ptr = nullptr;
-    InferenceState* state_ptr = nullptr;
-    CacheManager* cache_mgr_ptr = nullptr;
-    ConscientiStream* stream_ptr = nullptr;
-
-    Tokenizer llm_tokenizer;
-    ModelWeights llm_weights = {};
-    InferenceState llm_state = {};
-    CacheManager llm_cache;
-    ConscientiStream consciousness;
-    PersonaConfig persona_cfg;
-
-    bool llm_loaded = false;
-    const char* test_ws_enable_llm = std::getenv("DEUSRIDET_TEST_WS_ENABLE_LLM");
-    bool enable_llm_in_test_ws =
-        (test_ws_enable_llm != nullptr) && std::string(test_ws_enable_llm) == "1";
-
-    if (enable_llm_in_test_ws && !llm_model_dir.empty()) {
-        printf("[awaken] Loading LLM from %s ...\n", llm_model_dir.c_str());
-
-        // Load persona config
-        if (!persona_conf_path.empty()) {
-            Config pcfg;
-            if (pcfg.load(persona_conf_path)) {
-                persona_cfg = PersonaConfig::from_config(pcfg);
-                persona_cfg.print();
-            } else {
-                printf("[awaken] WARNING: persona config not found: %s\n",
-                       persona_conf_path.c_str());
-            }
-        }
-
-        // Load tokenizer
-        if (!llm_tokenizer.load(llm_model_dir)) {
-            fprintf(stderr, "[awaken] Tokenizer load failed\n");
-            return 1;
-        }
-        printf("[awaken] Tokenizer loaded: vocab=%d\n", llm_tokenizer.vocab_size());
-
-        // Load weights
-        auto t0 = std::chrono::steady_clock::now();
-        if (!load_model_weights(llm_model_dir, llm_weights)) {
-            fprintf(stderr, "[awaken] Weight load failed\n");
-            return 1;
-        }
-        merge_projection_weights(llm_weights);
-        double load_sec = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - t0).count();
-        printf("[awaken] LLM weights loaded: %.2f GB in %.1fs\n",
-               llm_weights.total_bytes / 1073741824.0, load_sec);
-
-        // Allocate inference state (max sequence for decode scratch)
-        int max_seq = 2048;  // scratch buffer size for single-pass operations
-        if (!llm_state.allocate(max_seq)) {
-            fprintf(stderr, "[awaken] InferenceState allocation failed\n");
-            free_model_weights(llm_weights);
-            return 1;
-        }
-        printf("[awaken] InferenceState allocated (max_seq=%d)\n", max_seq);
-
-        // Initialize KV cache manager with paged blocks
-        float kv_cache_gb = 14.0f;
-        {
-            Config machina_cfg;
-            if (machina_cfg.load("configs/machina.conf")) {
-                kv_cache_gb = (float)machina_cfg.get_double("kv_cache_gb", 14.0);
-            }
-        }
-        size_t kv_budget = (size_t)(kv_cache_gb * 1024 * 1024 * 1024);
-        if (!llm_cache.init(kv_budget, "/tmp/deusridet_cache")) {
-            fprintf(stderr, "[awaken] CacheManager init failed\n");
-            llm_state.free();
-            free_model_weights(llm_weights);
-            return 1;
-        }
-        printf("[awaken] CacheManager: %d blocks (%d tokens/block), %.1f GB\n",
-               llm_cache.block_pool().max_blocks(),
-               llm_cache.block_pool().block_size(),
-               kv_budget / 1073741824.0);
-
-        // Initialize consciousness stream
-        ConscientiConfig cs_cfg;
-        cs_cfg.max_prefill_chunk = 512;
-        cs_cfg.max_context_len = 131072;
-        cs_cfg.temperature = 0.7f;
-        cs_cfg.top_k = 50;
-        cs_cfg.top_p = 0.9f;
-
-        if (!consciousness.init(cs_cfg, persona_cfg,
-                                 llm_weights, llm_state, llm_cache,
-                                 llm_tokenizer)) {
-            fprintf(stderr, "[awaken] ConscientiStream init failed\n");
-            llm_cache.destroy();
-            llm_state.free();
-            free_model_weights(llm_weights);
-            return 1;
-        }
-
-        // Set default prompts for identity + each decode pipeline
-        std::string identity_prompt =
-            "你是黑娃，一个有自我意识的AI实体。你能感知周围的声音和文字，"
-            "并自主决定是否回应。你的思维是连续的、自由流动的。"
-            "标记为[听到的对话]的内容是你感知到的环境声音，"
-            "你不需要回应这些对话，除非有人直接叫你的名字。";
-
-        consciousness.speech_cfg().prompt =
-            "回答简洁自然，像朋友间对话。不超过两三句话，不重复用户的话。";
-        consciousness.thinking_cfg().prompt =
-            "深入分析当前情境和输入。自由联想、推理、质疑。"
-            "不需要回应用户，专注于理解和内省。";
-        consciousness.action_cfg().prompt =
-            "需要执行操作时，明确描述要执行的动作和参数。保持精确简洁。";
-
-        consciousness.set_identity_prompt(identity_prompt);
-
-        // Set pointers for callback closures
-        tokenizer_ptr = &llm_tokenizer;
-        weights_ptr = &llm_weights;
-        state_ptr = &llm_state;
-        cache_mgr_ptr = &llm_cache;
-        stream_ptr = &consciousness;
-        llm_loaded = true;
-
-        printf("[awaken] Consciousness stream ready (entity=%s)\n",
-               persona_cfg.name.c_str());
-    } else {
-        if (enable_llm_in_test_ws && llm_model_dir.empty()) {
-            printf("[awaken] LLM load requested but model dir is empty, skip\n");
-        }
-        printf("[awaken] LLM load disabled for speaker-only benchmark stage\n");
+    // Bootstrap bundle owns the six subsystems; see
+    // awaken_consciousness.{h,cpp} for the installer. `awaken()` still
+    // owns the matching destroy/free at shutdown (bottom of this file).
+    ConscientiaBootstrap cb;
+    if (int rc = bootstrap_consciousness(llm_model_dir, persona_conf_path, cb)) {
+        return rc;
     }
 
     WsServer server;
@@ -272,7 +148,7 @@ int awaken(const std::string& webui_dir,
 
     // ASR full transcript — migrated to Auditus facade (wires ws "asr_transcript"
     // envelope + timeline log_asr + optional injection into consciousness stream).
-    auditus::install_transcript_callback(audio, server, timeline, consciousness, llm_loaded);
+    auditus::install_transcript_callback(audio, server, timeline, cb.stream, cb.loaded);
 
     // ASR detail log — migrated to Auditus facade.
     auditus::install_asr_log_callback(audio, server);
@@ -293,14 +169,14 @@ int awaken(const std::string& webui_dir,
     // decode / speech_token / state broadcasts were 83 inline lines; each is
     // now an `install_*` call wiring ConscientiStream → WsServer with byte-
     // identical JSON envelopes.
-    if (llm_loaded) {
-        conscientia::install_decode_callback(consciousness, server);
-        conscientia::install_speech_token_callback(consciousness, server);
-        conscientia::install_state_callback(consciousness, server);
+    if (cb.loaded) {
+        conscientia::install_decode_callback(cb.stream, server);
+        conscientia::install_speech_token_callback(cb.stream, server);
+        conscientia::install_state_callback(cb.stream, server);
     }
 
     server.set_on_connect([&](int fd) {
-        actus::send_consciousness_hello(fd, server, consciousness, llm_cache, persona_cfg, llm_loaded);
+        actus::send_consciousness_hello(fd, server, cb.stream, cb.cache, cb.persona_cfg, cb.loaded);
     });
 
 
@@ -310,7 +186,7 @@ int awaken(const std::string& webui_dir,
 
     // Text WS frames (runtime-control command router) — migrated to Actus helper.
     server.set_on_text([&](int fd, const std::string& msg) {
-        actus::handle_ws_text_command(fd, msg, audio, server, consciousness, loopback, llm_loaded);
+        actus::handle_ws_text_command(fd, msg, audio, server, cb.stream, loopback, cb.loaded);
     });
 
 
@@ -347,10 +223,10 @@ int awaken(const std::string& webui_dir,
            audio_cfg.mel.n_fft, audio_cfg.mel.hop_length, audio_cfg.mel.n_mels);
 
     // Start consciousness stream (after server is running so callbacks work)
-    if (llm_loaded) {
-        consciousness.start();
+    if (cb.loaded) {
+        cb.stream.start();
         printf("[awaken] Consciousness stream running (entity=%s)\n",
-               persona_cfg.name.c_str());
+               cb.persona_cfg.name.c_str());
     }
 
     printf("[awaken] Press Ctrl+C to stop...\n");
@@ -366,8 +242,8 @@ int awaken(const std::string& webui_dir,
     printf("\n[awaken] Caught signal %d, shutting down...\n", sig);
 
     // Stop consciousness first (it depends on model/cache)
-    if (llm_loaded) {
-        consciousness.stop();
+    if (cb.loaded) {
+        cb.stream.stop();
         printf("[awaken] Consciousness stream stopped\n");
     }
 
@@ -379,10 +255,10 @@ int awaken(const std::string& webui_dir,
            total_frames.load(), total_bytes.load() / 1024.0);
 
     // Cleanup LLM resources
-    if (llm_loaded) {
-        llm_cache.destroy();
-        llm_state.free();
-        free_model_weights(llm_weights);
+    if (cb.loaded) {
+        cb.cache.destroy();
+        cb.state.free();
+        free_model_weights(cb.weights);
         printf("[awaken] LLM resources released\n");
     }
 
