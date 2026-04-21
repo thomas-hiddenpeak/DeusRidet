@@ -79,7 +79,7 @@ void print_usage() {
     printf("  Commands:\n");
     printf("    load-model              Load all weights to device, hold for inspection\n");
     printf("    load-weights            Structured weight load (model.h) with validation\n");
-    printf("    test-ws                 Start WebSocket server + serve WebUI\n");
+    printf("    awaken                  Start consciousness loop + WebSocket + WebUI\n");
     printf("    version                 Print version and hardware info\n\n");
     printf("  Note: bench-* / profile-* / test-* (engine probes) have moved\n");
     printf("        to standalone executables under build/ — run e.g.\n");

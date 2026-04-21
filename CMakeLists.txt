@@ -124,9 +124,9 @@ add_executable(deusridet
     src/actus/actus.cpp
     src/actus/cmd_load_model.cpp
     src/actus/cmd_load_weights.cpp
-    src/actus/cmd_test_ws.cpp
-    src/actus/cmd_test_ws_router.cpp
-    src/actus/cmd_test_ws_hello.cpp
+    src/actus/awaken.cpp
+    src/actus/awaken_router.cpp
+    src/actus/awaken_hello.cpp
     src/communis/timeline_logger.cpp
     src/communis/tempus.h
     src/sensus/auditus/auditus_facade.h

@@ -30,10 +30,11 @@ void print_usage();
 int cmd_load_model(const std::string& model_dir);
 int cmd_load_weights(const std::string& model_dir);
 
-// WebSocket server test (with optional LLM consciousness stream)
-int cmd_test_ws(const std::string& webui_dir,
-                const std::string& llm_model_dir = "",
-                const std::string& persona_conf_path = "",
-                float replay_speed = 1.0f);
+// Continuous consciousness loop: WebSocket server + WebUI + audio +
+// LLM stream. The principal Actus verb — the entity becoming awake.
+int awaken(const std::string& webui_dir,
+           const std::string& llm_model_dir = "",
+           const std::string& persona_conf_path = "",
+           float replay_speed = 1.0f);
 
 } // namespace deusridet

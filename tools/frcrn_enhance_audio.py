@@ -139,7 +139,7 @@ def main():
     print(f"\nDone! Total inference: {total_inference_ms/1000:.1f}s "
           f"(RTF={total_inference_ms/1000/duration:.3f})")
     print(f"\nTo test accuracy:")
-    print(f"  1. Start server: ./build/deusridet test-ws")
+    print(f"  1. Start server: ./build/deusridet awaken")
     print(f"  2. Run original:  python3 tools/test_audio_ws.py {args.input} --speed 10")
     print(f"  3. Run enhanced:  python3 tools/test_audio_ws.py {args.output} --speed 10")
     print(f"  4. Compare:       python3 tools/eval_speaker_accuracy.py")

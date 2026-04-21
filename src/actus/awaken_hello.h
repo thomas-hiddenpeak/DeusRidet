@@ -1,11 +1,11 @@
 /**
- * @file cmd_test_ws_hello.h
+ * @file awaken_hello.h
  * @philosophical_role The greeting a client hears on WS connect — a
  *         snapshot of consciousness state (wakefulness, KV cache, persona,
  *         sampling configs) and the active prompts. Extracted from
- *         cmd_test_ws.cpp (Step 7e) so that the hello envelope lives next
+ *         awaken.cpp (Step 7e) so that the hello envelope lives next
  *         to the text-command router it answers.
- * @serves cmd_test_ws_hello.cpp.
+ * @serves awaken_hello.cpp.
  */
 #pragma once
 

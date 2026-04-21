@@ -1,13 +1,13 @@
 /**
- * @file cmd_test_ws_router.cpp
+ * @file awaken_router.cpp
  * @philosophical_role The bus that carries every WebUI knob-turn to the
  *         subsystem that owns that knob. Matching on command prefix, delegates
  *         to AudioPipeline / SpeakerTracker / ConscientiStream and replies
  *         with a JSON envelope that names the same key the WebUI sent.
- *         Extracted from cmd_test_ws.cpp (Step 7d) — behaviour identical.
- * @serves cmd_test_ws_router.h.
+ *         Extracted from awaken.cpp (Step 7d) — behaviour identical.
+ * @serves awaken_router.h.
  */
-#include "cmd_test_ws_router.h"
+#include "awaken_router.h"
 
 #include "sensus/auditus/audio_pipeline.h"
 #include "nexus/ws_server.h"
@@ -31,11 +31,11 @@ void handle_ws_text_command(int fd,
     if (msg == "loopback:on") {
         loopback.store(true, std::memory_order_relaxed);
         server.send_text(fd, R"({"type":"loopback","enabled":true})");
-        printf("[test-ws] Loopback ON (fd=%d)\n", fd);
+        printf("[awaken] Loopback ON (fd=%d)\n", fd);
     } else if (msg == "loopback:off") {
         loopback.store(false, std::memory_order_relaxed);
         server.send_text(fd, R"({"type":"loopback","enabled":false})");
-        printf("[test-ws] Loopback OFF (fd=%d)\n", fd);
+        printf("[awaken] Loopback OFF (fd=%d)\n", fd);
     } else if (msg.rfind("vad_threshold:", 0) == 0) {
         float t = std::strtof(msg.c_str() + 14, nullptr);
         audio.set_vad_threshold(t);
@@ -43,7 +43,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"vad_threshold","value":%.2f})", t);
         server.send_text(fd, json);
-        printf("[test-ws] VAD threshold = %.2f (fd=%d)\n", t, fd);
+        printf("[awaken] VAD threshold = %.2f (fd=%d)\n", t, fd);
     } else if (msg.rfind("gain:", 0) == 0) {
         float g = std::strtof(msg.c_str() + 5, nullptr);
         if (g < 0.1f) g = 0.1f;
@@ -53,7 +53,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"gain","value":%.1f})", g);
         server.send_text(fd, json);
-        printf("[test-ws] Gain = %.1fx (fd=%d)\n", g, fd);
+        printf("[awaken] Gain = %.1fx (fd=%d)\n", g, fd);
     } else if (msg.rfind("silero_threshold:", 0) == 0) {
         float t = std::strtof(msg.c_str() + 17, nullptr);
         if (t < 0.0f) t = 0.0f;
@@ -63,7 +63,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"silero_threshold","value":%.2f})", t);
         server.send_text(fd, json);
-        printf("[test-ws] Silero threshold = %.2f (fd=%d)\n", t, fd);
+        printf("[awaken] Silero threshold = %.2f (fd=%d)\n", t, fd);
     } else if (msg.rfind("fsmn_threshold:", 0) == 0) {
         float t = std::strtof(msg.c_str() + 15, nullptr);
         if (t < 0.0f) t = 0.0f;
@@ -73,7 +73,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"fsmn_threshold","value":%.2f})", t);
         server.send_text(fd, json);
-        printf("[test-ws] FSMN threshold = %.2f (fd=%d)\n", t, fd);
+        printf("[awaken] FSMN threshold = %.2f (fd=%d)\n", t, fd);
     } else if (msg == "silero_enable:on" || msg == "silero_enable:off") {
         bool on = msg.back() == 'n';
         audio.set_silero_enabled(on);
@@ -81,7 +81,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"silero_enable","enabled":%s})", on ? "true" : "false");
         server.send_text(fd, json);
-        printf("[test-ws] Silero %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        printf("[awaken] Silero %s (fd=%d)\n", on ? "ON" : "OFF", fd);
     } else if (msg == "frcrn_enable:on" || msg == "frcrn_enable:off") {
         bool on = msg.back() == 'n';
         audio.set_frcrn_enabled(on);
@@ -89,7 +89,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"frcrn_enable","enabled":%s})", on ? "true" : "false");
         server.send_text(fd, json);
-        printf("[test-ws] FRCRN %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        printf("[awaken] FRCRN %s (fd=%d)\n", on ? "ON" : "OFF", fd);
     } else if (msg == "fsmn_enable:on" || msg == "fsmn_enable:off") {
         bool on = msg.back() == 'n';
         audio.set_fsmn_enabled(on);
@@ -97,7 +97,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"fsmn_enable","enabled":%s})", on ? "true" : "false");
         server.send_text(fd, json);
-        printf("[test-ws] FSMN %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        printf("[awaken] FSMN %s (fd=%d)\n", on ? "ON" : "OFF", fd);
     } else if (msg.rfind("vad_source:", 0) == 0) {
         auto val = msg.substr(11);
         VadSource src = VadSource::ANY;
@@ -109,7 +109,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"vad_source","value":%d})", static_cast<int>(src));
         server.send_text(fd, json);
-        printf("[test-ws] VAD source = %s (%d) (fd=%d)\n", val.c_str(), static_cast<int>(src), fd);
+        printf("[awaken] VAD source = %s (%d) (fd=%d)\n", val.c_str(), static_cast<int>(src), fd);
     } else if (msg == "speaker_enable:on" || msg == "speaker_enable:off") {
         bool on = msg.back() == 'n';
         audio.set_speaker_enabled(on);
@@ -117,7 +117,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"speaker_enable","enabled":%s})", on ? "true" : "false");
         server.send_text(fd, json);
-        printf("[test-ws] Speaker %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        printf("[awaken] Speaker %s (fd=%d)\n", on ? "ON" : "OFF", fd);
     } else if (msg.rfind("speaker_threshold:", 0) == 0) {
         float t = std::strtof(msg.c_str() + 18, nullptr);
         if (t < 0.0f) t = 0.0f;
@@ -127,11 +127,11 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"speaker_threshold","value":%.2f})", t);
         server.send_text(fd, json);
-        printf("[test-ws] Speaker threshold = %.2f (fd=%d)\n", t, fd);
+        printf("[awaken] Speaker threshold = %.2f (fd=%d)\n", t, fd);
     } else if (msg == "speaker_clear") {
         audio.clear_speaker_db();
         server.send_text(fd, R"({"type":"speaker_clear"})");
-        printf("[test-ws] Speaker (CAM++) DB cleared (fd=%d)\n", fd);
+        printf("[awaken] Speaker (CAM++) DB cleared (fd=%d)\n", fd);
     } else if (msg.rfind("speaker_name:", 0) == 0) {
         // Format: speaker_name:ID:Name
         auto rest = msg.substr(13);
@@ -144,7 +144,7 @@ void handle_ws_text_command(int fd,
             snprintf(json, sizeof(json),
                 R"({"type":"speaker_name","id":%d,"name":"%s"})", id, name.c_str());
             server.send_text(fd, json);
-            printf("[test-ws] CAM++ Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
+            printf("[awaken] CAM++ Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
         }
     } else if (msg == "wlecapa_enable:on" || msg == "wlecapa_enable:off") {
         bool on = msg.back() == 'n';
@@ -153,7 +153,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"wlecapa_enable","enabled":%s})", on ? "true" : "false");
         server.send_text(fd, json);
-        printf("[test-ws] WL-ECAPA %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        printf("[awaken] WL-ECAPA %s (fd=%d)\n", on ? "ON" : "OFF", fd);
     } else if (msg.rfind("wlecapa_threshold:", 0) == 0) {
         float t = std::strtof(msg.c_str() + 18, nullptr);
         if (t < 0.0f) t = 0.0f;
@@ -163,7 +163,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"wlecapa_threshold","value":%.2f})", t);
         server.send_text(fd, json);
-        printf("[test-ws] WL-ECAPA threshold = %.2f (fd=%d)\n", t, fd);
+        printf("[awaken] WL-ECAPA threshold = %.2f (fd=%d)\n", t, fd);
     } else if (msg.rfind("wlecapa_margin:", 0) == 0) {
         float m = std::strtof(msg.c_str() + 15, nullptr);
         if (m < 0.0f) m = 0.0f;
@@ -173,7 +173,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"wlecapa_margin","value":%.2f})", m);
         server.send_text(fd, json);
-        printf("[test-ws] WL-ECAPA margin = %.2f (fd=%d)\n", m, fd);
+        printf("[awaken] WL-ECAPA margin = %.2f (fd=%d)\n", m, fd);
     } else if (msg.rfind("early_trigger:", 0) == 0) {
         float s = std::strtof(msg.c_str() + 14, nullptr);
         if (s < 0.5f) s = 0.5f;
@@ -183,7 +183,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"early_trigger","value":%.2f})", s);
         server.send_text(fd, json);
-        printf("[test-ws] Early trigger = %.2fs (fd=%d)\n", s, fd);
+        printf("[awaken] Early trigger = %.2fs (fd=%d)\n", s, fd);
     } else if (msg == "early_enable:on" || msg == "early_enable:off") {
         bool en = (msg == "early_enable:on");
         audio.set_early_trigger_enabled(en);
@@ -191,7 +191,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"early_enable","value":%s})", en ? "true" : "false");
         server.send_text(fd, json);
-        printf("[test-ws] Early trigger %s (fd=%d)\n", en ? "enabled" : "disabled", fd);
+        printf("[awaken] Early trigger %s (fd=%d)\n", en ? "enabled" : "disabled", fd);
     } else if (msg.rfind("min_speech:", 0) == 0) {
         float s = std::strtof(msg.c_str() + 11, nullptr);
         if (s < 0.5f) s = 0.5f;
@@ -201,11 +201,11 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"min_speech","value":%.2f})", s);
         server.send_text(fd, json);
-        printf("[test-ws] Min speech = %.2fs (fd=%d)\n", s, fd);
+        printf("[awaken] Min speech = %.2fs (fd=%d)\n", s, fd);
     } else if (msg == "wlecapa_clear") {
         audio.clear_wlecapa_db();
         server.send_text(fd, R"({"type":"wlecapa_clear"})");
-        printf("[test-ws] WL-ECAPA DB cleared (fd=%d)\n", fd);
+        printf("[awaken] WL-ECAPA DB cleared (fd=%d)\n", fd);
     } else if (msg.rfind("wlecapa_name:", 0) == 0) {
         auto rest = msg.substr(13);
         auto colon = rest.find(':');
@@ -217,7 +217,7 @@ void handle_ws_text_command(int fd,
             snprintf(json, sizeof(json),
                 R"({"type":"wlecapa_name","id":%d,"name":"%s"})", id, name.c_str());
             server.send_text(fd, json);
-            printf("[test-ws] WL-ECAPA Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
+            printf("[awaken] WL-ECAPA Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
         }
     } else if (msg.rfind("wlecapa_delete:", 0) == 0) {
         // Format: wlecapa_delete:ID
@@ -227,7 +227,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"wlecapa_delete","id":%d,"ok":%s})", id, ok ? "true" : "false");
         server.send_text(fd, json);
-        printf("[test-ws] WL-ECAPA delete #%d %s (fd=%d)\n", id, ok ? "OK" : "FAIL", fd);
+        printf("[awaken] WL-ECAPA delete #%d %s (fd=%d)\n", id, ok ? "OK" : "FAIL", fd);
     } else if (msg.rfind("wlecapa_merge:", 0) == 0) {
         // Format: wlecapa_merge:DST_ID:SRC_ID
         auto rest = msg.substr(14);
@@ -241,7 +241,7 @@ void handle_ws_text_command(int fd,
                 R"({"type":"wlecapa_merge","dst":%d,"src":%d,"ok":%s})",
                 dst, src, ok ? "true" : "false");
             server.send_text(fd, json);
-            printf("[test-ws] WL-ECAPA merge #%d←#%d %s (fd=%d)\n", dst, src, ok ? "OK" : "FAIL", fd);
+            printf("[awaken] WL-ECAPA merge #%d←#%d %s (fd=%d)\n", dst, src, ok ? "OK" : "FAIL", fd);
         }
     // ── SpeakerTracker controls ──
     } else if (msg == "tracker_enable:on" || msg == "tracker_enable:off") {
@@ -251,7 +251,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"tracker_enable","enabled":%s})", on ? "true" : "false");
         server.send_text(fd, json);
-        printf("[test-ws] Tracker %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        printf("[awaken] Tracker %s (fd=%d)\n", on ? "ON" : "OFF", fd);
     } else if (msg.rfind("tracker_threshold:", 0) == 0) {
         float t = std::strtof(msg.c_str() + 18, nullptr);
         if (t < 0.0f) t = 0.0f;
@@ -261,7 +261,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"tracker_threshold","value":%.2f})", t);
         server.send_text(fd, json);
-        printf("[test-ws] Tracker threshold = %.2f (fd=%d)\n", t, fd);
+        printf("[awaken] Tracker threshold = %.2f (fd=%d)\n", t, fd);
     } else if (msg.rfind("tracker_change_threshold:", 0) == 0) {
         float t = std::strtof(msg.c_str() + 24, nullptr);
         if (t < 0.0f) t = 0.0f;
@@ -271,7 +271,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"tracker_change_threshold","value":%.2f})", t);
         server.send_text(fd, json);
-        printf("[test-ws] Tracker change threshold = %.2f (fd=%d)\n", t, fd);
+        printf("[awaken] Tracker change threshold = %.2f (fd=%d)\n", t, fd);
     } else if (msg.rfind("tracker_interval:", 0) == 0) {
         int ms = std::stoi(msg.substr(17));
         if (ms < 250) ms = 250;
@@ -281,7 +281,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"tracker_interval","value":%d})", ms);
         server.send_text(fd, json);
-        printf("[test-ws] Tracker interval = %d ms (fd=%d)\n", ms, fd);
+        printf("[awaken] Tracker interval = %d ms (fd=%d)\n", ms, fd);
     } else if (msg.rfind("tracker_window:", 0) == 0) {
         int ms = std::stoi(msg.substr(15));
         if (ms < 500) ms = 500;
@@ -291,11 +291,11 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"tracker_window","value":%d})", ms);
         server.send_text(fd, json);
-        printf("[test-ws] Tracker window = %d ms (fd=%d)\n", ms, fd);
+        printf("[awaken] Tracker window = %d ms (fd=%d)\n", ms, fd);
     } else if (msg == "tracker_clear") {
         audio.tracker().clear();
         server.send_text(fd, R"({"type":"tracker_clear"})");
-        printf("[test-ws] Tracker DB cleared (fd=%d)\n", fd);
+        printf("[awaken] Tracker DB cleared (fd=%d)\n", fd);
     } else if (msg.rfind("tracker_name:", 0) == 0) {
         auto rest = msg.substr(13);
         auto colon = rest.find(':');
@@ -307,7 +307,7 @@ void handle_ws_text_command(int fd,
             snprintf(json, sizeof(json),
                 R"({"type":"tracker_name","id":%d,"name":"%s"})", id, name.c_str());
             server.send_text(fd, json);
-            printf("[test-ws] Tracker Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
+            printf("[awaken] Tracker Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
         }
     } else if (msg == "asr_enable:on" || msg == "asr_enable:off") {
         bool on = msg.back() == 'n';
@@ -316,7 +316,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"asr_enable","enabled":%s})", on ? "true" : "false");
         server.send_text(fd, json);
-        printf("[test-ws] ASR %s (fd=%d)\n", on ? "ON" : "OFF", fd);
+        printf("[awaken] ASR %s (fd=%d)\n", on ? "ON" : "OFF", fd);
     } else if (msg.rfind("asr_vad_source:", 0) == 0) {
         auto val = msg.substr(15);
         VadSource src = VadSource::ANY;
@@ -329,7 +329,7 @@ void handle_ws_text_command(int fd,
         snprintf(json, sizeof(json),
             R"({"type":"asr_vad_source","value":%d})", static_cast<int>(src));
         server.send_text(fd, json);
-        printf("[test-ws] ASR VAD source = %s (%d) (fd=%d)\n", val.c_str(), static_cast<int>(src), fd);
+        printf("[awaken] ASR VAD source = %s (%d) (fd=%d)\n", val.c_str(), static_cast<int>(src), fd);
     } else if (msg.rfind("asr_param:", 0) == 0) {
         // Generic ASR parameter setter: "asr_param:<key>:<value>"
         auto rest = msg.substr(10);
@@ -422,7 +422,7 @@ void handle_ws_text_command(int fd,
                     key.c_str());
             }
             server.send_text(fd, json);
-            printf("[test-ws] ASR param %s=%s (fd=%d)\n",
+            printf("[awaken] ASR param %s=%s (fd=%d)\n",
                    key.c_str(), val.c_str(), fd);
         }
     } else if (msg.rfind("consciousness_enable:", 0) == 0 && llm_loaded) {
@@ -444,7 +444,7 @@ void handle_ws_text_command(int fd,
                 R"({"type":"consciousness_enable","mode":"%s","enabled":%s})",
                 mode.c_str(), on ? "true" : "false");
             server.send_text(fd, json);
-            printf("[test-ws] Consciousness %s %s (fd=%d)\n",
+            printf("[awaken] Consciousness %s %s (fd=%d)\n",
                    mode.c_str(), on ? "ON" : "OFF", fd);
         }
     } else if (msg.rfind("consciousness_param:", 0) == 0 && llm_loaded) {
@@ -514,7 +514,7 @@ void handle_ws_text_command(int fd,
                     key.c_str());
             }
             server.send_text(fd, json);
-            printf("[test-ws] Consciousness param %s=%s (fd=%d)\n",
+            printf("[awaken] Consciousness param %s=%s (fd=%d)\n",
                    key.c_str(), val.c_str(), fd);
         }
     } else if (msg.rfind("consciousness_prompt:", 0) == 0 && llm_loaded) {
@@ -542,13 +542,13 @@ void handle_ws_text_command(int fd,
                 R"({"type":"consciousness_prompt","pipeline":"%s","ok":true})",
                 pipeline.c_str());
             server.send_text(fd, json);
-            printf("[test-ws] %s prompt updated (%zu chars, fd=%d)\n",
+            printf("[awaken] %s prompt updated (%zu chars, fd=%d)\n",
                    pipeline.c_str(), text.size(), fd);
         } else {
             // Legacy: no pipeline prefix → identity prompt
             consciousness.set_identity_prompt(rest);
             server.send_text(fd, R"({"type":"consciousness_prompt","pipeline":"identity","ok":true})");
-            printf("[test-ws] System prompt updated (%zu chars, fd=%d)\n",
+            printf("[awaken] System prompt updated (%zu chars, fd=%d)\n",
                    rest.size(), fd);
         }
     } else if (msg.rfind("text_input:", 0) == 0 && llm_loaded) {
@@ -565,11 +565,11 @@ void handle_ws_text_command(int fd,
             snprintf(json, sizeof(json),
                 R"({"type":"text_input_ack","ok":true})");
             server.send_text(fd, json);
-            printf("[test-ws] Text input injected: \"%s\" (fd=%d)\n",
+            printf("[awaken] Text input injected: \"%s\" (fd=%d)\n",
                    text.c_str(), fd);
         }
     } else {
-        printf("[test-ws] Text from fd=%d: %s\n", fd, msg.c_str());
+        printf("[awaken] Text from fd=%d: %s\n", fd, msg.c_str());
     }
 }
 

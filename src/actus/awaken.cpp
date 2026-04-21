@@ -1,6 +1,6 @@
 /**
- * @file cmd_test_ws.cpp
- * @philosophical_role External command `cmd_test_ws`. An Actus function — one CLI verb, one finite
+ * @file awaken.cpp
+ * @philosophical_role External command `awaken`. An Actus function — one CLI verb, one finite
  *         act, one return code.
  * @serves main.cpp dispatch (declaration in actus.h).
  */
@@ -30,8 +30,8 @@
 #include "nexus/ws_server.h"
 #include "sensus/auditus/audio_pipeline.h"
 #include "sensus/auditus/auditus_facade.h"
-#include "cmd_test_ws_router.h"
-#include "cmd_test_ws_hello.h"
+#include "awaken_router.h"
+#include "awaken_hello.h"
 #include "orator/wavlm_ecapa_encoder.h"
 #include "conscientia/stream.h"
 #include "conscientia/conscientia_facade.h"
@@ -40,14 +40,14 @@
 
 namespace deusridet {
 
-int cmd_test_ws(const std::string& webui_dir,
+int awaken(const std::string& webui_dir,
                 const std::string& llm_model_dir,
                 const std::string& persona_conf_path,
                 float replay_speed) {
-    printf("[test-ws] Starting WebSocket + Audio Pipeline...\n");
-    printf("[test-ws] WebUI dir: %s\n", webui_dir.c_str());
+    printf("[awaken] Starting WebSocket + Audio Pipeline...\n");
+    printf("[awaken] WebUI dir: %s\n", webui_dir.c_str());
     if (replay_speed != 1.0f) {
-        printf("[test-ws] Replay speed: %.2fx (AUDIO anchor period scaled; "
+        printf("[awaken] Replay speed: %.2fx (AUDIO anchor period scaled; "
                "T0 tracks wall time, T1 tracks source-audio samples)\n",
                (double)replay_speed);
     }
@@ -72,7 +72,7 @@ int cmd_test_ws(const std::string& webui_dir,
         (test_ws_enable_llm != nullptr) && std::string(test_ws_enable_llm) == "1";
 
     if (enable_llm_in_test_ws && !llm_model_dir.empty()) {
-        printf("[test-ws] Loading LLM from %s ...\n", llm_model_dir.c_str());
+        printf("[awaken] Loading LLM from %s ...\n", llm_model_dir.c_str());
 
         // Load persona config
         if (!persona_conf_path.empty()) {
@@ -81,38 +81,38 @@ int cmd_test_ws(const std::string& webui_dir,
                 persona_cfg = PersonaConfig::from_config(pcfg);
                 persona_cfg.print();
             } else {
-                printf("[test-ws] WARNING: persona config not found: %s\n",
+                printf("[awaken] WARNING: persona config not found: %s\n",
                        persona_conf_path.c_str());
             }
         }
 
         // Load tokenizer
         if (!llm_tokenizer.load(llm_model_dir)) {
-            fprintf(stderr, "[test-ws] Tokenizer load failed\n");
+            fprintf(stderr, "[awaken] Tokenizer load failed\n");
             return 1;
         }
-        printf("[test-ws] Tokenizer loaded: vocab=%d\n", llm_tokenizer.vocab_size());
+        printf("[awaken] Tokenizer loaded: vocab=%d\n", llm_tokenizer.vocab_size());
 
         // Load weights
         auto t0 = std::chrono::steady_clock::now();
         if (!load_model_weights(llm_model_dir, llm_weights)) {
-            fprintf(stderr, "[test-ws] Weight load failed\n");
+            fprintf(stderr, "[awaken] Weight load failed\n");
             return 1;
         }
         merge_projection_weights(llm_weights);
         double load_sec = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - t0).count();
-        printf("[test-ws] LLM weights loaded: %.2f GB in %.1fs\n",
+        printf("[awaken] LLM weights loaded: %.2f GB in %.1fs\n",
                llm_weights.total_bytes / 1073741824.0, load_sec);
 
         // Allocate inference state (max sequence for decode scratch)
         int max_seq = 2048;  // scratch buffer size for single-pass operations
         if (!llm_state.allocate(max_seq)) {
-            fprintf(stderr, "[test-ws] InferenceState allocation failed\n");
+            fprintf(stderr, "[awaken] InferenceState allocation failed\n");
             free_model_weights(llm_weights);
             return 1;
         }
-        printf("[test-ws] InferenceState allocated (max_seq=%d)\n", max_seq);
+        printf("[awaken] InferenceState allocated (max_seq=%d)\n", max_seq);
 
         // Initialize KV cache manager with paged blocks
         float kv_cache_gb = 14.0f;
@@ -124,12 +124,12 @@ int cmd_test_ws(const std::string& webui_dir,
         }
         size_t kv_budget = (size_t)(kv_cache_gb * 1024 * 1024 * 1024);
         if (!llm_cache.init(kv_budget, "/tmp/deusridet_cache")) {
-            fprintf(stderr, "[test-ws] CacheManager init failed\n");
+            fprintf(stderr, "[awaken] CacheManager init failed\n");
             llm_state.free();
             free_model_weights(llm_weights);
             return 1;
         }
-        printf("[test-ws] CacheManager: %d blocks (%d tokens/block), %.1f GB\n",
+        printf("[awaken] CacheManager: %d blocks (%d tokens/block), %.1f GB\n",
                llm_cache.block_pool().max_blocks(),
                llm_cache.block_pool().block_size(),
                kv_budget / 1073741824.0);
@@ -145,7 +145,7 @@ int cmd_test_ws(const std::string& webui_dir,
         if (!consciousness.init(cs_cfg, persona_cfg,
                                  llm_weights, llm_state, llm_cache,
                                  llm_tokenizer)) {
-            fprintf(stderr, "[test-ws] ConscientiStream init failed\n");
+            fprintf(stderr, "[awaken] ConscientiStream init failed\n");
             llm_cache.destroy();
             llm_state.free();
             free_model_weights(llm_weights);
@@ -177,13 +177,13 @@ int cmd_test_ws(const std::string& webui_dir,
         stream_ptr = &consciousness;
         llm_loaded = true;
 
-        printf("[test-ws] Consciousness stream ready (entity=%s)\n",
+        printf("[awaken] Consciousness stream ready (entity=%s)\n",
                persona_cfg.name.c_str());
     } else {
         if (enable_llm_in_test_ws && llm_model_dir.empty()) {
-            printf("[test-ws] LLM load requested but model dir is empty, skip\n");
+            printf("[awaken] LLM load requested but model dir is empty, skip\n");
         }
-        printf("[test-ws] LLM load disabled for speaker-only benchmark stage\n");
+        printf("[awaken] LLM load disabled for speaker-only benchmark stage\n");
     }
 
     WsServer server;
@@ -242,10 +242,10 @@ int cmd_test_ws(const std::string& webui_dir,
         (test_ws_enable_asr != nullptr) && std::string(test_ws_enable_asr) == "1";
     if (enable_asr_in_test_ws) {
         audio_cfg.asr_model_path = model_root + "/asr/Qwen/Qwen3-ASR-1.7B";
-        printf("[test-ws] ASR load enabled by DEUSRIDET_TEST_WS_ENABLE_ASR=1\n");
+        printf("[awaken] ASR load enabled by DEUSRIDET_TEST_WS_ENABLE_ASR=1\n");
     } else {
         audio_cfg.asr_model_path.clear();
-        printf("[test-ws] ASR load disabled for speaker-only benchmark stage\n");
+        printf("[awaken] ASR load disabled for speaker-only benchmark stage\n");
     }
 
     // Track WS-level stats.
@@ -256,9 +256,9 @@ int cmd_test_ws(const std::string& webui_dir,
     // Persistent timeline data logger (JSONL).
     TimelineLogger timeline;
     if (timeline.open()) {
-        printf("[test-ws] Timeline log: %s\n", timeline.path().c_str());
+        printf("[awaken] Timeline log: %s\n", timeline.path().c_str());
     } else {
-        fprintf(stderr, "[test-ws] WARNING: failed to open timeline log\n");
+        fprintf(stderr, "[awaken] WARNING: failed to open timeline log\n");
     }
 
     // Helper: strip trailing incomplete UTF-8 sequence from a byte string.
@@ -305,7 +305,7 @@ int cmd_test_ws(const std::string& webui_dir,
 
 
     server.set_on_disconnect([&](int fd) {
-        printf("[test-ws] WS client disconnected (fd=%d)\n", fd);
+        printf("[awaken] WS client disconnected (fd=%d)\n", fd);
     });
 
     // Text WS frames (runtime-control command router) — migrated to Actus helper.
@@ -327,33 +327,33 @@ int cmd_test_ws(const std::string& webui_dir,
     audio.set_fsmn_enabled(false);
     audio.set_gain(4.0f);
     audio.set_silero_threshold(0.001f);
-    printf("[test-ws] Default VAD policy: source=silero, silero=ON, fsmn=OFF, gain=4.0, silero_threshold=0.001\n");
+    printf("[awaken] Default VAD policy: source=silero, silero=ON, fsmn=OFF, gain=4.0, silero_threshold=0.001\n");
 
     // Start audio pipeline.
     if (!audio.start(audio_cfg)) {
-        fprintf(stderr, "[test-ws] Failed to start audio pipeline\n");
+        fprintf(stderr, "[awaken] Failed to start audio pipeline\n");
         return 1;
     }
 
     // Start WS server.
     if (!server.start(ws_cfg)) {
-        fprintf(stderr, "[test-ws] Failed to start WS server\n");
+        fprintf(stderr, "[awaken] Failed to start WS server\n");
         audio.stop();
         return 1;
     }
 
-    printf("[test-ws] Server running on http://localhost:%d\n", ws_cfg.port);
-    printf("[test-ws] Audio pipeline: Mel(n_fft=%d hop=%d mels=%d) + VAD\n",
+    printf("[awaken] Server running on http://localhost:%d\n", ws_cfg.port);
+    printf("[awaken] Audio pipeline: Mel(n_fft=%d hop=%d mels=%d) + VAD\n",
            audio_cfg.mel.n_fft, audio_cfg.mel.hop_length, audio_cfg.mel.n_mels);
 
     // Start consciousness stream (after server is running so callbacks work)
     if (llm_loaded) {
         consciousness.start();
-        printf("[test-ws] Consciousness stream running (entity=%s)\n",
+        printf("[awaken] Consciousness stream running (entity=%s)\n",
                persona_cfg.name.c_str());
     }
 
-    printf("[test-ws] Press Ctrl+C to stop...\n");
+    printf("[awaken] Press Ctrl+C to stop...\n");
 
     // Block until SIGINT/SIGTERM.
     sigset_t mask;
@@ -363,19 +363,19 @@ int cmd_test_ws(const std::string& webui_dir,
     sigprocmask(SIG_BLOCK, &mask, nullptr);
     int sig = 0;
     sigwait(&mask, &sig);
-    printf("\n[test-ws] Caught signal %d, shutting down...\n", sig);
+    printf("\n[awaken] Caught signal %d, shutting down...\n", sig);
 
     // Stop consciousness first (it depends on model/cache)
     if (llm_loaded) {
         consciousness.stop();
-        printf("[test-ws] Consciousness stream stopped\n");
+        printf("[awaken] Consciousness stream stopped\n");
     }
 
     audio.stop();
     server.stop();
     timeline.close();
-    printf("[test-ws] Timeline log closed: %s\n", timeline.path().c_str());
-    printf("[test-ws] Total: %lu WS frames, %.1f KB\n",
+    printf("[awaken] Timeline log closed: %s\n", timeline.path().c_str());
+    printf("[awaken] Total: %lu WS frames, %.1f KB\n",
            total_frames.load(), total_bytes.load() / 1024.0);
 
     // Cleanup LLM resources
@@ -383,7 +383,7 @@ int cmd_test_ws(const std::string& webui_dir,
         llm_cache.destroy();
         llm_state.free();
         free_model_weights(llm_weights);
-        printf("[test-ws] LLM resources released\n");
+        printf("[awaken] LLM resources released\n");
     }
 
     return 0;

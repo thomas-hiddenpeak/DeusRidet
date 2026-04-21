@@ -5,7 +5,7 @@
  *         broadcast — decode output, per-token speech streaming, wakefulness/metric
  *         heartbeats. Mirror of auditus_facade: facade installs, does not own.
  *         ConscientiStream and WsServer lifetimes remain with the caller.
- * @serves cmd_test_ws and any future Actus verb that needs to expose the
+ * @serves awaken and any future Actus verb that needs to expose the
  *         consciousness stream over a WS channel.
  */
 #pragma once

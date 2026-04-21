@@ -30,7 +30,7 @@ declare success until both HTTP 200 and WS 101 are confirmed.
 
 4. **Start service (async)**
    ```bash
-   cd /home/rm01/DeusRidet && ./build/deusridet test-ws
+   cd /home/rm01/DeusRidet && ./build/deusridet awaken
    ```
    Wait until the log shows `WebUI server listening on :8080` or equivalent.
 

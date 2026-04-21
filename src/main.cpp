@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
     else if (cmd == "load-weights") {
         rc = deusridet::cmd_load_weights(model_dir);
     }
-    else if (cmd == "test-ws") {
+    else if (cmd == "awaken") {
         // Default webui dir relative to executable location.
         std::string webui_dir = cfg.get_string("webui_dir", "");
         std::string persona_conf = "configs/persona.conf";
@@ -141,7 +141,7 @@ int main(int argc, char** argv) {
                 webui_dir = "../src/nexus/webui";  // fallback
             }
         }
-        rc = deusridet::cmd_test_ws(webui_dir, model_dir, persona_conf, replay_speed);
+        rc = deusridet::awaken(webui_dir, model_dir, persona_conf, replay_speed);
     }
     else if (cmd == "--help" || cmd == "-h" || cmd == "help") {
         deusridet::print_usage();

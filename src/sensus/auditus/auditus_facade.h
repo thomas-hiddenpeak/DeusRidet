@@ -3,8 +3,8 @@
  * @philosophical_role The bridge between Auditus (hearing) and Nexus (voice to the outer world).
  *         Owns every audio-derived broadcast and every client message that mutates hearing state.
  *         Facade installs — it does not own. AudioPipeline and WsServer lifetimes remain with the
- *         caller (cmd_test_ws); facade only wires callbacks across the seam.
- * @serves cmd_test_ws and any future Actus verb that needs to expose Auditus over a WS channel.
+ *         caller (awaken); facade only wires callbacks across the seam.
+ * @serves awaken and any future Actus verb that needs to expose Auditus over a WS channel.
  */
 #pragma once
 
@@ -83,7 +83,7 @@ void install_speaker_match_callback(AudioPipeline& audio,
 // "audio_stats" envelopes + optional loopback echo + periodic stdout trace.
 // `total_frames`, `total_bytes`, `loopback` are owned by the caller; the
 // facade only reads/updates them via the references — this keeps the
-// periodic stdout summary in cmd_test_ws working with the same counter.
+// periodic stdout summary in awaken working with the same counter.
 void install_ws_binary_callback(WsServer& server,
                                 AudioPipeline& audio,
                                 std::atomic<uint64_t>& total_frames,

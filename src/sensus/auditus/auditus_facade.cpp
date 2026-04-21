@@ -3,7 +3,7 @@
  * @philosophical_role Wires Auditus outputs onto Nexus WS broadcasts. Thin by design — any logic
  *         that belongs to hearing stays in AudioPipeline; any logic that belongs to transport stays
  *         in WsServer; the facade only binds the two across their declared seams.
- * @serves auditus_facade.h consumers (currently cmd_test_ws).
+ * @serves auditus_facade.h consumers (currently awaken).
  */
 
 #include "auditus_facade.h"
@@ -63,10 +63,10 @@ void install_vad_callback(AudioPipeline& audio,
         timeline.log_vad(vr.is_speech, vr.segment_start, vr.segment_end,
                          frame_idx, vr.energy, audio_t1);
         if (vr.segment_start)
-            printf("[test-ws] VAD: speech START at frame %d (energy=%.2f)\n",
+            printf("[awaken] VAD: speech START at frame %d (energy=%.2f)\n",
                    frame_idx, vr.energy);
         if (vr.segment_end)
-            printf("[test-ws] VAD: speech END at frame %d\n", frame_idx);
+            printf("[awaken] VAD: speech END at frame %d\n", frame_idx);
     });
 }
 
@@ -142,12 +142,12 @@ void install_transcript_callback(AudioPipeline& audio,
                          speaker_confidence, speaker_source.c_str(),
                          tracker_id, tracker_name.c_str(), tracker_sim);
         if (speaker_id >= 0)
-            printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s conf=%.2f src=%s | trk=%d %s]\n",
+            printf("[awaken] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s conf=%.2f src=%s | trk=%d %s]\n",
                    result.text.c_str(), result.total_ms, audio_sec,
                    speaker_id, speaker_name.c_str(), speaker_confidence, speaker_source.c_str(),
                    tracker_id, tracker_name.c_str());
         else
-            printf("[test-ws] ASR: \"%s\" (%.1f ms, %.2f s) [trk=%d %s]\n",
+            printf("[awaken] ASR: \"%s\" (%.1f ms, %.2f s) [trk=%d %s]\n",
                    result.text.c_str(), result.total_ms, audio_sec,
                    tracker_id, tracker_name.c_str());
 
@@ -434,7 +434,7 @@ void install_stats_callback(AudioPipeline& audio,
         if (!st_ptr->multi_speaker_initialized || multi_speaker != st_ptr->multi_speaker_last) {
             st_ptr->multi_speaker_initialized = true;
             st_ptr->multi_speaker_last = multi_speaker;
-            printf("[test-ws] MULTI-SPEAKER %s (score=%.2f source=%s sep=[%d,%d])\n",
+            printf("[awaken] MULTI-SPEAKER %s (score=%.2f source=%s sep=[%d,%d])\n",
                    multi_speaker ? "ON" : "OFF",
                    multi_score,
                    multi_source,
@@ -464,7 +464,7 @@ void install_speaker_match_callback(AudioPipeline& audio,
             match.is_new ? "true" : "false",
             match.name.c_str());
         server.broadcast_text(json);
-        printf("[test-ws] Speaker: id=%d sim=%.3f %s%s\n",
+        printf("[awaken] Speaker: id=%d sim=%.3f %s%s\n",
                match.speaker_id, match.similarity,
                match.is_new ? "NEW " : "",
                match.name.empty() ? "(unnamed)" : match.name.c_str());
@@ -514,7 +514,7 @@ void install_ws_binary_callback(WsServer& server,
 
         if (f % 500 == 0) {
             auto& st = audio.stats();
-            printf("[test-ws] PCM: %lu frames | Mel: %lu | Speech: %lu | Energy: %.2f\n",
+            printf("[awaken] PCM: %lu frames | Mel: %lu | Speech: %lu | Energy: %.2f\n",
                    (unsigned long)f, (unsigned long)st.mel_frames,
                    (unsigned long)st.speech_frames, st.last_energy);
         }

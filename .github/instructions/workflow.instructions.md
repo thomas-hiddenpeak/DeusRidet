@@ -26,7 +26,7 @@ No exceptions. Every invocation, not just the first one.
 1. Build: `cd build && make -j$(nproc)`
 2. Kill + free port: `sudo kill -9 $(pgrep -f deusridet) 2>/dev/null; sudo fuser -k 8080/tcp 2>/dev/null`
 3. Drop page caches: `echo 3 | sudo tee /proc/sys/vm/drop_caches`
-4. Start service: `cd /home/rm01/DeusRidet && ./build/deusridet test-ws`
+4. Start service: `cd /home/rm01/DeusRidet && ./build/deusridet awaken`
 5. Verify WebUI: `curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/` → **200**
 6. Verify key assets load (at least `app.js` and newly added component JS/CSS) → **200**
 7. Verify WebSocket: 

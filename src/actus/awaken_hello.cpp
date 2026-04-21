@@ -1,11 +1,11 @@
 /**
- * @file cmd_test_ws_hello.cpp
+ * @file awaken_hello.cpp
  * @philosophical_role Composes the consciousness_state + consciousness_prompts
  *         JSON envelope sent to every freshly-connected WS client. Logic
- *         byte-identical to the original inline lambda in cmd_test_ws.cpp.
- * @serves cmd_test_ws_hello.h.
+ *         byte-identical to the original inline lambda in awaken.cpp.
+ * @serves awaken_hello.h.
  */
-#include "cmd_test_ws_hello.h"
+#include "awaken_hello.h"
 
 #include "nexus/ws_server.h"
 #include "conscientia/stream.h"
@@ -32,7 +32,7 @@ void send_consciousness_hello(int fd,
                               CacheManager& llm_cache,
                               const PersonaConfig& persona_cfg,
                               bool llm_loaded) {
-    printf("[test-ws] WS client connected  (fd=%d)\n", fd);
+    printf("[awaken] WS client connected  (fd=%d)\n", fd);
     if (!llm_loaded) {
         server.send_text(fd, R"({"type":"consciousness_state","llm_loaded":false})");
         return;
