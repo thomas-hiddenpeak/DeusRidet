@@ -1,5 +1,11 @@
 # Audio Pipeline Enhancement Plan — Comprehensive Evaluation
 
+> **ARCHIVED** — 2026-04-21. This plan was authored at v24d (60-65% baseline)
+> and has been **superseded** by the work captured in `docs/en/devlog/2026-04-18.md`
+> and later, which achieved the 90%+ speaker-identification target on a
+> different path. Retained as historical context only — do not treat as
+> current direction.
+
 > Date: 2025-07-22
 > Status: DRAFT — Pending Thomas's review
 > Context: v24d baseline at 60-65% median speaker diarization accuracy
