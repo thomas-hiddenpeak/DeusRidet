@@ -1006,46 +1006,9 @@ int cmd_test_ws(const std::string& webui_dir,
         }
     });
 
-    server.set_on_binary([&](int fd, const uint8_t* data, size_t len) {
-        uint64_t f = total_frames.fetch_add(1, std::memory_order_relaxed) + 1;
-        total_bytes.fetch_add(len, std::memory_order_relaxed);
-
-        // Push PCM to audio pipeline.
-        const int16_t* samples = reinterpret_cast<const int16_t*>(data);
-        int n_samples = len / sizeof(int16_t);
-        audio.push_pcm(samples, n_samples);
-
-        // Quick RMS/peak for WS-level feedback (every 10 frames).
-        if (f % 10 == 0) {
-            double sum_sq = 0;
-            int16_t peak_abs = 0;
-            for (int i = 0; i < n_samples; i++) {
-                int16_t s = samples[i];
-                sum_sq += (double)s * s;
-                int16_t a = s < 0 ? (int16_t)(-s) : s;
-                if (a > peak_abs) peak_abs = a;
-            }
-            float rms  = n_samples > 0 ? sqrtf((float)(sum_sq / n_samples)) / 32768.0f : 0;
-            float peak = peak_abs / 32768.0f;
-            char json[256];
-            snprintf(json, sizeof(json),
-                R"({"type":"audio_stats","frames":%lu,"rms":%.4f,"peak":%.4f})",
-                (unsigned long)f, rms, peak);
-            server.send_text(fd, json);
-        }
-
-        // Loopback.
-        if (loopback.load(std::memory_order_relaxed)) {
-            server.send_binary(fd, data, len);
-        }
-
-        if (f % 500 == 0) {
-            auto& st = audio.stats();
-            printf("[test-ws] PCM: %lu frames | Mel: %lu | Speech: %lu | Energy: %.2f\n",
-                   (unsigned long)f, (unsigned long)st.mel_frames,
-                   (unsigned long)st.speech_frames, st.last_energy);
-        }
-    });
+    // Binary WS frames (PCM ingress + audio_stats + loopback) — migrated to
+    // Auditus facade.
+    auditus::install_ws_binary_callback(server, audio, total_frames, total_bytes, loopback);
 
     // Default runtime policy for next-stage tests:
     // Silero as primary VAD, FSMN kept available but disabled by default.

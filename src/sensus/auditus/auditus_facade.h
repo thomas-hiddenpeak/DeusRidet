@@ -8,6 +8,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -114,6 +115,19 @@ void install_stats_callback(AudioPipeline& audio,
 // One-shot speaker match (Legacy CAM++ path) → ws "speaker" envelope + stdout.
 void install_speaker_match_callback(AudioPipeline& audio,
                                     WsServer& server);
+
+// ── Callback installers (Step 7c scope) ───────────────────────────────────────
+
+// Binary WS frames (16-bit PCM) → AudioPipeline ingress + periodic ws
+// "audio_stats" envelopes + optional loopback echo + periodic stdout trace.
+// `total_frames`, `total_bytes`, `loopback` are owned by the caller; the
+// facade only reads/updates them via the references — this keeps the
+// periodic stdout summary in cmd_test_ws working with the same counter.
+void install_ws_binary_callback(WsServer& server,
+                                AudioPipeline& audio,
+                                std::atomic<uint64_t>& total_frames,
+                                std::atomic<uint64_t>& total_bytes,
+                                std::atomic<bool>& loopback);
 
 }  // namespace auditus
 }  // namespace deusridet

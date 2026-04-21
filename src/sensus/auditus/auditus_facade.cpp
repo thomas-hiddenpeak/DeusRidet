@@ -16,6 +16,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <memory>
 #include <string>
 
@@ -464,6 +465,56 @@ void install_speaker_match_callback(AudioPipeline& audio,
                match.speaker_id, match.similarity,
                match.is_new ? "NEW " : "",
                match.name.empty() ? "(unnamed)" : match.name.c_str());
+    });
+}
+
+// ── Step 7c installers ──────────────────────────────────────────────────────
+
+void install_ws_binary_callback(WsServer& server,
+                                AudioPipeline& audio,
+                                std::atomic<uint64_t>& total_frames,
+                                std::atomic<uint64_t>& total_bytes,
+                                std::atomic<bool>& loopback) {
+    server.set_on_binary([&server, &audio, &total_frames, &total_bytes, &loopback]
+                         (int fd, const uint8_t* data, size_t len) {
+        uint64_t f = total_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+        total_bytes.fetch_add(len, std::memory_order_relaxed);
+
+        // Push PCM to audio pipeline.
+        const int16_t* samples = reinterpret_cast<const int16_t*>(data);
+        int n_samples = len / sizeof(int16_t);
+        audio.push_pcm(samples, n_samples);
+
+        // Quick RMS/peak for WS-level feedback (every 10 frames).
+        if (f % 10 == 0) {
+            double sum_sq = 0;
+            int16_t peak_abs = 0;
+            for (int i = 0; i < n_samples; i++) {
+                int16_t s = samples[i];
+                sum_sq += (double)s * s;
+                int16_t a = s < 0 ? (int16_t)(-s) : s;
+                if (a > peak_abs) peak_abs = a;
+            }
+            float rms  = n_samples > 0 ? sqrtf((float)(sum_sq / n_samples)) / 32768.0f : 0;
+            float peak = peak_abs / 32768.0f;
+            char json[256];
+            snprintf(json, sizeof(json),
+                R"({"type":"audio_stats","frames":%lu,"rms":%.4f,"peak":%.4f})",
+                (unsigned long)f, rms, peak);
+            server.send_text(fd, json);
+        }
+
+        // Loopback.
+        if (loopback.load(std::memory_order_relaxed)) {
+            server.send_binary(fd, data, len);
+        }
+
+        if (f % 500 == 0) {
+            auto& st = audio.stats();
+            printf("[test-ws] PCM: %lu frames | Mel: %lu | Speech: %lu | Energy: %.2f\n",
+                   (unsigned long)f, (unsigned long)st.mel_frames,
+                   (unsigned long)st.speech_frames, st.last_energy);
+        }
     });
 }
 
