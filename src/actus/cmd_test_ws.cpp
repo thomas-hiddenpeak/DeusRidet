@@ -29,6 +29,7 @@
 #include <signal.h>
 #include "nexus/ws_server.h"
 #include "sensus/auditus/audio_pipeline.h"
+#include "sensus/auditus/auditus_facade.h"
 #include "orator/wavlm_ecapa_encoder.h"
 #include "conscientia/stream.h"
 #include "memoria/cache_manager.h"
@@ -258,65 +259,13 @@ int cmd_test_ws(const std::string& webui_dir,
     }
 
     // Helper: strip trailing incomplete UTF-8 sequence from a byte string.
-    auto sanitize_utf8 = [](const std::string& s) -> std::string {
-        if (s.empty()) return s;
-        size_t i = 0, last_good = 0;
-        while (i < s.size()) {
-            uint8_t c = (uint8_t)s[i];
-            int expect;
-            if (c < 0x80)       expect = 1;
-            else if (c < 0xC0)  { i++; continue; }
-            else if (c < 0xE0)  expect = 2;
-            else if (c < 0xF0)  expect = 3;
-            else if (c < 0xF8)  expect = 4;
-            else                { i++; continue; }
-            if (i + expect > s.size()) break;
-            bool ok = true;
-            for (int j = 1; j < expect; j++) {
-                if (((uint8_t)s[i + j] & 0xC0) != 0x80) { ok = false; break; }
-            }
-            if (!ok) { i++; continue; }
-            i += expect;
-            last_good = i;
-        }
-        return s.substr(0, last_good);
-    };
+    // Aliases to the Auditus-facade helpers so remaining (non-migrated) callbacks
+    // keep their short call-site form.
+    using auditus::sanitize_utf8;
+    using auditus::json_escape;
 
-    // Helper: escape a UTF-8 string for JSON, stripping invalid bytes.
-    auto json_escape = [&](const std::string& raw) -> std::string {
-        std::string clean = sanitize_utf8(raw);
-        std::string out;
-        out.reserve(clean.size() + 32);
-        for (unsigned char c : clean) {
-            if (c == '"')       out += "\\\"";
-            else if (c == '\\') out += "\\\\";
-            else if (c == '\n') out += "\\n";
-            else if (c == '\r') out += "\\r";
-            else if (c == '\t') out += "\\t";
-            else if (c < 0x20)  { /* drop control chars */ }
-            else                out += (char)c;
-        }
-        return out;
-    };
-
-    // Audio pipeline callbacks.
-    audio.set_on_vad([&](const VadResult& vr, int frame_idx, uint64_t audio_t1) {
-        char json[256];
-        snprintf(json, sizeof(json),
-            R"({"type":"vad","audio_t1":%lu,"speech":%s,"event":"%s","frame":%d,"energy":%.2f})",
-            (unsigned long)audio_t1,
-            vr.is_speech ? "true" : "false",
-            vr.segment_start ? "start" : (vr.segment_end ? "end" : "none"),
-            frame_idx, vr.energy);
-        server.broadcast_text(json);
-        timeline.log_vad(vr.is_speech, vr.segment_start, vr.segment_end,
-                         frame_idx, vr.energy, audio_t1);
-        if (vr.segment_start)
-            printf("[test-ws] VAD: speech START at frame %d (energy=%.2f)\n",
-                   frame_idx, vr.energy);
-        if (vr.segment_end)
-            printf("[test-ws] VAD: speech END at frame %d\n", frame_idx);
-    });
+    // Audio pipeline callbacks — vad / asr_partial / drop migrated to Auditus facade.
+    auditus::install_vad_callback(audio, server, timeline);
 
     // ASR transcript callback (called from ASR worker thread).
     audio.set_on_transcript([&](const deusridet::asr::ASRResult& result, float audio_sec,
@@ -381,32 +330,11 @@ int cmd_test_ws(const std::string& webui_dir,
         server.broadcast_text(msg);
     });
 
-    // ASR streaming partial callback (called from ASR worker thread).
-    audio.set_on_asr_partial([&](const std::string& text, float audio_sec) {
-        std::string escaped = json_escape(text);
-        char json[2048];
-        snprintf(json, sizeof(json),
-            R"({"type":"asr_partial","text":"%s","audio_sec":%.2f})",
-            escaped.c_str(), audio_sec);
-        server.broadcast_text(json);
-    });
+    // ASR streaming partial callback — migrated to Auditus facade.
+    auditus::install_asr_partial_callback(audio, server);
 
-    // Audio-drop callback (ring-buffer overflow). Persist to timeline JSONL
-    // and broadcast to the WebUI so the gap is visible both in offline
-    // analysis and in the live view.
-    audio.set_on_drop([&](uint64_t t1_from, uint64_t t1_to,
-                          const char* reason, size_t bytes) {
-        timeline.log_drop(t1_from, t1_to, reason, bytes);
-        uint64_t n = (t1_to > t1_from) ? (t1_to - t1_from) : 0;
-        char json[256];
-        snprintf(json, sizeof(json),
-            R"({"type":"audio_drop","t1_from":%lu,"t1_to":%lu,"samples":%lu,)"
-            R"("sec":%.4f,"bytes":%lu,"reason":"%s"})",
-            (unsigned long)t1_from, (unsigned long)t1_to,
-            (unsigned long)n, n / 16000.0,
-            (unsigned long)bytes, reason ? reason : "unknown");
-        server.broadcast_text(json);
-    });
+    // Audio-drop callback — migrated to Auditus facade.
+    auditus::install_drop_callback(audio, server, timeline);
 
     // Helper: serialize a SpeakerDb's roster as a JSON array string.
     auto speaker_list_json = [](auto& db) -> std::string {
