@@ -295,6 +295,19 @@ private:
     void process_loop();
     void asr_loop();
 
+    // -------------------------------------------------------------------
+    // process_loop() stage decomposition (Step 11 A1a).
+    //   Each stage owns one coherent phase of the per-chunk pipeline.
+    //   Stage implementations live in peer TUs so that this class body
+    //   and the process_loop orchestrator both stay under R1 caps.
+    //
+    //     A1a  process_asr_pipeline_   continuous ASR accumulation,
+    //                                   VAD-driven split, speaker-change
+    //                                   resolution, trim + submit.
+    //   (A1b/A1c will peel off the speaker-pipeline block next.)
+    // -------------------------------------------------------------------
+    void process_asr_pipeline_(const int16_t* pcm_buf, int n_samples);
+
     AudioPipelineConfig cfg_;
     std::atomic<bool> running_{false};
     std::thread thread_;
