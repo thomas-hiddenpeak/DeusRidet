@@ -1,42 +1,27 @@
 /**
- * @file cmd_profile_prefill.cpp
- * @philosophical_role External command `cmd_profile_prefill`. An Actus function — one CLI verb, one finite
- *         act, one return code.
- * @serves main.cpp dispatch (declaration in actus.h).
+ * @file profile_prefill.cpp
+ * @philosophical_role Developer instrument — Marlin MLP prefill timing across
+ *         a sweep of batch sizes (M) on loaded model weights. Not an Actus:
+ *         pure engine measurement.
+ * @serves performance regression tracking for `forward_prefill` and
+ *         `profile_sublayer_prefill` in `src/machina/forward.{h,cu}`.
  */
-
-
-#include "actus.h"
-#include "communis/config.h"
-#include "communis/log.h"
-#include "communis/tegra.h"
-#include "machina/gptq.h"
-#include "machina/gptq_gemm_v2.h"
 #include "machina/model.h"
 #include "machina/forward.h"
-#include "machina/allocator.h"
-#include "machina/safetensors.h"
 #include "machina/tokenizer.h"
+#include "communis/tegra.h"
+#include "tools/dev_main_helper.h"
+
 #include <cstdio>
-#include <cstring>
-#include <cstdlib>
-#include <cmath>
-#include <chrono>
-#include <vector>
-#include <algorithm>
-#include <string>
 #include <cuda_runtime.h>
-#include <signal.h>
-#include "nexus/ws_server.h"
-#include "sensus/auditus/audio_pipeline.h"
-#include "orator/wavlm_ecapa_encoder.h"
-#include "conscientia/stream.h"
-#include "memoria/cache_manager.h"
-#include "communis/timeline_logger.h"
+#include <cuda_fp16.h>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace deusridet {
 
-int cmd_profile_prefill(const std::string& model_dir) {
+static int run_profile_prefill(const std::string& model_dir) {
     using MC = ModelConfig;
 
     printf("[profile-prefill] Loading model weights...\n");
@@ -56,8 +41,7 @@ int cmd_profile_prefill(const std::string& model_dir) {
     }
     merge_projection_weights(weights);
 
-    // M values to test — small to large
-    const int M_vals[] = {11, 32, 64, 128, 256, 512};  // consciousness frame sizes
+    const int M_vals[] = {11, 32, 64, 128, 256, 512};
     const int N_M = sizeof(M_vals) / sizeof(M_vals[0]);
     int max_M = M_vals[N_M - 1];
 
@@ -74,8 +58,6 @@ int cmd_profile_prefill(const std::string& model_dir) {
     __half* kv_cache = nullptr;
     cudaMalloc(&kv_cache, kv_bytes);
 
-    // Build token arrays: use chat-templated "Hello" then pad with token 198
-    // (newline) to reach target M. Token values don't affect kernel timing.
     std::string prompt = "Hello";
     std::vector<std::pair<std::string, std::string>> messages = {
         {"user", prompt}
@@ -87,12 +69,10 @@ int cmd_profile_prefill(const std::string& model_dir) {
     for (int mi = 0; mi < N_M; mi++) {
         int M = M_vals[mi];
 
-        // Build token vector of exactly M tokens
         std::vector<int> tokens(M);
         for (int i = 0; i < M; i++)
             tokens[i] = (i < (int)base_tokens.size()) ? base_tokens[i] : 198;
 
-        // Reset all state for clean measurement
         cudaMemset(kv_cache, 0, kv_bytes);
         for (int i = 0; i < state.num_dn_layers; i++) {
             size_t state_bytes = (size_t)MC::LIN_NUM_V_HEADS * MC::LIN_K_HEAD_DIM
@@ -102,12 +82,10 @@ int cmd_profile_prefill(const std::string& model_dir) {
             cudaMemset(state.conv_states[i], 0, conv_bytes);
         }
 
-        // Warmup
         forward_prefill(weights, state, kv_cache,
                         tokens.data(), M,
                         0, max_kv_len);
 
-        // Reset again for profiled run
         cudaMemset(kv_cache, 0, kv_bytes);
         for (int i = 0; i < state.num_dn_layers; i++) {
             size_t state_bytes = (size_t)MC::LIN_NUM_V_HEADS * MC::LIN_K_HEAD_DIM
@@ -117,12 +95,10 @@ int cmd_profile_prefill(const std::string& model_dir) {
             cudaMemset(state.conv_states[i], 0, conv_bytes);
         }
 
-        // Profiled run
         profile_forward_prefill(weights, state, kv_cache,
                                 tokens.data(), M,
                                 0, max_kv_len);
 
-        // Sub-layer profiling
         for (int i = 0; i < state.num_dn_layers; i++) {
             size_t state_bytes = (size_t)MC::LIN_NUM_V_HEADS * MC::LIN_K_HEAD_DIM
                                * MC::LIN_V_HEAD_DIM * sizeof(float);
@@ -143,4 +119,11 @@ int cmd_profile_prefill(const std::string& model_dir) {
     return 0;
 }
 
-} // namespace deusridet
+}  // namespace deusridet
+
+int main(int argc, char** argv) {
+    std::string model_dir = deusridet::dev::resolve_model_dir(argc, argv);
+    int rc = deusridet::run_profile_prefill(model_dir);
+    deusridet::tegra_cleanup();
+    return rc;
+}

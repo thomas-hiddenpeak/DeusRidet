@@ -1,42 +1,24 @@
 /**
- * @file cmd_profile_forward.cpp
- * @philosophical_role External command `cmd_profile_forward`. An Actus function — one CLI verb, one finite
- *         act, one return code.
- * @serves main.cpp dispatch (declaration in actus.h).
+ * @file profile_forward.cpp
+ * @philosophical_role Developer instrument — single-token decode timing on
+ *         loaded model weights. Not an Actus: pure engine measurement.
+ * @serves performance regression tracking for `forward_decode` in
+ *         `src/machina/forward.{h,cu}`.
  */
-
-
-#include "actus.h"
-#include "communis/config.h"
-#include "communis/log.h"
-#include "communis/tegra.h"
-#include "machina/gptq.h"
-#include "machina/gptq_gemm_v2.h"
 #include "machina/model.h"
 #include "machina/forward.h"
-#include "machina/allocator.h"
-#include "machina/safetensors.h"
 #include "machina/tokenizer.h"
+#include "communis/tegra.h"
+#include "tools/dev_main_helper.h"
+
 #include <cstdio>
-#include <cstring>
-#include <cstdlib>
-#include <cmath>
-#include <chrono>
-#include <vector>
-#include <algorithm>
-#include <string>
 #include <cuda_runtime.h>
-#include <signal.h>
-#include "nexus/ws_server.h"
-#include "sensus/auditus/audio_pipeline.h"
-#include "orator/wavlm_ecapa_encoder.h"
-#include "conscientia/stream.h"
-#include "memoria/cache_manager.h"
-#include "communis/timeline_logger.h"
+#include <cuda_fp16.h>
+#include <string>
 
 namespace deusridet {
 
-int cmd_profile_forward(const std::string& model_dir) {
+static int run_profile_forward(const std::string& model_dir) {
     using MC = ModelConfig;
     printf("[profile-forward] Loading model...\n");
 
@@ -70,7 +52,6 @@ int cmd_profile_forward(const std::string& model_dir) {
     cudaMalloc(&kv_cache, kv_bytes);
     cudaMemset(kv_cache, 0, kv_bytes);
 
-    // Use a simple token for profiling
     int token_id = 9419;  // "Hello"
     printf("[profile-forward] Profiling single-token decode...\n");
 
@@ -83,4 +64,11 @@ int cmd_profile_forward(const std::string& model_dir) {
     return 0;
 }
 
-} // namespace deusridet
+}  // namespace deusridet
+
+int main(int argc, char** argv) {
+    std::string model_dir = deusridet::dev::resolve_model_dir(argc, argv);
+    int rc = deusridet::run_profile_forward(model_dir);
+    deusridet::tegra_cleanup();
+    return rc;
+}

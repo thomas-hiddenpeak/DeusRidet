@@ -84,13 +84,11 @@ void print_usage() {
     printf("    load-weights            Structured weight load (model.h) with validation\n");
     printf("    test-forward            Single-token forward pass test\n");
     printf("    test-sample             Sampling test (greedy + top-k/p)\n");
-    printf("    profile-forward         Profile single-token forward pass timing\n");
-    printf("    profile-prefill         Profile prefill pass (Marlin MLP) at various M\n");
-    printf("    profile-prefill-gptq-v2 (legacy alias for profile-prefill)\n");
     printf("    test-ws                 Start WebSocket server + serve WebUI\n");
     printf("    version                 Print version and hardware info\n\n");
-    printf("  Note: bench-gptq / bench-gptq-v2 / bench-prefill have moved to\n");
-    printf("        standalone executables under build/ (run ./build/bench_gptq etc.)\n\n");
+    printf("  Note: bench-gptq / bench-gptq-v2 / bench-prefill /\n");
+    printf("        profile-forward / profile-prefill have moved to standalone\n");
+    printf("        executables under build/ (run ./build/bench_gptq etc.)\n\n");
     printf("  Options:\n");
     printf("    --config <file>         Configuration file (default: configs/machina.conf)\n");
     printf("    --model-dir <path>      Override LLM model directory\n\n");

@@ -129,8 +129,6 @@ add_executable(deusridet
     src/actus/cmd_load_weights.cpp
     src/actus/cmd_test_forward.cpp
     src/actus/cmd_test_sample.cpp
-    src/actus/cmd_profile_forward.cpp
-    src/actus/cmd_profile_prefill.cpp
     src/actus/cmd_test_wavlm_cnn.cpp
     src/actus/cmd_test_ws.cpp
     src/actus/cmd_test_ws_router.cpp
@@ -210,6 +208,24 @@ add_executable(bench_prefill tools/bench_prefill.cpp)
 target_include_directories(bench_prefill PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(bench_prefill PRIVATE machina communis CUDA::cudart CUDA::cublas)
 set_target_properties(bench_prefill PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+add_executable(profile_forward tools/profile_forward.cpp)
+target_include_directories(profile_forward PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(profile_forward PRIVATE machina communis CUDA::cudart CUDA::cublas)
+set_target_properties(profile_forward PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+add_executable(profile_prefill tools/profile_prefill.cpp)
+target_include_directories(profile_prefill PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(profile_prefill PRIVATE machina communis CUDA::cudart CUDA::cublas)
+set_target_properties(profile_prefill PROPERTIES
     BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
     INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
     LINK_FLAGS "-Wl,--disable-new-dtags"

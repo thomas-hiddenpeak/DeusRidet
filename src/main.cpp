@@ -133,16 +133,6 @@ int main(int argc, char** argv) {
     else if (cmd == "test-sample") {
         rc = deusridet::cmd_test_sample(model_dir);
     }
-    else if (cmd == "profile-forward") {
-        rc = deusridet::cmd_profile_forward(model_dir);
-    }
-    else if (cmd == "profile-prefill") {
-        rc = deusridet::cmd_profile_prefill(model_dir);
-    }
-    else if (cmd == "profile-prefill-gptq-v2") {
-        // Legacy alias: v2 is now the default kernel, redirect to profile-prefill
-        rc = deusridet::cmd_profile_prefill(model_dir);
-    }
     else if (cmd == "test-wavlm-cnn") {
         rc = deusridet::cmd_test_wavlm_cnn();
     }

@@ -34,8 +34,6 @@ int cmd_load_model(const std::string& model_dir);
 int cmd_load_weights(const std::string& model_dir);
 int cmd_test_forward(const std::string& model_dir);
 int cmd_test_sample(const std::string& model_dir);
-int cmd_profile_forward(const std::string& model_dir);
-int cmd_profile_prefill(const std::string& model_dir);
 
 // WavLM+ECAPA layer-by-layer test
 int cmd_test_wavlm_cnn();
