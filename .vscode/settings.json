@@ -1,0 +1,14 @@
+{
+  "cmake.configureOnOpen": false,
+  "cmake.configurePreset": "orin",
+  "cmake.buildPreset": "orin",
+  "cmake.sourceDirectory": "${workspaceFolder}",
+  "cmake.buildDirectory": "${workspaceFolder}/build",
+  "cmake.useCMakePresets": "always",
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "files.associations": {
+    "*.la": "markdown",
+    "*.cuh": "cuda-cpp",
+    "*.cu": "cuda-cpp"
+  }
+}
