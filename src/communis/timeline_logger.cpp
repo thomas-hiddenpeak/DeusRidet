@@ -16,20 +16,22 @@ void TimelineLogger::log_stats(const AudioPipelineStats& st,
     std::lock_guard<std::mutex> lk(mu_);
     if (!fp_) return;
 
-    double stream_sec = st.pcm_samples_in / 16000.0;
+    double stream_sec = st.audio_t1_processed / 16000.0;
     // Sample-accurate T0: map AUDIO T1 (sample index) back to wall time via
     // the tempus anchor. Falls back to 0 until AudioPipeline::start() has run.
     uint64_t t0_ns = tempus::t1_to_t0(tempus::Domain::AUDIO,
-                                      st.pcm_samples_in);
+                                      st.audio_t1_processed);
 
     // Build compact JSON — only fields relevant for timeline analysis.
     char buf[1024];
     int n = snprintf(buf, sizeof(buf),
-        R"({"t":"stats","t0":%lu,"sample":%lu,"s":%.4f,)"
+        R"({"t":"stats","t0":%lu,"audio_t1":%lu,"audio_t1_in":%lu,"s":%.4f,)"
         R"("speech":%s,"energy":%.2f,"rms":%.4f,)"
         R"("silero_p":%.3f,"silero_sp":%s,)"
         R"("fsmn_p":%.3f,"fsmn_sp":%s,)",
-        (unsigned long)t0_ns, (unsigned long)st.pcm_samples_in,
+        (unsigned long)t0_ns,
+        (unsigned long)st.audio_t1_processed,
+        (unsigned long)st.audio_t1_in,
         stream_sec,
         st.is_speech ? "true" : "false", st.last_energy, st.last_rms,
         st.silero_prob, st.silero_speech ? "true" : "false",

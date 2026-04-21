@@ -64,7 +64,10 @@ struct AudioPipelineConfig {
 };
 
 struct AudioPipelineStats {
-    uint64_t pcm_samples_in;   // total PCM samples received
+    // AUDIO business clock (T1) snapshot — sample indices.
+    // Derive wall time via tempus::t1_to_t0(Domain::AUDIO, audio_t1_processed).
+    uint64_t audio_t1_in;        // samples successfully enqueued into ring buffer
+    uint64_t audio_t1_processed; // samples popped by process_loop (authoritative "now")
     uint64_t mel_frames;       // total mel frames computed
     uint64_t speech_frames;    // mel frames classified as speech (energy VAD)
     float    last_rms;         // latest frame RMS (linear)
@@ -975,15 +978,20 @@ private:
     int prev_seg_speaker_id_ = -1;       // speaker ID from the previous segment
     std::string prev_seg_speaker_name_;  // speaker name from the previous segment
     float prev_seg_speaker_sim_ = 0.0f;  // speaker similarity from the previous segment
-    int64_t prev_seg_end_sample_ = 0;    // sample counter at end of previous segment
-    int64_t total_samples_in_ = 0;       // monotonic sample counter for gap measurement
+    uint64_t prev_seg_end_t1_ = 0;       // AUDIO T1 at end of previous segment
+
+    // AUDIO business clock (T1) — single source of truth.
+    //   audio_t1_in_        : samples successfully pushed into the ring buffer
+    //                         (written by push_pcm from any thread)
+    //   audio_t1_processed_ : samples popped by process_loop and handed to
+    //                         downstream stages (touched only by the loop thread)
+    // The difference = current ring-buffer occupancy = perception latency.
+    std::atomic<uint64_t> audio_t1_in_{0};
+    uint64_t audio_t1_processed_ = 0;
 
     // SAAS: speaker-change ASR split flag.
     bool asr_spk_change_pending_ = false;   // speaker change detected, trigger ASR split
     int  asr_spk_change_split_at_ = 0;      // sample position in asr_pcm_buf_ to split at
-
-    // ASR buffer absolute sample tracking for timeline resolution.
-    int64_t asr_buf_start_sample_ = 0;      // absolute sample position of asr_pcm_buf_[0]
 
     // Speaker timeline: fused speaker resolution across SAAS + Tracker events.
     SpeakerTimeline spk_timeline_;

@@ -143,7 +143,11 @@ export class TimelinePanel {
     }
 
     onPipelineStats(obj) {
-        const streamSec = (obj.pcm_samples || 0) / 16000;
+        // AUDIO T1 (sample index) / sample_rate = source-audio elapsed seconds.
+        // Under real-time capture this equals wall-clock; under replay != 1.0
+        // the WebUI follows the source-audio timeline, which is what a human
+        // analyst wants when watching a benchmark.
+        const streamSec = (obj.audio_t1 || 0) / 16000;
         if (streamSec <= 0) return;
         this._lastStreamSec = streamSec;
 

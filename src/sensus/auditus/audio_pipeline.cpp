@@ -166,7 +166,7 @@ void AudioPipeline::stop() {
     if (asr_thread_.joinable()) asr_thread_.join();
     if (thread_.joinable()) thread_.join();
     LOG_INFO("AudioPipe", "Stopped (total: %lu samples, %lu mel frames, %lu speech)",
-             stats_.pcm_samples_in, stats_.mel_frames, stats_.speech_frames);
+             stats_.audio_t1_processed, stats_.mel_frames, stats_.speech_frames);
 }
 
 void AudioPipeline::set_asr_rep_penalty(float p) {
@@ -289,6 +289,10 @@ void AudioPipeline::push_pcm(const int16_t* data, int n_samples) {
     if (!ring_ || n_samples <= 0) return;
     size_t bytes = n_samples * sizeof(int16_t);
     size_t written = ring_->push(reinterpret_cast<const uint8_t*>(data), bytes);
+    int n_enqueued = (int)(written / sizeof(int16_t));
+    if (n_enqueued > 0) {
+        audio_t1_in_.fetch_add((uint64_t)n_enqueued, std::memory_order_relaxed);
+    }
     if (written < bytes) {
         LOG_WARN("AudioPipe", "Ring buffer overflow, dropped %zu bytes",
                  bytes - written);
@@ -334,8 +338,10 @@ void AudioPipeline::process_loop() {
         size_t got = ring_->pop(reinterpret_cast<uint8_t*>(pcm_buf.data()),
                                 chunk_bytes);
         int n_samples = got / sizeof(int16_t);
-        stats_.pcm_samples_in += n_samples;
-        total_samples_in_ += n_samples;
+        // Advance AUDIO T1: the authoritative "now" on the processing side.
+        audio_t1_processed_ += (uint64_t)n_samples;
+        stats_.audio_t1_processed = audio_t1_processed_;
+        stats_.audio_t1_in        = audio_t1_in_.load(std::memory_order_relaxed);
 
         // Apply gain before processing.
         float g = gain_.load(std::memory_order_relaxed);
@@ -462,7 +468,7 @@ void AudioPipeline::process_loop() {
                 // If this new segment starts within a short gap of the previous one,
                 // pre-populate the speaker ID so that very short utterances (< 1.0s)
                 // that can't extract their own embedding get a reasonable speaker label.
-                int64_t gap_samples = total_samples_in_ - prev_seg_end_sample_;
+                int64_t gap_samples = audio_t1_processed_ - prev_seg_end_t1_;
                 float gap_sec = gap_samples / 16000.0f;
                 if (prev_seg_speaker_id_ >= 0 && gap_sec < 0.8f) {
                     // Populate both CAM++ and WL-ECAPA stats for inheritance.
@@ -486,8 +492,8 @@ void AudioPipeline::process_loop() {
                     // Timeline: SAAS inheritance event (covers ~2s from onset).
                     {
                         SpeakerEvent ev{};
-                        ev.audio_start = total_samples_in_;
-                        ev.audio_end   = total_samples_in_ + 32000;  // 2s look-ahead
+                        ev.audio_start = audio_t1_processed_;
+                        ev.audio_end   = audio_t1_processed_ + 32000;  // 2s look-ahead
                         ev.source      = SpkEventSource::SAAS_INHERIT;
                         ev.speaker_id  = prev_seg_speaker_id_;
                         ev.similarity  = prev_seg_speaker_sim_;
@@ -563,8 +569,8 @@ void AudioPipeline::process_loop() {
                                 if (on_speaker_) on_speaker_(match);
                                 // Timeline: SAAS early event.
                                 SpeakerEvent ev{};
-                                ev.audio_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
-                                ev.audio_end   = total_samples_in_;
+                                ev.audio_start = audio_t1_processed_ - (int64_t)speech_pcm_buf_.size();
+                                ev.audio_end   = audio_t1_processed_;
                                 ev.source      = SpkEventSource::SAAS_EARLY;
                                 ev.speaker_id  = match.speaker_id;
                                 ev.similarity  = match.similarity;
@@ -639,8 +645,8 @@ void AudioPipeline::process_loop() {
                             // Skip when dual encoder active — wlecapa_db_ IDs != dual_db_ IDs.
                             if (!use_dual_encoder_) {
                                 SpeakerEvent ev{};
-                                ev.audio_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
-                                ev.audio_end   = total_samples_in_;
+                                ev.audio_start = audio_t1_processed_ - (int64_t)speech_pcm_buf_.size();
+                                ev.audio_end   = audio_t1_processed_;
                                 ev.source      = SpkEventSource::SAAS_EARLY;
                                 ev.speaker_id  = match.speaker_id;
                                 ev.similarity  = match.similarity;
@@ -742,7 +748,7 @@ void AudioPipeline::process_loop() {
                                             // Timeline: SAAS speaker change event.
                                             // Skip when dual encoder active — wlecapa_db_ IDs != dual_db_ IDs.
                                             if (!use_dual_encoder_) {
-                                                int64_t seg_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
+                                                int64_t seg_start = audio_t1_processed_ - (int64_t)speech_pcm_buf_.size();
                                                 SpeakerEvent ev{};
                                                 ev.audio_start = seg_start;
                                                 ev.audio_end   = seg_start + pre_samples;
@@ -756,7 +762,7 @@ void AudioPipeline::process_loop() {
                                     }
 
                                     // --- 2. Save speaker state for inheritance ---
-                                    prev_seg_end_sample_ = total_samples_in_;
+                                    prev_seg_end_t1_ = audio_t1_processed_;
                                     if (seg_ref_speaker_id_ >= 0) {
                                         prev_seg_speaker_id_ = seg_ref_speaker_id_;
                                         prev_seg_speaker_name_ = seg_ref_speaker_name_;
@@ -806,7 +812,7 @@ void AudioPipeline::process_loop() {
                 float speech_duration = speech_samples / 16000.0f;
 
                 // SAAS: save speaker state for short-segment inheritance.
-                prev_seg_end_sample_ = total_samples_in_;
+                prev_seg_end_t1_ = audio_t1_processed_;
                 if (seg_ref_speaker_id_ >= 0) {
                     prev_seg_speaker_id_ = seg_ref_speaker_id_;
                     prev_seg_speaker_name_ = seg_ref_speaker_name_;
@@ -938,7 +944,7 @@ void AudioPipeline::process_loop() {
                                 match_thresh += kDiscoveryBoost;  // 0.45 → 0.52
                             }                            // v24: Temporal recency bonus — lower threshold when recent
                             // speaker still active, reducing false negatives (fragmentation).
-                            float seg_mid_time = (float)(total_samples_in_ - (int64_t)speech_pcm_buf_.size() / 2) / 16000.0f;
+                            float seg_mid_time = (float)(audio_t1_processed_ - (int64_t)speech_pcm_buf_.size() / 2) / 16000.0f;
                             float time_since_prev = seg_mid_time - prev_full_time_;
                             static constexpr float kRecencyWindow = 15.0f;
                             // v32: reverted to 0.05 — v31's 0.03 hurt spk2
@@ -1114,10 +1120,10 @@ void AudioPipeline::process_loop() {
                                 seg_ref_speaker_id_ = match.speaker_id;
                                 seg_ref_speaker_name_ = match.name;
                                 seg_ref_speaker_sim_ = match.similarity;
-                                int64_t seg_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
+                                int64_t seg_start = audio_t1_processed_ - (int64_t)speech_pcm_buf_.size();
                                 SpeakerEvent ev{};
                                 ev.audio_start = seg_start;
-                                ev.audio_end   = total_samples_in_;
+                                ev.audio_end   = audio_t1_processed_;
                                 ev.source      = SpkEventSource::SAAS_FULL;
                                 ev.speaker_id  = match.speaker_id;
                                 ev.similarity  = match.similarity;
@@ -1370,10 +1376,10 @@ void AudioPipeline::process_loop() {
                         // Timeline: SAAS full end-of-segment event (highest authority).
                         // Skip when dual encoder active — dual_db_ FULL path already pushed.
                         if (!use_dual_encoder_) {
-                            int64_t seg_start = total_samples_in_ - (int64_t)speech_pcm_buf_.size();
+                            int64_t seg_start = audio_t1_processed_ - (int64_t)speech_pcm_buf_.size();
                             SpeakerEvent ev{};
                             ev.audio_start = seg_start;
-                            ev.audio_end   = total_samples_in_;
+                            ev.audio_end   = audio_t1_processed_;
                             ev.source      = SpkEventSource::SAAS_FULL;
                             ev.speaker_id  = match.speaker_id;
                             ev.similarity  = match.similarity;
@@ -1411,8 +1417,8 @@ void AudioPipeline::process_loop() {
                 if (ts.speaker_id >= 0 && !use_dual_encoder_) {
                     int win = tracker_.window_ms() * 16;  // window in samples
                     SpeakerEvent ev{};
-                    ev.audio_start = total_samples_in_ - win;
-                    ev.audio_end   = total_samples_in_;
+                    ev.audio_start = audio_t1_processed_ - win;
+                    ev.audio_end   = audio_t1_processed_;
                     ev.source      = SpkEventSource::TRACKER;
                     ev.speaker_id  = ts.speaker_id;
                     ev.similarity  = ts.speaker_sim;
@@ -1545,7 +1551,7 @@ void AudioPipeline::process_loop() {
                     }
 
                     // Resolve old speaker via timeline for pre-change audio.
-                    int64_t asr_audio_start = total_samples_in_ - (int64_t)asr_pcm_buf_.size();
+                    int64_t asr_audio_start = audio_t1_processed_ - (int64_t)asr_pcm_buf_.size();
                     int64_t asr_audio_end = asr_audio_start + split_at;
                     auto resolved = spk_timeline_.resolve(asr_audio_start, asr_audio_end);
                     int spk_id = resolved.speaker_id;
@@ -1704,8 +1710,8 @@ void AudioPipeline::process_loop() {
 
                     // Push job to async ASR thread (non-blocking).
                     // Resolve speaker label via timeline (fused SAAS + Tracker).
-                    int64_t asr_audio_start = total_samples_in_ - (int64_t)asr_pcm_buf_.size();
-                    int64_t asr_audio_end = total_samples_in_;
+                    int64_t asr_audio_start = audio_t1_processed_ - (int64_t)asr_pcm_buf_.size();
+                    int64_t asr_audio_end = audio_t1_processed_;
                     auto resolved = spk_timeline_.resolve(asr_audio_start, asr_audio_end);
                     int spk_id = resolved.speaker_id;
                     float spk_sim = resolved.similarity;

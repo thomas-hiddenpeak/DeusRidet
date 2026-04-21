@@ -1638,7 +1638,7 @@ int cmd_test_ws(const std::string& webui_dir,
 
         char json[3200];
         snprintf(json, sizeof(json),
-            R"({"type":"pipeline_stats","pcm_samples":%lu,"mel_frames":%lu,)"
+            R"({"type":"pipeline_stats","audio_t1":%lu,"audio_t1_in":%lu,"mel_frames":%lu,)"
             R"("speech_frames":%lu,"rms":%.4f,"energy":%.2f,"is_speech":%s,)"
             R"("threshold":%.2f,"noise_floor":%.2f,"gain":%.1f,)"
             R"("frcrn_active":%s,"frcrn_enabled":%s,"frcrn_loaded":%s,"frcrn_lat_ms":%.1f,)"
@@ -1650,7 +1650,8 @@ int cmd_test_ws(const std::string& webui_dir,
             R"("wlecapa_id":%d,"wlecapa_sim":%.3f,"wlecapa_new":%s,"wlecapa_count":%d,)"
             R"("wlecapa_exemplars":%d,"wlecapa_hits_above":%d,)"
             R"("wlecapa_name":"%s","wlecapa_enabled":%s,"wlecapa_threshold":%.2f,"wlecapa_active":%s)",
-            (unsigned long)st.pcm_samples_in,
+            (unsigned long)st.audio_t1_processed,
+            (unsigned long)st.audio_t1_in,
             (unsigned long)st.mel_frames,
             (unsigned long)st.speech_frames,
             st.last_rms, st.last_energy,
