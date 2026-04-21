@@ -214,14 +214,27 @@ gain/RMS → FRCRN → Silero VAD → FSMN VAD → SAAS three-branch dispatch
 All three former single-method residuals are now below the R1 500-line
 .cpp cap; every stage is independently trace-taggable.
 
-### Step 12 — Outstanding facade / Actus-boundary work
+### Step 12 — Conscientia bootstrap extracted (closed 2026-04-24)
 
-- **Step 8b+**: 126-line LLM + Conscientia bootstrap block inside
-  `awaken.cpp` crosses machina + memoria + conscientia + persona — an
-  Actus-layer peer TU candidate (not a facade; already crosses too many
-  subsystems for a single-subsystem facade).
-- Any further Nexus / Memoria / Persona / Orator reach-in surfaced
-  during A1-A3 becomes the organic next facade.
+The 126-line LLM + Conscientia bootstrap block inside `awaken.cpp`
+crossed four subsystems (machina + memoria + conscientia + persona),
+so a single-subsystem facade was the wrong shape. Instead, it was
+lifted into a peer Actus TU:
+
+- `src/actus/awaken_consciousness.{h,cpp}` — declares
+  `struct ConscientiaBootstrap` (Tokenizer, ModelWeights,
+  InferenceState, CacheManager, ConscientiStream, PersonaConfig, bool
+  loaded) and `bootstrap_consciousness()`; returns 0 on success
+  (with or without LLM), 1 on any fatal step with partial resources
+  undone in place.
+- `src/actus/awaken.cpp` 392 → 268 lines. Six unused `*_ptr` shadow
+  locals removed; downstream references renamed to `cb.<member>`.
+  `awaken()` still owns the matching destroy/free at shutdown.
+
+Verified at commit `767ebe5`: clean build, awaken HTTP=200 WS=101.
+
+Any further Nexus / Memoria / Persona / Orator reach-in surfaced
+during future work becomes the organic next facade.
 
 ## Foundational Principles
 
