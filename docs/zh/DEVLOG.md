@@ -6,6 +6,8 @@
 
 ## 开发日志
 
+- [2026-04-24](devlog/2026-04-24.md) — 第 11 步收官：函数级分解（A3 spectral_cluster、A2 SpeakerTracker::check、A1 AudioPipeline::process_loop 1574 → 353）；第 13 步：R1 残余清账（spectral_cluster_stages 636 → 3×≤235；audio_pipeline.h 511 → 489）—— R1 全线合规
+- [2026-04-23](devlog/2026-04-23.md) — 第 10 步收官：Actus 宪章复位（5 个原子提交；去除 `cmd_` 前缀，bench/profile 迁往 tools/，引擎探针迁往 tests/integration/，`test-ws` → `awaken`）
 - [2026-04-22](devlog/2026-04-22.md) — 第 8a 步：Conscientia 外观抽取（cmd_test_ws.cpp 458 → 392 行；JSON 工具上提到 Communis）
 - [2026-04-21](devlog/2026-04-21.md) — 第 7 步收官：Auditus 外观 + Actus WS  路由（cmd_test_ws.cpp 1543 → 458 行）；第 9 步收官：CUDA/音频 R1 拆分大行动（20 个原子提交，12 个超限文件全部解决）；第 11 步开启：函数级分解
 - [2026-04-20](devlog/2026-04-20.md) — S1–S4 循环：语义指标 + S3 绕过 FRCRN + Seg3 阈值扫描
