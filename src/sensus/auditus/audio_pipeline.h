@@ -497,7 +497,7 @@ public:
     // Must be called after feed() in the same loop iteration.
     bool check();
 
-    // Access current stats (read by commands.cpp for JSON).
+    // Access current stats (read by awaken for JSON).
     const TrackerStats& stats() const { return stats_; }
 
     // Access timeline (for detailed JSON dump).
