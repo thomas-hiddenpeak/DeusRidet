@@ -304,9 +304,14 @@ private:
     //     A1a  process_asr_pipeline_   continuous ASR accumulation,
     //                                   VAD-driven split, speaker-change
     //                                   resolution, trim + submit.
-    //   (A1b/A1c will peel off the speaker-pipeline block next.)
+    //     A1b  process_saas_full_extract_
+    //                                   end-of-segment CAM++ FULL extract
+    //                                   + dual-encoder fuse + spectral
+    //                                   clustering warm-up.
+    //   (A1c… will peel off the remaining SAAS onset/during/WL paths.)
     // -------------------------------------------------------------------
     void process_asr_pipeline_(const int16_t* pcm_buf, int n_samples);
+    void process_saas_full_extract_(int fbank_frames);
 
     AudioPipelineConfig cfg_;
     std::atomic<bool> running_{false};
