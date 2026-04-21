@@ -91,11 +91,35 @@ the recommended execution order.
       existing call site compiles unchanged. `cmd_test_ws.cpp` 458 → 392.
 - [ ] **Step 8b+ — Remaining subsystem facades**: any further Nexus /
       Memoria / Persona / Orator reach-in that surfaces; the 126-line
-      LLM-and-consciousness bootstrap block in `cmd_test_ws.cpp` is the
+      LLM-and-consciousness bootstrap block in `awaken.cpp` is the
       next Actus-layer extraction candidate (crosses machina + memoria
       + conscientia + persona, so a peer Actus TU, not a facade).
 - [ ] **Step 9 — CUDA/audio R1 split campaign**: the 11 remaining
       oversized files in the table below.
+- [x] **Step 10 — Actus charter restoration** (2026-04-23, commits
+      `d5fffd8`, `95ac9d3`, `728e39e`, `f530573`, `887a32e`):
+      diagnosed naming regression — every TU under `src/actus/` carried
+      the `cmd_` prefix and many were not Actus verbs at all (engine
+      probes, kernel-timing benches, integration tests). Five atomic
+      sub-commits restored the charter:
+      - 10b (`d5fffd8`) `bench_*` → `tools/` as standalone executables
+        (developer instruments measuring the engine, not entities
+        acting in the world).
+      - 10c (`95ac9d3`) `profile_*` → `tools/` (same reasoning).
+      - 10d (`728e39e`) six `cmd_test_*` engine probes →
+        `tests/integration/` as standalone executables linking only the
+        libraries they need; bodies preserved verbatim.
+      - 10e (`f530573`) hard switch `test-ws` → `awaken` (no CLI alias):
+        the principal Actus verb (the act that brings the entity online)
+        was hidden under a developer-flavoured label. Files, symbols,
+        log tags, and the canonical verification ritual all updated.
+      - 10f (`887a32e`) drop `cmd_` prefix from the last two surviving
+        Actus verbs: `cmd_load_model` → `load_model`,
+        `cmd_load_weights` → `load_weights`. CLI verbs unchanged.
+      Result: `src/actus/` now contains exactly six TUs — `actus.{h,cpp}`,
+      `awaken.cpp`, `awaken_router.{h,cpp}`, `awaken_hello.{h,cpp}`,
+      `load_model.cpp`, `load_weights.cpp` — and every name honestly
+      describes an entity acting in the world.
 
 ### Step 6 — Facade evaluation (coupling inventory)
 

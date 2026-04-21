@@ -83,12 +83,34 @@ DeusRidet 以 **GPLv3** 发布。任何使用、修改或整合 DeusRidet 代码
       `using communis::{sanitize_utf8,json_escape}` 再导出，
       所有既有调用点零改动。`cmd_test_ws.cpp` 458 → 392 行。
 - [ ] **第 8b+ 步 —— 其余子系统外观**：后续可能浮现的 Nexus /
-      Memoria / Persona / Orator 反向渗透；当前 `cmd_test_ws.cpp`
+      Memoria / Persona / Orator 反向渗透；当前 `awaken.cpp`
       中 126 行的 LLM+意识流引导块是下一个 Actus 层抽取候选
       （横跨 machina + memoria + conscientia + persona，
       应落入平级 Actus TU，而非子系统外观）。
 - [ ] **第 9 步 —— CUDA/音频 R1 拆分大行动**：下表中剩余 11 个
       超限文件。
+- [x] **第 10 步 —— Actus 宪章复位**（2026-04-23，提交
+      `d5fffd8`、`95ac9d3`、`728e39e`、`f530573`、`887a32e`）：
+      诊断命名回归——`src/actus/` 下每个 TU 都背着 `cmd_` 前缀，
+      且其中许多根本不是 Actus 动词（引擎探针、内核计时基准、
+      集成测试）。五个原子子提交修复宪章：
+      - 10b（`d5fffd8`）`bench_*` → `tools/`，独立可执行文件
+        （开发者度量引擎的工具，并非在世间行动的实体）。
+      - 10c（`95ac9d3`）`profile_*` → `tools/`（同上）。
+      - 10d（`728e39e`）六个 `cmd_test_*` 引擎探针 →
+        `tests/integration/`，独立可执行文件，仅链接所需库；
+        函数体逐字保留。
+      - 10e（`f530573`）硬切换 `test-ws` → `awaken`（无 CLI 别名）：
+        DeusRidet 主 Actus 动词（让实体觉醒的那个动作）一直藏在
+        开发味的标签 `test-ws` 之下。文件、符号、日志标签、
+        以及标准验证仪式全部更新。
+      - 10f（`887a32e`）去掉最后两个 Actus 动词的 `cmd_` 前缀：
+        `cmd_load_model` → `load_model`，
+        `cmd_load_weights` → `load_weights`。CLI 动词不变。
+      结果：`src/actus/` 现仅剩六个 TU——`actus.{h,cpp}`、
+      `awaken.cpp`、`awaken_router.{h,cpp}`、`awaken_hello.{h,cpp}`、
+      `load_model.cpp`、`load_weights.cpp`——每一个名字
+      都诚实地描述一个在世间行动的实体。
 
 ### 第 6 步 —— 外观评估（耦合清单）
 
