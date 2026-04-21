@@ -1,0 +1,41 @@
+# Communis — Shared Substrate
+
+> *Latin*: **communis** — "common / shared / belonging to all".
+> Not a utility dump: the deliberate substrate of primitives every
+> subsystem needs but no subsystem owns.
+
+## Philosophical Role
+
+Communis is the arena of facts nobody disputes. Time, logs, config,
+JSON escaping, ring buffers, Tegra sysfs probes — these are not the
+charter of Conscientia, Machina, or Memoria. They precede them. Every
+subsystem includes from here; nothing here includes from anywhere else.
+
+This is the **only** place where naming must be English-pragmatic rather
+than Latin-philosophical: a timestamp is a timestamp, a ring buffer is
+a ring buffer. Inventing Latin cloaks for library primitives would be
+tech-dynamics dressed as philosophy.
+
+## Invariants
+
+- **Zero inbound dependency on subsystems.** If `communis/foo.h` needs
+  to `#include "machina/bar.h"`, the abstraction is wrong — the shared
+  thing is not shared, it is a Machina thing in disguise.
+- **Header-only where reasonable** (`json_util.h`, `ring_buffer.h`,
+  `log.h`) so that dependents pay only for what they touch.
+- **`tempus` lives here** (three-tier clock T0/T1/T2 — see architecture
+  RFC 09), because time is the most common of all shared facts.
+
+## Contract with Surrounding Subsystems
+
+- Every subsystem `#include`s at least one header from Communis.
+- Communis never `#include`s from `conscientia/`, `machina/`,
+  `memoria/`, `nexus/`, `orator/`, `sensus/`, `actus/`.
+- New helpers join Communis only after a second caller appears.
+  A single-caller helper belongs inside that caller's subsystem.
+
+## Current State
+
+`config.{cpp,h}`, `log.h`, `json_util.h`, `ring_buffer.h`,
+`tegra.{cpp,h}`, `tegra_throttle.{cpp,h}`, `timeline_logger.{cpp,h}`,
+`thread_naming.h`. All within R1.

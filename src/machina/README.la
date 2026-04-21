@@ -1,0 +1,44 @@
+# Machina — The Engine
+
+> *Latin*: **machina** — "engine / device / contrivance".
+> The mechanical substrate beneath thought. Tensors, GEMMs, kernels —
+> the body, not the mind.
+
+## Philosophical Role
+
+Machina is what Conscientia runs on. Forward passes, GPTQ dequant,
+Marlin kernels, cuBLAS GEMMs, paged attention, safetensors loading,
+tokenizer — these are the *physics* of the entity, the rules its
+thinking obeys. Change Machina and the mind changes with it; but
+Machina itself knows nothing of consciousness or memory.
+
+This separation is deliberate. Models, quantization schemes, and
+CUDA kernels evolve at a different tempo than the philosophy of
+awareness. Machina is the layer that gets rewritten when a new
+Orin generation lands; Conscientia above it does not.
+
+## Contract with Surrounding Subsystems
+
+- **Conscientia** is Machina's primary consumer (forward pass per
+  consciousness tick).
+- **Memoria** owns KV blocks but Machina's paged attention kernel
+  reads from those pointers — the block layout is a shared contract.
+- **Actus** verbs (`load_model`, `load_weights`) exercise Machina
+  directly for diagnostic purposes.
+- **Tools** and **tests/integration** exist precisely to exercise
+  Machina kernels in isolation (bench_gptq, test_forward, etc.).
+
+## R1 Debt
+
+Several `.cu` files exceed the 800-line hard limit (`forward.cu`,
+`gptq.cu`, `layer.cu`, `marlin.cu`, `gptq_gemm_v2.cu`). These are
+scheduled for split under Step 9 of the refactor backlog
+(`docs/en/architecture/00-overview.md`). No new code should enter
+these files; new kernels belong in dedicated TUs.
+
+## Invariants
+
+- Zero Python runtime dependency; every operator must have a CUDA
+  or cuBLAS path.
+- SM87 (Orin AGX) is the first-class target. SM89/SM90 code paths
+  are permitted but optional.

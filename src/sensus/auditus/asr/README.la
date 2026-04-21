@@ -1,0 +1,30 @@
+# ASR — Automatic Speech Recognition
+
+> Technical-English name kept by exception: ASR is a term of art
+> (cf. CUTLASS, NCCL), not a generic utility cloak. The English name
+> is the honest name here.
+
+## Philosophical Role
+
+The ASR module is the specific kernel of Auditus that converts mel
+features into token IDs. It is a sub-subsystem of Auditus because its
+lifecycle (model-load, encoder, decoder, mel extraction) is tight
+enough that cross-wiring it with VAD/FRCRN/MossFormer2 would pollute
+both sides.
+
+A Whisper-family encoder-decoder, streamable, GPTQ-quantizable,
+operating on 80-bin mel features at 100 Hz frame rate.
+
+## Contract with Surrounding Subsystems
+
+- **Auditus** owns the lifecycle; ASR is never instantiated outside
+  Auditus.
+- **Machina** provides the GEMM primitives (cuBLAS / cuTLASS); ASR
+  provides the operator sequences specific to the Whisper topology.
+- **Conscientia** never sees ASR directly — it sees tokens arriving
+  through `auditus_facade`.
+
+## Current State
+
+`asr_encoder.cu`, `asr_decoder.cu`, `asr_ops.cu`, `whisper_mel.cu`,
+plus their public headers. All within R1 as of 2026-04-23.

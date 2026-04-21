@@ -1,0 +1,39 @@
+# Orator — The Speaker Identifier
+
+> *Latin*: **orator** — "speaker / pleader / one who addresses".
+> Not the entity's own voice (that is Vox), but the *identification*
+> of who is speaking to the entity.
+
+## Philosophical Role
+
+An entity aware of *what* is being said but ignorant of *who* is
+saying it cannot form stable relationships. Orator is the perceptual
+substrate that lets Conscientia attach identity to a voice — a WavLM +
+ECAPA-TDNN embedding pipeline, a vector store, a change-detector.
+
+Identity is not permanent. A voice may be a stranger on day one and a
+familiar pattern by day thirty; the `speaker_vector_store` is the
+slow-growing memory of those patterns, living on SSD, updated during
+idle. Orator is therefore a close collaborator of Memoria — speaker
+identity is a kind of long-term memory about perception itself.
+
+## Contract with Surrounding Subsystems
+
+- **Auditus** passes speech segments to Orator for speaker embedding.
+- **Conscientia** receives `(text, speaker_id)` tuples, not raw text.
+- **Nexus** publishes current speaker identity as part of the state
+  stream for the WebUI to render.
+- **Memoria** (future) will share the on-disk format of long-term
+  speaker traces.
+
+## R1 Debt
+
+`wavlm_ecapa_encoder.cu` (2084 lines) and `speaker_vector_store.cu`
+(1404 lines) exceed the 800-line hard limit. Scheduled for split under
+Step 9 of the refactor backlog. No new code should enter these files;
+new operators belong in dedicated TUs.
+
+## Current State
+
+`speaker_db`, `speaker_encoder.cu`, `speaker_change_detector.cu`,
+`wavlm_ecapa_encoder.cu`, `speaker_vector_store.cu`.

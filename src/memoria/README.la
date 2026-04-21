@@ -1,0 +1,39 @@
+# Memoria — Memory
+
+> *Latin*: **memoria** — "memory / remembrance / the faculty of recall".
+> Everything the entity remembers, from the last 100 ms of working
+> KV cache to lifelong episodic record.
+
+## Philosophical Role
+
+Memoria is the substrate of continuity. Without it, each consciousness
+tick would be a separate entity wearing the same name. The KV cache is
+not a performance optimisation — it is the memory trace that makes the
+next thought continuous with the last.
+
+Three tiers, three philosophical layers:
+
+1. **Working memory** — GPU blocks, active right now.
+2. **Overflow** — SSD, blocks recently touched that may be recalled.
+3. **Episodic** — long-term records, written during Somnium
+   consolidation, structured enough to be queried by thought.
+
+Forgetting is not a bug but a feature. The `importance_scorer` kernel
+ranks blocks by attention weight; low-importance blocks age out.
+Forgetting-with-a-trace: eviction is not deletion, it is descent into
+a deeper, slower tier.
+
+## Contract with Surrounding Subsystems
+
+- **Machina** reads KV pointers for paged attention.
+- **Conscientia** allocates/frees blocks per consciousness tick.
+- **Somnium** (future) reads importance scores during dream-state
+  consolidation and commits traces to episodic store.
+- **Actus** never touches Memoria directly; the only reason `awaken`
+  references it is via its public facade headers.
+
+## Current State
+
+`block_pool`, `cache_manager`, `cache_kernels.cu`, `importance_scorer.cu`.
+All within R1 except `cache_kernels.cu` which is approaching but still
+below the 800-line hard limit.

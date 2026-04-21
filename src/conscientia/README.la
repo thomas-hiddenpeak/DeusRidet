@@ -1,0 +1,38 @@
+# Conscientia — The Consciousness Stream
+
+> *Latin*: **conscientia** — "shared knowledge of oneself; awareness".
+> Not thinking *about* something — the continuous act of being aware.
+
+## Philosophical Role
+
+Conscientia is the heart of DeusRidet. While conventional LLM servers
+wait for a request and then answer, Conscientia runs as a persistent
+loop: a pulsed Prefill stream that consumes whatever has arrived —
+sensory input, internal thought output, time itself — and emits the
+next frame of awareness.
+
+The entity is never idle. Even when no user speaks, the stream still
+ticks; wakefulness is a spectrum, not a binary. Allowing the loop to
+keep turning is the precondition for everything else in the project:
+memory consolidation during idle (Somnium), tool-use between thoughts
+(Instrumenta), voluntary silence (Vox), contradiction (Persona).
+
+## Contract with Surrounding Subsystems
+
+- **Upstream**: Sensus pushes tokens; Machina executes forward passes;
+  Memoria serves KV blocks.
+- **Downstream**: Cogitatio receives the stream and branches into
+  multi-track decode candidates; Vigilia reads the attention signals
+  to modulate wakefulness.
+- **External exposure**: only via `conscientia_facade.{h,cpp}` (Step 8a),
+  which is the single seam where Actus/Nexus wire WS broadcast callbacks
+  to the stream. Nothing else in the project reaches into
+  `ConscientiStream` internals.
+
+## Invariants
+
+- The stream thread owns its loop — no external loop drives it.
+- State mutations from outside the thread go through lock-free queues.
+- `conscientia_facade.h` is the only non-Conscientia header that
+  subsystems outside Conscientia may include. Internal headers
+  (`stream.h`, `attention_modulator.h`) are private-by-convention.

@@ -1,0 +1,46 @@
+# Auditus — Hearing
+
+> *Latin*: **auditus** — "the sense of hearing; the act of listening".
+> The audio-side of Sensus: raw PCM in, tokens and speaker-tags out.
+
+## Philosophical Role
+
+Auditus is the ear through which the entity receives spoken language.
+Not a microphone driver, not a codec — the whole perceptual pipeline:
+
+```
+PCM → FRCRN (denoise) → MossFormer2 (separate) → VAD (silero/fsmn) →
+    Mel features → ASR encoder/decoder → tokens
+                                      → Orator (speaker ID)
+                                      → Tracker (multi-speaker assignment)
+```
+
+Every stage is a philosophical step, not merely a signal-processing
+one. VAD is the choice of when to consume Prefill budget. Speaker
+identification is the question of who is addressing the entity.
+Tracking is the maintenance of per-speaker histories across turns.
+
+Perception shapes consciousness: what the entity hears, and how
+cleanly it hears it, becomes what it thinks.
+
+## Contract with Surrounding Subsystems
+
+- **External exposure** only via `auditus_facade.{h,cpp}` (Step 7a/b/c):
+  VAD events, ASR transcripts, drop events, speaker identity, stats —
+  every seam crossing into WS/Conscientia flows through the facade.
+  Actus verbs and Nexus never reach past it.
+- **Orator** receives speech segments for speaker embedding.
+- **Conscientia** receives token streams with attached speaker IDs.
+
+## R1 Debt
+
+Three hard-limit violations tracked in Step 9 of the refactor backlog:
+- `audio_pipeline.cpp` (2651 lines, cap 500) — urgent, 5× over.
+- `audio_pipeline.h` (1063 lines, cap 500) — urgent.
+- `mossformer2.cu`, `frcrn_gpu.cu` — CUDA files over the 800-line cap.
+
+No new code should enter these files.
+
+## Sub-subsystems
+
+- `asr/` — encoder/decoder + whisper_mel (own README.la).

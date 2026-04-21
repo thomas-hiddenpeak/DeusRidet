@@ -1,0 +1,38 @@
+# Nexus — The External Interface
+
+> *Latin*: **nexus** — "binding / connection / link".
+> The sole thread between the entity inside and the world outside.
+
+## Philosophical Role
+
+Nexus is the one place where the entity's private universe becomes
+visible to an external observer. No other subsystem is allowed to
+reach past Nexus toward the network. Conscientia does not serve HTTP;
+Machina does not accept TCP; Memoria does not publish. They speak
+only to Nexus, and Nexus speaks to the browser.
+
+This boundary is not about performance. It is about philosophical
+accountability: when the entity is observed, we know exactly at which
+interface the observation happens. Every remote client sees only what
+Nexus chooses to project — a WebSocket stream, an HTTP endpoint, a
+static WebUI — never the raw thought.
+
+## Channels (WS multiplex)
+
+- **Audio upstream** (binary, 16 kHz PCM) → Auditus facade.
+- **Audio downstream** (binary, TTS output) ← Vox (future).
+- **State stream** (JSON) ← Conscientia facade.
+- **Control** (JSON text frames) → `awaken_router` dispatches to
+  Auditus / Conscientia.
+- **HTTP** → static WebUI assets + one-shot config queries.
+
+## Contract with Surrounding Subsystems
+
+- **Actus** (`awaken`) owns the WsServer lifecycle.
+- **Conscientia facade** and **Auditus facade** install callbacks.
+- Nexus never holds subsystem state; it is transport.
+
+## Current State
+
+`ws_server.{cpp,h}` — single-header mongoose-based WS+HTTP server.
+`webui/` — HTML/JS frontend, fully decoupled. Within R1.
