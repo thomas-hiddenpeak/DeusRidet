@@ -190,24 +190,29 @@ Kept for historical traceability.
 *¹ Two residuals (`audio_pipeline_process.cpp` 1574, `speaker_tracker_check.cpp`
 558) are single non-decomposable methods — see Step 11.
 
-### Step 11 — Function-level decomposition (2026-04-21, opened)
+### Step 11 — Function-level decomposition (2026-04-21, **closed**)
 
 After Step 9, the campaign's primary-school work — breaking monolithic
-source files apart — is done. Three TUs remain above the .cpp 500-line
-cap, but each contains **exactly one method**. Further reduction requires
+source files apart — is done. Three TUs remained above the .cpp 500-line
+cap, but each contained **exactly one method**. Further reduction required
 reaching into the method body and extracting sub-steps into private
-helpers. This is the next surgical pass.
+helpers. This pass is now complete.
 
-| # | File | Lines | Single symbol | Planned sub-steps |
-|---|------|-------|---------------|--------------------|
-| A1 | `src/sensus/auditus/audio_pipeline_process.cpp` | 1574 | `AudioPipeline::process_loop` | VAD state branches / SAAS inheritance / overlap tracking / CAM++ early/full extraction / intra-segment change detection / segment finalisation + spectral warm-up / WL-ECAPA native path / SpeakerTracker parallel pipe / ASR continuous accumulation / tail stats |
-| A2 | `src/sensus/auditus/speaker_tracker_check.cpp` | 558 | `SpeakerTracker::check` | overlap detection / MossFormer2 separation / embedding scoring branches |
-| A3 | `src/orator/spectral_cluster.cpp` | 590 | `spectral_cluster()` | PCA / cosine similarity / temporal mixing / p-pruning / symmetrize + orphan repair / normalised Laplacian / eigengap K-selection / K-means++ / temporal smoothing / centroid merge |
+| # | File | Before | After (orchestrator + peer TUs) | Commits |
+|---|------|--------|----------------------------------|---------|
+| A3 | `src/orator/spectral_cluster.cpp` | 590 | 85 orchestrator + 636 stages + 119 header | `c77efde` |
+| A2 | `src/sensus/auditus/speaker_tracker_check.cpp` | 558 | 177 orchestrator + 500 stages (+8 private decls in `speaker_tracking.h`) | `991f543` |
+| A1 | `src/sensus/auditus/audio_pipeline_process.cpp` | 1574 | 353 orchestrator + 392 ASR + 456 SAAS-full + 321 SAAS-during + 190 SAAS-segend | `df93e8b` / `02011b3` / `a34b4a9` |
 
-Recommended execution order: **A3 first** (pure algorithm, no side
-effects; the clearest template for function-level extraction), then A2,
-then A1 (largest, cross-subsystem — apply the pattern once it is
-proven).
+A1 was decomposed in three atomic commits (A1a ASR pipeline → A1b CAM++
+FULL extract + spectral warm-up → A1c during-speech + segment-end), each
+independently built and awaken-verified (HTTP=200 WS=101). The
+`process_loop` body is now a sequential orchestrator of eight phases:
+gain/RMS → FRCRN → Silero VAD → FSMN VAD → SAAS three-branch dispatch
+(onset / during / segment-end) → SpeakerTracker → ASR → Mel/VAD/stats.
+
+All three former single-method residuals are now below the R1 500-line
+.cpp cap; every stage is independently trace-taggable.
 
 ### Step 12 — Outstanding facade / Actus-boundary work
 

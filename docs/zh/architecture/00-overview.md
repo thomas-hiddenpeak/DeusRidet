@@ -175,20 +175,26 @@ Orator / Persona 外观树立模板。
 *¹ 两个遗留（`audio_pipeline_process.cpp` 1574、`speaker_tracker_check.cpp`
 558）均是单个不可再拆的方法——详见第 11 步。
 
-### 第 11 步 —— 函数级分解（2026-04-21 开启）
+### 第 11 步 —— 函数级分解（2026-04-21，**已关闭**）
 
-第 9 步完成后，最基础的"拆文件"工作告一段落。当前仍有 3 个 TU 超出
+第 9 步完成后，最基础的"拆文件"工作告一段落。当时仍有 3 个 TU 超出
 .cpp 500 行上限，但每个只包含**恰好一个方法/函数**。进一步下降需要
-深入函数体，将子步骤抽成私有 helper。这是下一轮精细手术。
+深入函数体，将子步骤抽成私有 helper。本轮精细手术现已完成。
 
-| # | 文件 | 行数 | 唯一符号 | 预计子步骤 |
-|---|------|------|----------|------------|
-| A1 | `src/sensus/auditus/audio_pipeline_process.cpp` | 1574 | `AudioPipeline::process_loop` | VAD 状态分支 / SAAS 短段继承 / 重叠跟踪 / CAM++ 早/全提取 / 段内变更检测 / 段结束 + 谱聚类热身 / WL-ECAPA 原生通路 / SpeakerTracker 并行管道 / ASR 连续累积 / 尾部统计 |
-| A2 | `src/sensus/auditus/speaker_tracker_check.cpp` | 558 | `SpeakerTracker::check` | 重叠检测 / MossFormer2 分离 / embedding 评分分支 |
-| A3 | `src/orator/spectral_cluster.cpp` | 590 | `spectral_cluster()` | PCA / 余弦相似 / 时序混合 / p-剪枝 / 对称化 + 孤立点修复 / 归一化 Laplacian / 特征间隙 K 选择 / K-means++ / 时序平滑 / 中心合并 |
+| # | 文件 | 原 | 现（orchestrator + 平级 TU） | 提交 |
+|---|------|----|-------------------------------|------|
+| A3 | `src/orator/spectral_cluster.cpp` | 590 | 85 orchestrator + 636 stages + 119 header | `c77efde` |
+| A2 | `src/sensus/auditus/speaker_tracker_check.cpp` | 558 | 177 orchestrator + 500 stages（外加 `speaker_tracking.h` 增 8 个私有声明） | `991f543` |
+| A1 | `src/sensus/auditus/audio_pipeline_process.cpp` | 1574 | 353 orchestrator + 392 ASR + 456 SAAS-full + 321 SAAS-during + 190 SAAS-segend | `df93e8b` / `02011b3` / `a34b4a9` |
 
-推荐执行顺序：**先 A3**（纯算法、无副作用；函数级抽取最干净的模板），
-然后 A2，最后 A1（最大、跨子系统最多——等前二者把套路走熟再做）。
+A1 分三次原子提交完成（A1a ASR 管道 → A1b CAM++ FULL 提取 + 谱聚类热身
+→ A1c 语音中 + 段结束），每一步独立构建并经 awaken 核验
+（HTTP=200 WS=101）。`process_loop` 方法体现已退化为一条顺序调度：
+增益/RMS → FRCRN → Silero VAD → FSMN VAD → SAAS 三分支调度（起始 /
+进行 / 段结束）→ SpeakerTracker → ASR → Mel/VAD/统计。
+
+原本三个单方法残余 TU 现均落到 R1 500 行 .cpp 上限之下；
+每一 stage 皆可独立打 trace 标签。
 
 ### 第 12 步 —— 其余外观/Actus 边界工作
 
