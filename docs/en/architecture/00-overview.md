@@ -94,8 +94,33 @@ the recommended execution order.
       LLM-and-consciousness bootstrap block in `awaken.cpp` is the
       next Actus-layer extraction candidate (crosses machina + memoria
       + conscientia + persona, so a peer Actus TU, not a facade).
-- [ ] **Step 9 — CUDA/audio R1 split campaign**: the 11 remaining
-      oversized files in the table below.
+- [x] **Step 9 — CUDA/audio R1 split campaign** (2026-04-21, 20
+      commits `57ecd1a` → `172b264`): all 12 oversized files in the
+      table below resolved. 20 atomic splits in sequence; every split
+      independently verified with `cmake + make` and the awaken ritual
+      (HTTP=200 WS=101). Campaign summary:
+      - Headers / .cpp: `auditus_facade.cpp` 525→130+421,
+        `awaken_router.cpp` 577→437+185, `ws_server.cpp` 607→359+277,
+        `asr_engine.cpp` 611→488+149, `spectral_cluster.h` 626→66+590
+        (body demoted to peer .cpp TU), `tokenizer.cpp` 665→443+268,
+        `stream.cpp` 836→464+400, `model.cpp` 982→227+426+381,
+        `audio_pipeline.h` 1068→481+81+365+199, `audio_pipeline.cpp`
+        2656→327+1574+260+558.
+      - .cu / .cuh: `asr_ops.cu` 898→535+378, `gptq_gemm_v2.cu`
+        1092→656+461, `marlin.cu` 1125→379+555(.cuh)+238, `frcrn_gpu.cu`
+        1263→787+512, `speaker_vector_store.cu` 1411→498+684+276,
+        `mossformer2.cu` 1551→35+590+518+425(.cuh)+70(.h), `layer.cu`
+        1960→552+495+436+555, `gptq.cu`
+        2036→276+419+182+380+346+342+207+26(.cuh), `wavlm_ecapa_encoder.cu`
+        2091→448+416+361+238+743(.cuh), `forward.cu`
+        2179→639+247+339+336+431+320(.cuh).
+      - Technique notes: shared kernels in sibling `.cuh` declared
+        `static __global__` (RDC off → each peer TU gets its own
+        instantiation); `sensus` / `orator` / `machina` use
+        `GLOB_RECURSE` so no CMake edits needed per split.
+      - Residuals: three single-method TUs remain above the .cpp 500-line
+        cap after the campaign — they are not further splittable at the
+        file level. Step 11 tracks function-level decomposition.
 - [x] **Step 10 — Actus charter restoration** (2026-04-23, commits
       `d5fffd8`, `95ac9d3`, `728e39e`, `f530573`, `887a32e`):
       diagnosed naming regression — every TU under `src/actus/` carried
@@ -142,22 +167,56 @@ point: Auditus. Extracting the WS wiring into `auditus_facade.{h,cpp}`
 should bring `cmd_test_ws.cpp` under R1 and simultaneously establish the
 template for subsequent Nexus / Memoria / Orator / Persona facades.
 
-### Oversized files (R1 violations — Actus resolved 2026-04-21)
+### Oversized files (R1 violations — Step 9 resolved 2026-04-21)
 
-| # | File | Lines | Proposed split |
-|---|------|-------|----------------|
-| 1 | `src/sensus/auditus/audio_pipeline.cpp` | 2651 | → `pipeline_core.cpp`, `vad_orchestrator.cpp`, `speaker_matcher.cpp`, `asr_trigger.cpp` |
-| 2 | `src/machina/forward.cu` | 2172 | → per-op kernels (attention/mlp/norm/residual launchers) |
-| 3 | `src/orator/wavlm_ecapa_encoder.cu` | 2084 | → `wavlm_encoder.cu` + `ecapa_encoder.cu` + shared utils header |
-| 4 | `src/machina/gptq.cu` | 2029 | → `gptq_gemv.cu` + `gptq_gemm.cu` + `gptq_dequant.cu` |
-| 5 | `src/machina/layer.cu` | 1953 | → `ssm_layer.cu` + `attn_layer.cu` + `mlp_layer.cu` |
-| ~~6~~ | ~~`src/actus/cmd_test_ws.cpp`~~ | ~~1543~~ → **458** | **Resolved Step 7 (2026-04-21)**: router + hello + auditus_facade |
-| 7 | `src/sensus/auditus/mossformer2.cu` | 1544 | → encoder/decoder split by block |
-| 8 | `src/orator/speaker_vector_store.cu` | 1404 | → index + kernels + I/O split |
-| 9 | `src/sensus/auditus/frcrn_gpu.cu` | 1256 | → frcrn_encoder + frcrn_decoder |
-| 10 | `src/machina/marlin.cu` | 1118 | borderline; audit for single-kernel justification |
-| 11 | `src/machina/gptq_gemm_v2.cu` | 1085 | merge into gptq_gemm.cu under #4 |
-| 12 | `src/sensus/auditus/audio_pipeline.h` | 1063 | split per the .cpp split |
+All 12 originally-oversized files below were resolved during Step 9.
+Kept for historical traceability.
+
+| # | File | Original → Result | Resolving commit |
+|---|------|-------------------|------------------|
+| 1 | `src/sensus/auditus/audio_pipeline.cpp` | 2656 → 327 + 1574*¹ + 260 + 558*¹ | `172b264` |
+| 2 | `src/machina/forward.cu` | 2179 → 639 + 247 + 339 + 336 + 431 + 320(.cuh) | `132f529` |
+| 3 | `src/orator/wavlm_ecapa_encoder.cu` | 2091 → 448 + 416 + 361 + 238 + 743(.cuh) | `9cebc7e` |
+| 4 | `src/machina/gptq.cu` | 2036 → 276 + 419 + 182 + 380 + 346 + 342 + 207 + 26(.cuh) | `6406777` |
+| 5 | `src/machina/layer.cu` | 1960 → 552 + 495 + 436 + 555 | `cf71b11` |
+| ~~6~~ | ~~`src/actus/cmd_test_ws.cpp`~~ | ~~1543~~ → **458** | **Step 7** (`d96a503`..`628dd69`) |
+| 7 | `src/sensus/auditus/mossformer2.cu` | 1551 → 35 + 590 + 518 + 425(.cuh) + 70(.h) | `0b3349c` |
+| 8 | `src/orator/speaker_vector_store.cu` | 1411 → 498 + 684 + 276 | `856392d` |
+| 9 | `src/sensus/auditus/frcrn_gpu.cu` | 1263 → 787 + 512 | `7ccd43a` |
+| 10 | `src/machina/marlin.cu` | 1125 → 379 + 555(.cuh) + 238 | `5023a33` |
+| 11 | `src/machina/gptq_gemm_v2.cu` | 1092 → 656 + 461 | `1fe0aa2` |
+| 12 | `src/sensus/auditus/audio_pipeline.h` | 1068 → 481 + 81 + 365 + 199 | `5a4f295` |
+
+*¹ Two residuals (`audio_pipeline_process.cpp` 1574, `speaker_tracker_check.cpp`
+558) are single non-decomposable methods — see Step 11.
+
+### Step 11 — Function-level decomposition (2026-04-21, opened)
+
+After Step 9, the campaign's primary-school work — breaking monolithic
+source files apart — is done. Three TUs remain above the .cpp 500-line
+cap, but each contains **exactly one method**. Further reduction requires
+reaching into the method body and extracting sub-steps into private
+helpers. This is the next surgical pass.
+
+| # | File | Lines | Single symbol | Planned sub-steps |
+|---|------|-------|---------------|--------------------|
+| A1 | `src/sensus/auditus/audio_pipeline_process.cpp` | 1574 | `AudioPipeline::process_loop` | VAD state branches / SAAS inheritance / overlap tracking / CAM++ early/full extraction / intra-segment change detection / segment finalisation + spectral warm-up / WL-ECAPA native path / SpeakerTracker parallel pipe / ASR continuous accumulation / tail stats |
+| A2 | `src/sensus/auditus/speaker_tracker_check.cpp` | 558 | `SpeakerTracker::check` | overlap detection / MossFormer2 separation / embedding scoring branches |
+| A3 | `src/orator/spectral_cluster.cpp` | 590 | `spectral_cluster()` | PCA / cosine similarity / temporal mixing / p-pruning / symmetrize + orphan repair / normalised Laplacian / eigengap K-selection / K-means++ / temporal smoothing / centroid merge |
+
+Recommended execution order: **A3 first** (pure algorithm, no side
+effects; the clearest template for function-level extraction), then A2,
+then A1 (largest, cross-subsystem — apply the pattern once it is
+proven).
+
+### Step 12 — Outstanding facade / Actus-boundary work
+
+- **Step 8b+**: 126-line LLM + Conscientia bootstrap block inside
+  `awaken.cpp` crosses machina + memoria + conscientia + persona — an
+  Actus-layer peer TU candidate (not a facade; already crosses too many
+  subsystems for a single-subsystem facade).
+- Any further Nexus / Memoria / Persona / Orator reach-in surfaced
+  during A1-A3 becomes the organic next facade.
 
 ## Foundational Principles
 
