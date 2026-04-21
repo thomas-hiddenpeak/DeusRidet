@@ -1,13 +1,15 @@
 // main.cpp — DeusRidet entry point
 //
 // Thin entry: signal handling → config parsing → command dispatch → cleanup.
-// All command implementations live in commands.cpp.
+// All command implementations live in src/actus/ (Latin "act / deed" — each
+// command is a finite external act translating a CLI verb into a subsystem
+// call chain).
 // Tegra platform utilities live in communis/tegra.h.
 //
 // DeusRidet — consciousness should not be locked behind closed doors.
 // Licensed under GPLv3.
 
-#include "commands.h"
+#include "actus/actus.h"
 #include "communis/config.h"
 #include "communis/tegra.h"
 #include <cstdio>

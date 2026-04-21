@@ -1,0 +1,36 @@
+# Actus — External Acts
+
+> *Latin*: **actus** — "act / deed / performance of an action".
+> The bridge between the user's verb (CLI argv) and the subsystems
+> that carry out the deed.
+
+## Philosophical Role
+
+Every CLI invocation is an **external act** upon the machine. Actus is the
+subsystem that receives that act, validates it at the boundary, and
+dispatches it into the internal arena. Once dispatched, the act is spent;
+what remains is the consequence inside Conscientia, Machina, Memoria, and
+the rest.
+
+An act is, by its nature, transient. Therefore Actus owns no long-lived
+state, no classes, no singletons — only free functions in
+`namespace deusridet`. The only module-scope datum is
+`g_shutdown_requested`, the atomic flag that binds a running act to the
+OS signal handler so the act can end gracefully when reality interrupts.
+
+## Contract with Surrounding Subsystems
+
+- **main.cpp** depends on Actus (argument parsing + dispatch).
+- Actus depends on subsystem facades (Machina, Conscientia, Nexus, Sensus,
+  Memoria, …) via their public headers only.
+- Actus never depends on the implementation headers of another subsystem.
+  When a current `cmd_*` reaches into private headers, that is a facade
+  debt tracked in `docs/en/architecture/00-overview.md`.
+
+## Current State (Refactor Debt)
+
+`actus.cpp` is 2700+ lines — the last monolith of the project, well over
+the R1 hard limit. The PDD refactor backlog schedules a one-file-per-command
+split (Step 5) followed by facade extraction (Step 7+). No new command
+should be added to `actus.cpp`; new commands belong in their own
+translation units under `src/actus/`.

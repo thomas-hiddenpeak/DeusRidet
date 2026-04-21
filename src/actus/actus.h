@@ -1,7 +1,18 @@
-// commands.h — CLI command implementations
-//
-// Each command is a self-contained function returning 0 on success.
-// Extracted from main.cpp to keep the entry point clean.
+/**
+ * @file actus.h
+ * @philosophical_role External-command entry points. The Latin `actus` means
+ *         "act / deed" — the bridge between the user's verb (CLI argv) and
+ *         the internal subsystems that carry out the deed.
+ * @serves main.cpp as its dispatch target; every subcommand resolves to one
+ *         function declared here.
+ *
+ * This header is the public contract of the Actus subsystem. It intentionally
+ * contains only free functions in `namespace deusridet` — no classes, no
+ * state — because an external act is, by definition, transient.
+ *
+ * Each command function is self-contained and returns 0 on success. The
+ * shutdown flag is module-scoped state shared with the signal handler.
+ */
 
 #pragma once
 

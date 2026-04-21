@@ -1,9 +1,18 @@
-// commands.cpp — CLI command implementations
-//
-// All test, benchmark, and diagnostic commands live here.
-// Each function is self-contained: load → run → cleanup → return.
+/**
+ * @file actus.cpp
+ * @philosophical_role Monolithic implementation of all external commands
+ *         (test/bench/profile/load + the long-running `test-ws` server).
+ * @serves main.cpp dispatch. Every `cmd_*` here is an act — a finite
+ *         invocation translating one CLI verb into a subsystem call chain.
+ *
+ * @warning This file is currently 2700+ lines — well over the R1 hard limit
+ *          of 500 lines for C++ sources. A split into one file per command
+ *          is tracked in docs/en/architecture/00-overview.md as Step 5 of
+ *          the PDD refactor backlog. Do not grow this file further; add new
+ *          commands as separate translation units under src/actus/.
+ */
 
-#include "commands.h"
+#include "actus.h"
 #include "communis/config.h"
 #include "communis/log.h"
 #include "communis/tegra.h"

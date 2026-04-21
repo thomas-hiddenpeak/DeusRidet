@@ -121,7 +121,7 @@ target_link_libraries(conscientia PRIVATE machina memoria communis CUDA::cudart)
 # ============================================================================
 add_executable(deusridet
     src/main.cpp
-    src/commands.cpp
+    src/actus/actus.cpp
     src/communis/timeline_logger.cpp
     src/communis/tempus.h
 )
