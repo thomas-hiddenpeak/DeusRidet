@@ -106,10 +106,10 @@ int main(int argc, char** argv) {
         deusridet::print_version();
     }
     else if (cmd == "load-model") {
-        rc = deusridet::cmd_load_model(model_dir);
+        rc = deusridet::load_model(model_dir);
     }
     else if (cmd == "load-weights") {
-        rc = deusridet::cmd_load_weights(model_dir);
+        rc = deusridet::load_weights(model_dir);
     }
     else if (cmd == "awaken") {
         // Default webui dir relative to executable location.

@@ -1,6 +1,6 @@
 /**
- * @file cmd_load_weights.cpp
- * @philosophical_role External command `cmd_load_weights`. An Actus function — one CLI verb, one finite
+ * @file load_weights.cpp
+ * @philosophical_role External command `load_weights`. An Actus function — one CLI verb, one finite
  *         act, one return code.
  * @serves main.cpp dispatch (declaration in actus.h).
  */
@@ -36,7 +36,7 @@
 
 namespace deusridet {
 
-int cmd_load_weights(const std::string& model_dir) {
+int load_weights(const std::string& model_dir) {
     // Drop page caches for clean baseline
     drop_page_caches();
     cudaFree(0);

@@ -122,8 +122,8 @@ target_link_libraries(conscientia PRIVATE machina memoria communis CUDA::cudart)
 add_executable(deusridet
     src/main.cpp
     src/actus/actus.cpp
-    src/actus/cmd_load_model.cpp
-    src/actus/cmd_load_weights.cpp
+    src/actus/load_model.cpp
+    src/actus/load_weights.cpp
     src/actus/awaken.cpp
     src/actus/awaken_router.cpp
     src/actus/awaken_hello.cpp

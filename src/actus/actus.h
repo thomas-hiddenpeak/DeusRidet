@@ -27,8 +27,8 @@ extern volatile sig_atomic_t g_shutdown_requested;
 void print_version();
 void print_usage();
 
-int cmd_load_model(const std::string& model_dir);
-int cmd_load_weights(const std::string& model_dir);
+int load_model(const std::string& model_dir);
+int load_weights(const std::string& model_dir);
 
 // Continuous consciousness loop: WebSocket server + WebUI + audio +
 // LLM stream. The principal Actus verb — the entity becoming awake.

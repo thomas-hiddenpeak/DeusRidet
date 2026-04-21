@@ -1,6 +1,6 @@
 /**
- * @file cmd_load_model.cpp
- * @philosophical_role External command `cmd_load_model`. An Actus function — one CLI verb, one finite
+ * @file load_model.cpp
+ * @philosophical_role External command `load_model`. An Actus function — one CLI verb, one finite
  *         act, one return code.
  * @serves main.cpp dispatch (declaration in actus.h).
  */
@@ -36,7 +36,7 @@
 
 namespace deusridet {
 
-int cmd_load_model(const std::string& model_dir) {
+int load_model(const std::string& model_dir) {
     using Clock = std::chrono::steady_clock;
 
     // Drop page caches for clean baseline measurement
