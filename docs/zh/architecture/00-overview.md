@@ -39,22 +39,69 @@ DeusRidet 以 **GPLv3** 发布。任何使用、修改或整合 DeusRidet 代码
 当前超过 R1 行数上限（见 `cpp.instructions.md`）的文件。每个必须通过
 `/refactor-split-file` 提示词拆分。下表为推荐执行顺序。
 
+### 进度日志（2026-04-21）
+
+- [x] **第 1 步 —— 测试资产清理**：`tests/` 下仅保留 `test.mp3` 与
+      `test.txt` 作为评估基线，旧 benchmark 文本全部删除（提交
+      `32763b6`）。
+- [x] **第 2 步 —— DEVLOG 按日归档**：`docs/{en,zh}/DEVLOG.md` 拆为
+      `docs/{en,zh}/devlog/YYYY-MM-DD.md` 每日文件；顶层 DEVLOG.md
+      变成 24 行倒序索引（提交 `6f37fbc`）。
+      `PLAN_AUDIO_ENHANCEMENT.md` 迁移到 `docs/{en,zh}/archive/`
+      并附已超越标记。
+- [x] **第 3 步 —— PDD 结构化**：927 行单体
+      `.github/copilot-instructions.md` 按 GitHub Prompt-Driven
+      Development 约定拆为导航中枢 + 作用域指令 + 可复用提示词 +
+      架构 RFC（提交 `8e6c052`）。
+- [x] **第 4 步 —— Actus 重命名**：`src/commands.{h,cpp}` →
+      `src/actus/actus.{h,cpp}`，加入哲学锚点（提交 `0eea0e6`）。
+- [x] **第 5 步 —— Actus 拆分**：2768 行 `src/actus/actus.cpp` 拆为
+      14 个单命令翻译单元 + 100 行注册文件（提交 `2525450`）。除
+      `cmd_test_ws.cpp`（1543 行，将作为 Auditus 外观的自然目标）外
+      均已满足 R1。
+- [x] **第 6 步 —— 外观评估**（本次提交）：见下方清单。
+- [ ] **第 7 步 —— Auditus 外观**：将 WS 装配代码从 `cmd_test_ws.cpp`
+      抽取到 `src/sensus/auditus/auditus_facade.{h,cpp}`。
+- [ ] **第 8 步+ —— 其余子系统外观**：`cmd_test_ws` 当前直接访问
+      私有头文件的 Nexus、Memoria、Persona、Orator 等子系统。
+- [ ] **第 9 步 —— CUDA/音频 R1 拆分大行动**：下表中剩余 11 个
+      超限文件。
+
+### 第 6 步 —— 外观评估（耦合清单）
+
+对每个 `src/actus/cmd_*.cpp` 扫描其实际使用（非单纯 include）的子系统
+类型：
+
+| 命令 | 行数 | 实际使用的外部类型 |
+|------|------|---------------------|
+| `cmd_test_ws` | 1543 | AudioPipeline、WsServer、CacheManager、FRCRN、MossFormer、Persona、Orator 说话人库、TimelineLogger |
+| `cmd_test_wavlm_cnn` | 262 | Orator 说话人库 |
+| `cmd_test_gptq` | 252 | GPTQ（machina 公共 API）|
+| `cmd_bench_gptq` | 90 | GPTQ（machina 公共 API）|
+| 其余 `cmd_*` | ≤ 174 | 仅 machina 公共 API（model / forward / allocator）|
+
+**结论**：耦合负债几乎全部集中在长驻意识服务 `cmd_test_ws` 上。其余
+所有 Actus 入口已经遵守目标子系统的公共 API 边界。因此外观化行动有
+一个清晰的单点起步：Auditus。将 WS 装配抽到 `auditus_facade.{h,cpp}`
+既能让 `cmd_test_ws.cpp` 回到 R1 范围，也为后续 Nexus / Memoria /
+Orator / Persona 外观树立模板。
+
+### 超限文件（R1 违规——Actus 已解决）
+
 | # | 文件 | 行数 | 建议拆分 |
 |---|------|------|----------|
-| 1 | `src/commands.cpp` | 2768 | → `src/actus/{test_ws,bench_prefill,test_wavlm_cnn,...}.cpp` + `src/actus/dispatcher.cpp` |
-| 2 | `src/sensus/auditus/audio_pipeline.cpp` | 2651 | → `pipeline_core.cpp`、`vad_orchestrator.cpp`、`speaker_matcher.cpp`、`asr_trigger.cpp` + `auditus_facade.{h,cpp}` |
-| 3 | `src/machina/forward.cu` | 2172 | → 按算子拆分（attention/mlp/norm/residual 发射器）|
-| 4 | `src/orator/wavlm_ecapa_encoder.cu` | 2084 | → `wavlm_encoder.cu` + `ecapa_encoder.cu` + 共享 utils 头 |
-| 5 | `src/machina/gptq.cu` | 2029 | → `gptq_gemv.cu` + `gptq_gemm.cu` + `gptq_dequant.cu` |
-| 6 | `src/machina/layer.cu` | 1953 | → `ssm_layer.cu` + `attn_layer.cu` + `mlp_layer.cu` |
+| 1 | `src/sensus/auditus/audio_pipeline.cpp` | 2651 | → `pipeline_core.cpp`、`vad_orchestrator.cpp`、`speaker_matcher.cpp`、`asr_trigger.cpp` + `auditus_facade.{h,cpp}` |
+| 2 | `src/machina/forward.cu` | 2172 | → 按算子拆分（attention/mlp/norm/residual 发射器）|
+| 3 | `src/orator/wavlm_ecapa_encoder.cu` | 2084 | → `wavlm_encoder.cu` + `ecapa_encoder.cu` + 共享 utils 头 |
+| 4 | `src/machina/gptq.cu` | 2029 | → `gptq_gemv.cu` + `gptq_gemm.cu` + `gptq_dequant.cu` |
+| 5 | `src/machina/layer.cu` | 1953 | → `ssm_layer.cu` + `attn_layer.cu` + `mlp_layer.cu` |
+| 6 | `src/actus/cmd_test_ws.cpp` | 1543 | → Auditus 外观吸收约 1100 行；cmd_test_ws 变成薄驱动 |
 | 7 | `src/sensus/auditus/mossformer2.cu` | 1544 | → 编码器/解码器按 block 拆分 |
 | 8 | `src/orator/speaker_vector_store.cu` | 1404 | → 索引 + 核函数 + I/O 拆分 |
 | 9 | `src/sensus/auditus/frcrn_gpu.cu` | 1256 | → frcrn_encoder + frcrn_decoder |
 | 10 | `src/machina/marlin.cu` | 1118 | 临界；审核单核函数合理性 |
-| 11 | `src/machina/gptq_gemm_v2.cu` | 1085 | 并入 #5 的 gptq_gemm.cu |
+| 11 | `src/machina/gptq_gemm_v2.cu` | 1085 | 并入 #4 的 gptq_gemm.cu |
 | 12 | `src/sensus/auditus/audio_pipeline.h` | 1063 | 随 .cpp 的拆分同步拆分 |
-
-每完成一项，划掉相应行以记录进度。
 
 ## 基础原则
 
