@@ -34,6 +34,7 @@
 #include "cmd_test_ws_hello.h"
 #include "orator/wavlm_ecapa_encoder.h"
 #include "conscientia/stream.h"
+#include "conscientia/conscientia_facade.h"
 #include "memoria/cache_manager.h"
 #include "communis/timeline_logger.h"
 
@@ -288,82 +289,14 @@ int cmd_test_ws(const std::string& webui_dir,
 
     // One-shot speaker match (Legacy CAM++ path) — migrated to Auditus facade.
     auditus::install_speaker_match_callback(audio, server);
-    // ── Consciousness stream callbacks ──────────────────────────────
+    // ── Consciousness stream callbacks — migrated to Conscientia facade ──
+    // decode / speech_token / state broadcasts were 83 inline lines; each is
+    // now an `install_*` call wiring ConscientiStream → WsServer with byte-
+    // identical JSON envelopes.
     if (llm_loaded) {
-        // Decode output → WS as JSON
-        consciousness.set_on_decode([&](const DecodeResult& result) {
-            std::string escaped = json_escape(result.text);
-            const char* state_names[] = {"active", "daydream", "dreaming"};
-            char json[4096];
-            snprintf(json, sizeof(json),
-                R"({"type":"consciousness_decode","text":"%s","tokens":%d,"time_ms":%.1f,"state":"%s"})",
-                escaped.c_str(), result.tokens_generated, result.time_ms,
-                state_names[static_cast<int>(result.state_during)]);
-            server.broadcast_text(json);
-            printf("[consciousness] %s: \"%s\" (%d tok, %.0fms)\n",
-                   state_names[static_cast<int>(result.state_during)],
-                   result.text.c_str(), result.tokens_generated, result.time_ms);
-        });
-
-        // Per-token speech streaming → WS as JSON
-        // token_id == -1 signals start of new speech (reset accumulator on frontend)
-        consciousness.set_on_speech_token([&](const std::string& token_text, int token_id) {
-            std::string escaped = json_escape(token_text);
-            char json[512];
-            snprintf(json, sizeof(json),
-                R"({"type":"speech_token","text":"%s","token_id":%d})",
-                escaped.c_str(), token_id);
-            server.broadcast_text(json);
-        });
-
-        // State update → WS as JSON (includes metrics + system stats)
-        consciousness.set_on_state([&](WakefulnessState state,
-                                        float wakefulness,
-                                        int kv_blocks_used,
-                                        int kv_blocks_free,
-                                        int current_pos,
-                                        const ConscientiMetrics& metrics) {
-            // System memory stats
-            size_t cuda_free = 0, cuda_total = 0;
-            cudaMemGetInfo(&cuda_free, &cuda_total);
-            size_t mem_avail_kb = read_memavail_kb();
-            size_t rss_kb = 0;
-            {
-                FILE* fp = fopen("/proc/self/status", "r");
-                if (fp) {
-                    char line[256];
-                    while (fgets(line, sizeof(line), fp)) {
-                        if (strncmp(line, "VmRSS:", 6) == 0) {
-                            rss_kb = strtoull(line + 6, nullptr, 10);
-                            break;
-                        }
-                    }
-                    fclose(fp);
-                }
-            }
-
-            const char* state_names[] = {"active", "daydream", "dreaming"};
-            char json[1024];
-            snprintf(json, sizeof(json),
-                R"({"type":"consciousness_state","state":"%s","wakefulness":%.3f,)"
-                R"("kv_used":%d,"kv_free":%d,"pos":%d,)"
-                R"("prefill_ms":%.1f,"prefill_tps":%.1f,"prefill_tokens":%d,)"
-                R"("decode_ms_per_tok":%.1f,"decode_tokens":%d,)"
-                R"("total_prefill_tok":%d,"total_decode_tok":%d,)"
-                R"("total_prefill_ms":%.0f,"total_decode_ms":%.0f,)"
-                R"("cuda_free_mb":%.0f,"cuda_total_mb":%.0f,)"
-                R"("mem_avail_mb":%.0f,"rss_mb":%.0f})",
-                state_names[static_cast<int>(state)], wakefulness,
-                kv_blocks_used, kv_blocks_free, current_pos,
-                metrics.last_prefill_ms, metrics.last_prefill_tps,
-                metrics.last_prefill_tokens,
-                metrics.last_decode_ms_per_tok, metrics.last_decode_tokens,
-                metrics.total_prefill_tokens, metrics.total_decode_tokens,
-                metrics.total_prefill_ms, metrics.total_decode_ms,
-                cuda_free / 1048576.0, cuda_total / 1048576.0,
-                mem_avail_kb / 1024.0, rss_kb / 1024.0);
-            server.broadcast_text(json);
-        });
+        conscientia::install_decode_callback(consciousness, server);
+        conscientia::install_speech_token_callback(consciousness, server);
+        conscientia::install_state_callback(consciousness, server);
     }
 
     server.set_on_connect([&](int fd) {

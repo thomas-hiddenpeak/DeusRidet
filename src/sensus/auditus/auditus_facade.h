@@ -8,6 +8,8 @@
  */
 #pragma once
 
+#include "communis/json_util.h"
+
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -23,52 +25,11 @@ class ConscientiStream;
 
 namespace auditus {
 
-// ── JSON helpers (Auditus-local) ──────────────────────────────────────────────
-// These are used by every callback that marshals ASR/VAD text into a WS frame.
-// Kept inline so both the facade TU and cmd_test_ws (for callbacks not yet
-// migrated) can share one definition with zero link-time coupling.
-
-// Strip a trailing incomplete UTF-8 sequence from a byte string.
-inline std::string sanitize_utf8(const std::string& s) {
-    if (s.empty()) return s;
-    size_t i = 0, last_good = 0;
-    while (i < s.size()) {
-        uint8_t c = (uint8_t)s[i];
-        int expect;
-        if (c < 0x80)       expect = 1;
-        else if (c < 0xC0)  { i++; continue; }
-        else if (c < 0xE0)  expect = 2;
-        else if (c < 0xF0)  expect = 3;
-        else if (c < 0xF8)  expect = 4;
-        else                { i++; continue; }
-        if (i + expect > s.size()) break;
-        bool ok = true;
-        for (int j = 1; j < expect; j++) {
-            if (((uint8_t)s[i + j] & 0xC0) != 0x80) { ok = false; break; }
-        }
-        if (!ok) { i++; continue; }
-        i += expect;
-        last_good = i;
-    }
-    return s.substr(0, last_good);
-}
-
-// Escape a UTF-8 string for JSON, dropping invalid bytes and control chars.
-inline std::string json_escape(const std::string& raw) {
-    std::string clean = sanitize_utf8(raw);
-    std::string out;
-    out.reserve(clean.size() + 32);
-    for (unsigned char c : clean) {
-        if (c == '"')       out += "\\\"";
-        else if (c == '\\') out += "\\\\";
-        else if (c == '\n') out += "\\n";
-        else if (c == '\r') out += "\\r";
-        else if (c == '\t') out += "\\t";
-        else if (c < 0x20)  { /* drop control chars */ }
-        else                out += (char)c;
-    }
-    return out;
-}
+// ── JSON helpers ──────────────────────────────────────────────────────────────
+// Canonical home is communis::json_util; re-exported into auditus:: so that the
+// many existing `auditus::json_escape(...)` call sites stay untouched.
+using communis::sanitize_utf8;
+using communis::json_escape;
 
 // ── Callback installers (Step 7a scope) ───────────────────────────────────────
 // Each installer wires one AudioPipeline output onto a WS broadcast (and, where
