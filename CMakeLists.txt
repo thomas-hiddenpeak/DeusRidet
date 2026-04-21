@@ -136,8 +136,11 @@ add_executable(deusridet
     src/actus/cmd_bench_prefill.cpp
     src/actus/cmd_test_wavlm_cnn.cpp
     src/actus/cmd_test_ws.cpp
+    src/actus/cmd_test_ws_router.cpp
     src/communis/timeline_logger.cpp
     src/communis/tempus.h
+    src/sensus/auditus/auditus_facade.h
+    src/sensus/auditus/auditus_facade.cpp
 )
 target_link_libraries(deusridet PRIVATE machina memoria conscientia communis nexus sensus orator stdc++fs rt dl)
 
