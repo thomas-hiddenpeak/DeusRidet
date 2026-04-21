@@ -1,3 +1,10 @@
+/**
+ * @file src/machina/paged_attention.cu
+ * @philosophical_role
+ *   Paged-KV decode/prefill attention — the kernel that makes non-contiguous memory *look* contiguous to the attention math. Without this, Memoria's 3-tier cache could not feed Machina at all.
+ * @serves
+ *   Conscientia per-tick forward pass; Memoria block-table readers; Machina attention stages in forward.cu.
+ */
 // paged_attention.cu — Paged KV Cache attention kernels
 //
 // Paged variants of GQA decode/prefill attention and KV cache write.

@@ -1,3 +1,10 @@
+/**
+ * @file src/memoria/importance_scorer.cu
+ * @philosophical_role
+ *   Per-block importance tracking with exponential decay — the substrate of forgetting-with-a-trace. Blocks that nobody attends to age out; blocks that matter stay resident.
+ * @serves
+ *   Memoria eviction policy; Somnium consolidation hook (future) reads these scores during dream-state memory maintenance.
+ */
 // importance_scorer.cu — Attention-score KV block importance kernels
 //
 // Simple exponential decay + additive update model:

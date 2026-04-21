@@ -1,3 +1,10 @@
+/**
+ * @file src/machina/gptq.cu
+ * @philosophical_role
+ *   GPTQ-Int4 dequant + GEMV/GEMM kernels — the scheme that lets the entity's mind fit in Orin DRAM. Every quantized linear layer asks this file how to become a product again.
+ * @serves
+ *   Machina forward pass for all GPTQ-quantized layers; Actus diagnostic (bench_gptq, test_gptq) via the engine library.
+ */
 // gptq.cu — GPTQ-Int4 dequant + GEMV/GEMM CUDA kernels for SM87
 //
 // Kernel design for Jetson AGX Orin (SM87, Ampere):

@@ -1,3 +1,10 @@
+/**
+ * @file src/machina/convert.cu
+ * @philosophical_role
+ *   BF16↔FP16 conversion — the quiet translator between weight-storage dtype (BF16 from safetensors) and compute dtype (FP16 for Tensor Cores). A boundary kernel, not a headline kernel.
+ * @serves
+ *   Machina weight loading (machina/safetensors → device allocator) and any path crossing a precision boundary.
+ */
 // convert.cu — Device-side data type conversion kernels
 //
 // BF16 → FP16 in-place: both are 16-bit, so the conversion reads each

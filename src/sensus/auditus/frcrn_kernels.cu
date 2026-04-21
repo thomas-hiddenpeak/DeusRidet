@@ -1,3 +1,10 @@
+/**
+ * @file src/sensus/auditus/frcrn_kernels.cu
+ * @philosophical_role
+ *   FRCRN helper kernels — fused BN+act, STFT framing, iSTFT overlap-add, FSMN depthwise conv, SE pooling, complex arithmetic. The small pieces frcrn_gpu.cu stitches together.
+ * @serves
+ *   Auditus frcrn_gpu.cu orchestration; not called outside FRCRN.
+ */
 // frcrn_kernels.cu — Custom CUDA kernels for FRCRN speech enhancement.
 //
 // Elementwise operations, fused BatchNorm+activation, STFT framing,

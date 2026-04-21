@@ -1,3 +1,10 @@
+/**
+ * @file src/sensus/auditus/mel_gpu.cu
+ * @philosophical_role
+ *   Mel-spectrogram kernel — the bridge from raw PCM to what an ASR encoder can actually consume. A perceptual primitive shared by every speech model in the project.
+ * @serves
+ *   Auditus pipeline mel stage feeding VAD and ASR.
+ */
 // mel_gpu.cu — GPU Mel-spectrogram kernel (Qwen3-ASR / Whisper compatible).
 //
 // Single fused kernel per frame: window → real-DFT → power spectrum →

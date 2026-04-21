@@ -1,3 +1,10 @@
+/**
+ * @file src/sensus/auditus/fsmn_fbank_gpu.cu
+ * @philosophical_role
+ *   FSMN-VAD mel-fbank kernel — the feature extractor specific to the FSMN voice-activity detector (distinct parameters from the Whisper mel used by ASR).
+ * @serves
+ *   Auditus VAD stage when fsmn-VAD source is selected via awaken_router.
+ */
 // fsmn_fbank_gpu.cu — GPU Fbank kernel.
 //
 // Fused kernel: window → DFT → power spectrum → Mel filterbank → log

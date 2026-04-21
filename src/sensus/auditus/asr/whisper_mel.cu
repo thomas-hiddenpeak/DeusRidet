@@ -1,3 +1,10 @@
+/**
+ * @file src/sensus/auditus/asr/whisper_mel.cu
+ * @philosophical_role
+ *   Whisper-compatible mel — the mel configuration the Qwen3-ASR encoder was trained against (pad-reflect + log10 + Whisper normalise). Distinct from the Auditus mel used by VAD.
+ * @serves
+ *   Auditus ASR pipeline only (ASR encoder input).
+ */
 // whisper_mel.cu — GPU Whisper Mel Spectrogram implementation
 //
 // Pipeline: reflect-pad → frame+window → cuFFT R2C → power spectrum

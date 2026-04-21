@@ -1,3 +1,10 @@
+/**
+ * @file src/machina/fp16_gemm.cu
+ * @philosophical_role
+ *   FP16 GEMM kernel for SM87 — the Tensor-Core muscle under every Machina layer, the raw multiplication that dense inference reduces to.
+ * @serves
+ *   Machina linear layers (forward.cu, layer.cu) via fp16_gemm() and fp16_repack_b().
+ */
 // fp16_gemm.cu — FP16 GEMM kernel for SM87 (Orin)
 //
 // Computes C[M,N] = A[M,K] @ B_repacked^T where B is pre-repacked

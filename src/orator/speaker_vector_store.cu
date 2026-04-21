@@ -1,3 +1,10 @@
+/**
+ * @file src/orator/speaker_vector_store.cu
+ * @philosophical_role
+ *   On-GPU speaker-embedding store and nearest-neighbour kernel — the substrate of who-is-speaking. Long-term memory about perception itself, not about content.
+ * @serves
+ *   Orator speaker-identification path fed by wavlm_ecapa_encoder; Auditus tracker (audio_pipeline.cpp) consumes via facade.
+ */
 // speaker_vector_store.cu — GPU kernels and implementation for SpeakerVectorStore.
 //
 // Kernels:

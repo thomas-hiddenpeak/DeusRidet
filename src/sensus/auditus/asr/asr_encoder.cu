@@ -1,3 +1,10 @@
+/**
+ * @file src/sensus/auditus/asr/asr_encoder.cu
+ * @philosophical_role
+ *   Qwen3-ASR audio encoder — the act of listening made mathematical. Conv2D front end + 24-layer bidirectional Transformer, turning mel frames into acoustic tokens.
+ * @serves
+ *   Auditus ASR pipeline; consumer of mel_gpu/whisper_mel output; feeds asr_decoder.
+ */
 // asr_encoder.cu — Qwen3-ASR Audio Encoder implementation
 //
 // Conv2D frontend + 24-layer bidirectional Transformer + post-projection.

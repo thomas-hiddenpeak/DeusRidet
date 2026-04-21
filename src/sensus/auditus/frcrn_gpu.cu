@@ -1,3 +1,10 @@
+/**
+ * @file src/sensus/auditus/frcrn_gpu.cu
+ * @philosophical_role
+ *   FRCRN GPU forward pass — STFT + UNet + iSTFT denoise. The entity hears cleaner what the room contaminated. Complete inference pipeline in one TU.
+ * @serves
+ *   Auditus pipeline denoise stage; runtime-toggleable via awaken_router.
+ */
 // frcrn_gpu.cu — FRCRN GPU forward pass implementation.
 //
 // Complete inference pipeline:

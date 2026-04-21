@@ -1,3 +1,10 @@
+/**
+ * @file src/orator/wavlm_ecapa_encoder.cu
+ * @philosophical_role
+ *   WavLM-Large + ECAPA-TDNN encoder — turns a short speech window into a 192-dim speaker embedding. The perceptual act of abstracting identity from voice.
+ * @serves
+ *   Orator speaker_vector_store (for DB search); Auditus speaker path (for per-segment identification).
+ */
 // wavlm_ecapa_encoder.cu — WavLM-Large + ECAPA-TDNN implementation (Part 1)
 //
 // Implements: weight loading, scratch management, CNN feature extractor.

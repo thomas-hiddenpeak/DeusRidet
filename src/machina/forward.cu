@@ -1,3 +1,10 @@
+/**
+ * @file src/machina/forward.cu
+ * @philosophical_role
+ *   The forward pass itself — the sequence of layer calls that turns a token ID into a next-token distribution. If Conscientia is the loop, forward.cu is the body of one iteration of the loop.
+ * @serves
+ *   Conscientia per-tick decode; Actus diagnostic verbs (test_forward, bench_prefill, profile_forward).
+ */
 // forward.cu — Qwen3.5 forward pass implementation
 //
 // Single-token decode path. Each function assumes M=1.

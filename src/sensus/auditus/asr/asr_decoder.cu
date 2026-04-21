@@ -1,3 +1,10 @@
+/**
+ * @file src/sensus/auditus/asr/asr_decoder.cu
+ * @philosophical_role
+ *   Qwen3-ASR text decoder — 28-layer GQA decoder turning encoder output into token IDs. The last perceptual step before Conscientia sees words.
+ * @serves
+ *   Auditus ASR pipeline tail; publishes tokens to the facade which forwards them to Conscientia via Nexus.
+ */
 // asr_decoder.cu — Qwen3-ASR Text Decoder implementation
 //
 // 28-layer GQA decoder with MRoPE, per-head Q/K RMSNorm, SwiGLU MLP.

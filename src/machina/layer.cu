@@ -1,3 +1,10 @@
+/**
+ * @file src/machina/layer.cu
+ * @philosophical_role
+ *   Per-layer primitives — RMSNorm, embedding lookup, element-wise fusion, sampling. The small verbs Machina stitches together to form a forward pass. Part 1 of the layer operator set.
+ * @serves
+ *   Machina forward.cu stages; Conscientia per-tick decode; Actus probes (test_forward) via public headers.
+ */
 // layer.cu — CUDA kernels for Qwen3.5 layer operations (Part 1)
 //
 // Implements: RMSNorm, Gated RMSNorm, embedding lookup, element-wise ops,

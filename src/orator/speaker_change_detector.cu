@@ -1,3 +1,10 @@
+/**
+ * @file src/orator/speaker_change_detector.cu
+ * @philosophical_role
+ *   Speaker-change detector — cosine distance on consecutive WavLM windows. The lightweight test that says *a different voice just started*, driving segmentation upstream of full identification.
+ * @serves
+ *   Auditus pipeline segmentation (audio_pipeline.cpp) for multi-speaker turn-taking.
+ */
 // speaker_change_detector.cu — Lightweight speaker change detection
 //
 // Uses the WavLM CNN frontend to extract 512-dim features from short

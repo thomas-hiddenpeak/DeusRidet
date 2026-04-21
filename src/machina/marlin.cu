@@ -1,3 +1,10 @@
+/**
+ * @file src/machina/marlin.cu
+ * @philosophical_role
+ *   Marlin INT4 GEMM — the kernel by which a quantized weight becomes a fast product. GPTQ is the compression scheme; Marlin is how Machina *earns* that compression back as throughput on SM87.
+ * @serves
+ *   Machina GPTQ path (gptq.cu, gptq_gemm_v2.cu) for quantized linear layers across the Qwen3 stack.
+ */
 // marlin.cu — Marlin GPTQ INT4 GEMM kernel adapted for SM87 (Orin)
 //
 // Adapted from IST-DASLab/marlin (Apache 2.0 License).

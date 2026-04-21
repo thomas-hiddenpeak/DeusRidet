@@ -1,3 +1,10 @@
+/**
+ * @file src/sensus/auditus/mossformer2.cu
+ * @philosophical_role
+ *   MossFormer2 native CUDA inference — the speech-separation front end that lets Auditus hear one speaker when two overlap. A perceptual act, not just a signal-processing stage.
+ * @serves
+ *   Auditus pipeline (audio_pipeline.cpp) multi-speaker path; upstream of VAD and ASR.
+ */
 // mossformer2.cu — MossFormer2 native CUDA forward pass implementation.
 //
 // Adapted from ClearerVoice-Studio MossFormer2 (Apache-2.0).

@@ -1,3 +1,10 @@
+/**
+ * @file src/orator/speaker_encoder.cu
+ * @philosophical_role
+ *   CAM++ speaker encoder — alternative/legacy embedding path kept for compatibility with speaker databases built in earlier stages.
+ * @serves
+ *   Orator speaker_db when CAM++ embeddings are required; not the default today.
+ */
 // speaker_encoder.cu — CAM++ GPU Speaker Encoder implementation.
 //
 // Adapted from qwen35-orin speaker_encoder_gpu.cu (Thomas Zhu)

@@ -1,3 +1,10 @@
+/**
+ * @file src/machina/gptq_gemm_v2.cu
+ * @philosophical_role
+ *   GPTQ GEMM v2 — the second-generation path, Marlin-tile loop with non-persistent CTA scheduling. Kept alongside gptq.cu so the older GEMV path remains available for shapes where v2 is not a win.
+ * @serves
+ *   Machina linear layers where M>1 prefill benefits from tile-level blocking; selected at runtime by shape.
+ */
 // gptq_gemm_v2.cu — GPTQ INT4 GEMM v2: Marlin-format weights, SM87-tuned
 //
 // Non-persistent CTA-level tiling with Marlin's proven inner loop.

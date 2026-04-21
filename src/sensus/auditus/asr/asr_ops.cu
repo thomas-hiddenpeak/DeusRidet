@@ -1,3 +1,10 @@
+/**
+ * @file src/sensus/auditus/asr/asr_ops.cu
+ * @philosophical_role
+ *   ASR-specific operator kernels — ops the general Machina toolbox does not provide because they are ASR-shaped (relative position bias, conformer bits). Kept here to avoid polluting Machina.
+ * @serves
+ *   Auditus asr_encoder and asr_decoder only.
+ */
 // asr_ops.cu — ASR-specific CUDA operator implementations
 //
 // Adapted from qwen35-orin (src/plugins/asr/audio_ops.cu): complete set of

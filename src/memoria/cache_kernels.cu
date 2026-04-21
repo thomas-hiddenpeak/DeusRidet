@@ -1,3 +1,10 @@
+/**
+ * @file src/memoria/cache_kernels.cu
+ * @philosophical_role
+ *   Paged KV cache extract/inject kernels — the physical act of moving a block between GPU resident memory and SSD overflow. Forgetting is not deletion; it is descent into a deeper tier.
+ * @serves
+ *   Memoria cache_manager tier transitions; Machina paged_attention pointer lookups.
+ */
 // cache_kernels.cu — CUDA kernels for paged KV cache extract/inject
 //
 // One thread per __half element. Bandwidth-limited on DRAM (~192 GB/s Orin).

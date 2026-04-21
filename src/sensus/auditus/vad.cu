@@ -1,3 +1,10 @@
+/**
+ * @file src/sensus/auditus/vad.cu
+ * @philosophical_role
+ *   Energy VAD — the simplest voice-activity detector, GPU-accelerated only at the energy computation. Keeps the state machine on CPU where sequential hangover logic is natural.
+ * @serves
+ *   Auditus pipeline default VAD path when silero/fsmn are disabled; diagnostic baseline.
+ */
 // vad.cu — Energy-based VAD with GPU batch energy computation.
 //
 // Simple but effective for pipeline testing. The GPU kernel computes

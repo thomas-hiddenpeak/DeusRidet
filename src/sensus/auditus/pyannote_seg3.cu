@@ -1,3 +1,10 @@
+/**
+ * @file src/sensus/auditus/pyannote_seg3.cu
+ * @philosophical_role
+ *   Pyannote segmentation-3.0 — SincNet + BiLSTM speaker-segmentation inference, used for overlap-aware multi-speaker decisions. A different perceptual question from MossFormer2 (identify boundaries vs. separate streams).
+ * @serves
+ *   Auditus tracker for turn boundary & overlap evidence; complements speaker_change_detector.
+ */
 // pyannote_seg3.cu — Native CUDA inference for pyannote/segmentation-3.0.
 //
 // SincNet + 4x BiLSTM + Linear head.
