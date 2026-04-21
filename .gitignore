@@ -9,3 +9,10 @@ __pycache__/
 models/
 checkpoints/MossFormer2_SS_16K/last_best_checkpoint
 checkpoints/MossFormer2_SS_16K/last_best_checkpoint.pt
+
+# Stale benchmark artifacts — only tests/test.mp3 + tests/test.txt are baseline.
+tests/test_output_*.txt
+tests/*_mapped.txt
+tests/*.server.log.txt
+tests/asrTest*.txt
+
