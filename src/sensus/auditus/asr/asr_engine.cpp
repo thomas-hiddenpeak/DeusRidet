@@ -21,20 +21,16 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <vector>
 
 namespace deusridet {
 namespace asr {
 
 // ITN post-processing (apply_itn, collapse_repeats) lives in asr_engine_itn.cpp
-// under R1 — its 130-line block of Chinese-numeral parsing is self-contained
-// and kept this file over the 500-line .cpp hard cap.
+// — its 130-line Chinese-numeral parsing block is self-contained and keeps
+// this file under the 500-line .cpp hard cap.
 
-// =========================================================================
-
-// =========================================================================
-// Helper: allocate device memory and copy from host data
-// =========================================================================
-
+// ----- Helper: allocate device memory and copy from host data -----
 static __nv_bfloat16* alloc_and_copy(const void* src, size_t nbytes,
                                        std::vector<void*>& allocs) {
     __nv_bfloat16* d_ptr = nullptr;
@@ -44,9 +40,7 @@ static __nv_bfloat16* alloc_and_copy(const void* src, size_t nbytes,
     return d_ptr;
 }
 
-// =========================================================================
-// ASREngine
-// =========================================================================
+// ----- ASREngine -----
 
 ASREngine::ASREngine() = default;
 
@@ -65,9 +59,7 @@ ASREngine::~ASREngine() {
     if (stream_)            cudaStreamDestroy(stream_);
 }
 
-// =========================================================================
-// Prompt construction
-// =========================================================================
+// ----- Prompt construction -----
 
 void ASREngine::build_prompt(int encoder_out_len, std::vector<int>& token_ids,
                               const std::string& language) {
@@ -288,7 +280,24 @@ ASRResult ASREngine::transcribe(const float* samples, int num_samples,
 
     auto t_total_start = std::chrono::steady_clock::now();
 
-    // TODO: resample if sample_rate != 16000. For now, assume 16kHz.
+    // Resample to 16 kHz when caller rate differs. Live WS path feeds 16 kHz
+    // and skips this branch. Linear interp is a transport fix; polyphase sinc
+    // can replace it once an objective ASR metric exists.
+    std::vector<float> resampled;
+    if (sample_rate > 0 && sample_rate != 16000 && num_samples > 0) {
+        const double step = (double)sample_rate / 16000.0;
+        const int out_n = (int)((double)num_samples / step);
+        const int in_last = num_samples - 1;
+        if (out_n <= 0) return result;
+        resampled.resize((size_t)out_n);
+        for (int i = 0; i < out_n; ++i) {
+            double src = (double)i * step; int i0 = (int)src;
+            if (i0 >= in_last) { resampled[i] = samples[in_last]; continue; }
+            float f = (float)(src - (double)i0);
+            resampled[i] = samples[i0] * (1.0f - f) + samples[i0 + 1] * f;
+        }
+        samples = resampled.data(); num_samples = out_n;
+    }
 
     // 1. Mel spectrogram (F32 on GPU)
     auto t0 = std::chrono::steady_clock::now();
