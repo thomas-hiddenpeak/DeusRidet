@@ -339,19 +339,6 @@ private:
     int seg_overlap_chunks_ = 0;  // count overlap-detected chunks in current segment
     int seg_total_chunks_ = 0;    // total chunks in current segment
 
-    // Warm-up spectral clustering: collect embeddings during warm-up,
-    // then run one-shot spectral clustering to find speaker count and centroids.
-    // After clustering, rebuild the speaker store and lock registration.
-    // Dual-encoder warm-up: collect both CAM++ (192D) and WL-ECAPA (192D)
-    // embeddings, concatenate to 384D for better clustering, then store
-    // only CAM++ centroids for online matching.
-    static constexpr int kWarmupCount = 999999;  // disabled — warmup with K=5 hurts (81.3% vs 90.5%).
-                                                  // v14 pre-warmup (63.7%) > post-warmup (54%).
-    std::vector<std::vector<float>> warmup_embeddings_;       // CAM++ 192D
-    std::vector<std::vector<float>> warmup_wlecapa_embs_;     // WL-ECAPA 192D (if available)
-    std::vector<float> warmup_timestamps_;   // mid-time in seconds
-    bool warmup_done_ = false;
-
     WavLMEcapaEncoder wlecapa_enc_;
     SpeakerVectorStore wlecapa_db_{"WLEcapaDb", 192, 0.15f};
 
