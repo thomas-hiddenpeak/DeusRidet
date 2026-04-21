@@ -6,7 +6,10 @@
  *     dispatcher, and each algorithmic stage is now an independently
  *     inspectable, trace-taggable helper.
  * @serves `spectral_cluster.cpp` orchestration; implementations live in
- *     `spectral_cluster_stages.cpp`.
+ *     three peer TUs by phase:
+ *       - `spectral_cluster_affinity.cpp`       — Stages 0–3
+ *       - `spectral_cluster_embed.cpp`          — Stages 4–6
+ *       - `spectral_cluster_postprocess.cpp`    — Stages 7–9
  *
  * Stage numbering matches the `// ===== Step N =====` headings of the
  * original monolithic body (pre-split at commit `0e65664`):
