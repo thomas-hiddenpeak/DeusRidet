@@ -268,6 +268,34 @@ private:
     // Attempt progressive refinement using accumulated segment audio.
     void try_refine();
 
+    // ---- check() stage decomposition (Step 11 A2) ----
+    // The public `check()` method is a thin orchestrator; each stage below
+    // is an independently inspectable unit with a single responsibility.
+    // Implementations split across speaker_tracker_check.cpp (orchestrator +
+    // gate + pcm + stats) and speaker_tracker_check_stages.cpp (identify
+    // branch + track branch + 4 track sub-stages).
+    bool check_should_run_(bool& is_fast_path, int& extract_samples);
+    bool check_extract_pcm_(int extract_samples, int& n,
+                            std::vector<float>& pcm_f32, int& read_pos);
+    void check_identify_new_(const std::vector<float>& emb, float f0,
+                             int n, bool is_fast_path);
+    void check_track_existing_(const std::vector<float>& emb, float f0, int n,
+                               std::vector<float>& pcm_f32,
+                               std::vector<float>& pcm_raw_f32,
+                               int read_pos, float jitter);
+    void track_compute_signals_(const std::vector<float>& emb,
+                                const std::vector<float>& pcm_f32, int n,
+                                float jitter, float& sim_to_ref,
+                                bool& overlap_suspected);
+    void track_handle_change_(const std::vector<float>& emb, float f0,
+                              int n, float sim_to_ref);
+    void track_handle_overlap_(std::vector<float>& pcm_f32,
+                               std::vector<float>& pcm_raw_f32,
+                               int read_pos, int n);
+    void track_handle_continue_(const std::vector<float>& emb, float f0,
+                                float sim_to_ref);
+    void check_update_stats_(float f0, float jitter, float lat_ms);
+
     // ---- State ----
     WavLMEcapaEncoder* enc_ = nullptr;
     SpeakerVectorStore db_{"TrackerDb", 192, 0.15f};
