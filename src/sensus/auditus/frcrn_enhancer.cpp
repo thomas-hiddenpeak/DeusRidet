@@ -1,3 +1,8 @@
+/**
+ * @file frcrn_enhancer.cpp
+ * @philosophical_role FRCRN speech-enhancement host-side driver. The pre-ASR noise-reduction step — the entity cleans its own hearing before it attends.
+ * @serves Auditus pipeline, optional pre-ASR stage.
+ */
 // frcrn_enhancer.cpp — FRCRN speech enhancement via custom CUDA inference.
 //
 // Delegates to FrcrnGpu for actual GPU inference.

@@ -1,3 +1,8 @@
+/**
+ * @file speaker_db.cpp
+ * @philosophical_role Persistent speaker database — names, exemplars, aliases. The entity remembers voices across restarts; forgetting a known speaker is a bug, not an optimization.
+ * @serves Orator identification, Nexus speaker-list broadcasts, Actus profile commands.
+ */
 // speaker_db.cpp — Online speaker identification and clustering.
 
 #include "speaker_db.h"

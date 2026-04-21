@@ -1,3 +1,8 @@
+/**
+ * @file fsmn_vad.h
+ * @philosophical_role Declaration of the FSMN VAD facade.
+ * @serves Auditus pipeline.
+ */
 // fsmn_vad.h — FunASR FSMN VAD native C++ inference (safetensors weights).
 //
 // Pipeline: PCM → GPU Fbank(80-bin, Hamming+preemph, 25ms/10ms) → LFR(5x) → CMVN → FP32 forward → softmax

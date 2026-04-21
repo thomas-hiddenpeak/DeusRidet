@@ -1,3 +1,8 @@
+/**
+ * @file overlap_detector.cpp
+ * @philosophical_role Binary 'are there >=2 voices right now' detector. Cheap gate in front of the expensive separator.
+ * @serves Auditus pipeline, speech_separator.
+ */
 // overlap_detector.cpp — pyannote/segmentation-3.0 native CUDA inference.
 //
 // Powerset decoding: 7 classes → per-frame overlap detection.

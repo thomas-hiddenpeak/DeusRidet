@@ -1,3 +1,8 @@
+/**
+ * @file overlap_detector.h
+ * @philosophical_role Declaration of the overlap-detector facade.
+ * @serves Auditus pipeline.
+ */
 // overlap_detector.h — Learned Overlap Speech Detection via pyannote/segmentation-3.0.
 //
 // Model: PyanNet (SincNet + LSTM + Linear), ~5 MB, MIT license.

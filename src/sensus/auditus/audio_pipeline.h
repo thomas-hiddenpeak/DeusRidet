@@ -1,3 +1,8 @@
+/**
+ * @file audio_pipeline.h
+ * @philosophical_role Declaration of the auditory pipeline facade. Single seam through which PCM enters the entity; stats fields here are read by Actus verbs for JSON export.
+ * @serves Nexus, Conscientia, Actus (awaken).
+ */
 // audio_pipeline.h — Real-time audio processing pipeline.
 //
 // Wires: WS PCM input → Ring Buffer → Gain → Mel (GPU) → Energy VAD

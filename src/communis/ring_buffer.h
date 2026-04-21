@@ -1,3 +1,8 @@
+/**
+ * @file ring_buffer.h
+ * @philosophical_role Lock-free SPSC ring buffer — the canonical seam between producer and consumer threads. Decouples rhythm: the perceiver's pace must not dictate the thinker's pace.
+ * @serves Auditus (PCM ingress), Conscientia (inter-thread handoff), Vox (PCM egress) and anywhere a bounded queue is needed without a mutex.
+ */
 // ring_buffer.h — Lock-free SPSC (single-producer single-consumer) ring buffer.
 //
 // Designed for the audio pipeline: WS callback thread produces PCM chunks,

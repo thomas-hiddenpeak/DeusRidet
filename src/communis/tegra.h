@@ -1,3 +1,8 @@
+/**
+ * @file tegra.h
+ * @philosophical_role Declaration of the Tegra introspection surface. Keeps hardware-specific knowledge funneled through one header so that subsystems never grep sysfs directly.
+ * @serves Vigilia, bench tools, awaken startup.
+ */
 // tegra.h — Tegra platform utilities
 //
 // Memory status, page cache management, and cleanup for Jetson iGPU.

@@ -1,3 +1,8 @@
+/**
+ * @file log.h
+ * @philosophical_role Structured logging primitive. Every log line is an observation the entity (or its operator) can later reread — logs are short-term memoranda, not debug noise.
+ * @serves Every subsystem; no subsystem prints to stderr directly.
+ */
 // log.h — Structured logging with severity levels
 //
 // Simple, header-only logging for DeusRidet. Outputs to stderr with

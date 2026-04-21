@@ -1,3 +1,8 @@
+/**
+ * @file speaker_db.h
+ * @philosophical_role Declaration of the speaker DB facade. Single owner of the on-disk speaker identity store.
+ * @serves Orator, Actus, Nexus.
+ */
 // speaker_db.h — Online speaker identification and clustering.
 //
 // Maintains a database of known speaker embeddings. New embeddings are matched

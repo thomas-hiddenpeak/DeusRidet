@@ -1,3 +1,8 @@
+/**
+ * @file asr_engine.h
+ * @philosophical_role Declaration of the ASR engine facade.
+ * @serves Auditus pipeline, Actus.
+ */
 // asr_engine.h — Qwen3-ASR inference engine
 //
 // Top-level orchestrator:

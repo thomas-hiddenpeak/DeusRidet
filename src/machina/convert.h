@@ -1,3 +1,8 @@
+/**
+ * @file convert.h
+ * @philosophical_role Declaration of device-side dtype conversion kernels. Where numerical representations cross — BF16 weights to FP16 runtime — must happen in exactly one place.
+ * @serves Machina weight loading, quantized GEMM setup.
+ */
 // convert.h — Device-side data type conversion utilities
 
 #pragma once

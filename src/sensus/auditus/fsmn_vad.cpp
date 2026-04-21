@@ -1,3 +1,8 @@
+/**
+ * @file fsmn_vad.cpp
+ * @philosophical_role FSMN-based VAD. A smarter alternative to energy VAD — it recognises speech texture, not just loudness.
+ * @serves Auditus pipeline segmentation.
+ */
 // fsmn_vad.cpp — FunASR FSMN VAD native C++ inference (FP32, safetensors).
 //
 // Architecture: in_linear1(400->140) -> in_linear2(140->250) -> ReLU

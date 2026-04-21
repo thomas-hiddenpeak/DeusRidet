@@ -1,3 +1,8 @@
+/**
+ * @file model.cpp
+ * @philosophical_role The model — weights + shape + tokenizer + forward dispatch, as one addressable object. 'Model' is the loaded body of the entity; destroying it is dying.
+ * @serves Actus::load_model, Actus::awaken, Machina forward.
+ */
 // model.cpp — Qwen3.5 weight loading (multi-model support)
 //
 // Loads weights from multi-shard safetensors into device memory.

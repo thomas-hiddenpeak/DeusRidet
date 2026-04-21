@@ -1,3 +1,8 @@
+/**
+ * @file speaker_vector_store.h
+ * @philosophical_role Declaration of the exemplar vector store with GPU batch-dot and per-speaker reduction kernels. Identification is a cosine-similarity argmax over all remembered voices.
+ * @serves Orator identification fast path.
+ */
 // speaker_vector_store.h — GPU-accelerated speaker vector store with multi-exemplar support.
 //
 // Replaces SpeakerDb for production scenarios with thousands of speakers.

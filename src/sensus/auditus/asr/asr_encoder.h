@@ -1,3 +1,8 @@
+/**
+ * @file asr_encoder.h
+ * @philosophical_role Declaration of the Qwen3-ASR audio encoder (Conv2D frontend + 24-layer bidirectional transformer).
+ * @serves ASR engine.
+ */
 // asr_encoder.h — Qwen3-ASR Audio Encoder
 //
 // Whisper-style encoder:

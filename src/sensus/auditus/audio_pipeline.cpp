@@ -1,3 +1,8 @@
+/**
+ * @file audio_pipeline.cpp
+ * @philosophical_role End-to-end auditory pipeline: PCM ingress -> VAD -> enhancement -> ASR -> diarisation -> publish. Perception shapes consciousness; this file is the perceptual spine.
+ * @serves ConscientiaStream input queue, Nexus WS ingress, Orator, Somnium recall inputs.
+ */
 // audio_pipeline.cpp — Real-time audio processing pipeline implementation.
 //
 // Processing thread: pull PCM from ring buffer → push to MelSpectrogram (GPU)

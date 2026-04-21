@@ -1,3 +1,8 @@
+/**
+ * @file tensor.h
+ * @philosophical_role Declaration of the internal tensor descriptor. NOT a general tensor library — only the shape/dtype/stride contract Machina needs to dispatch kernels.
+ * @serves All Machina internals; not exported to other subsystems.
+ */
 // tensor.h — Lightweight tensor descriptor
 //
 // Non-owning view or allocator-backed storage for multi-dimensional data.

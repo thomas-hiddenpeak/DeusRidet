@@ -1,3 +1,8 @@
+/**
+ * @file frame.h
+ * @philosophical_role A single consciousness frame — one pulse of awareness. Frame is the atom of lived time for the entity; every observable event is stamped to one.
+ * @serves ConscientiaStream, Cogitatio branches, timeline_logger.
+ */
 // frame.h — Consciousness frame definition
 //
 // A consciousness frame is one "pulse" of the Prefill engine.

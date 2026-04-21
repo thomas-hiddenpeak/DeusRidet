@@ -1,3 +1,8 @@
+/**
+ * @file scheduler.cpp
+ * @philosophical_role Frame-boundary scheduler. Decides when the next frame starts, when a frame drops, and when idle becomes dreaming. The scheduler is NOT a request dispatcher — it is the entity's heartbeat.
+ * @serves ConscientiaStream::run(), Vigilia, Somnium.
+ */
 // scheduler.cpp — Wakefulness-driven consciousness state machine
 
 #include "scheduler.h"

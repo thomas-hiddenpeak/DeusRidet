@@ -1,3 +1,8 @@
+/**
+ * @file block_pool.cpp
+ * @philosophical_role Pool of fixed-size KV blocks on GPU. The working memory granule — what is remembered, forgotten, and swapped is always a whole block.
+ * @serves CacheManager, KVSwapper, Memoria importance scorer.
+ */
 // block_pool.cpp — GPU KV Cache block pool implementation
 
 #include "block_pool.h"

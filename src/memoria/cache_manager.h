@@ -1,3 +1,8 @@
+/**
+ * @file cache_manager.h
+ * @philosophical_role Declaration of the three-tier cache manager. Sole owner of the 'what is in GPU right now' truth.
+ * @serves Machina forward, Somnium, Nexus state broadcast.
+ */
 // cache_manager.h — Unified KV Cache management for consciousness stream
 //
 // Manages the complete lifecycle of paged KV blocks:

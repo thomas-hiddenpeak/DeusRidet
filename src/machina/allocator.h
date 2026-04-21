@@ -1,3 +1,8 @@
+/**
+ * @file allocator.h
+ * @philosophical_role Declaration of the device arena. Forbids ad-hoc cudaMalloc outside this header; Machina's memory budget is centrally accountable.
+ * @serves Machina internals, Memoria cache allocation, Orator/Sensus scratch buffers.
+ */
 // allocator.h — Memory allocators for Tegra unified memory architecture
 //
 // Three allocator types optimized for Jetson AGX Orin (SM87):

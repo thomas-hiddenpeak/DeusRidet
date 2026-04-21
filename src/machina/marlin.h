@@ -1,3 +1,8 @@
+/**
+ * @file marlin.h
+ * @philosophical_role Declaration of the Marlin GPTQ INT4 kernel adapted for Orin. Upstream attribution preserved in the .cu; this header is the adapter seam.
+ * @serves Machina INT4 fast path.
+ */
 // marlin.h — Marlin-style GPTQ INT4 GEMM kernel for SM87 (Orin)
 //
 // Adapted from IST-DASLab/marlin (Apache 2.0 License) for DeusRidet.

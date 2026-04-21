@@ -1,3 +1,8 @@
+/**
+ * @file model.h
+ * @philosophical_role Declaration of the Machina model facade. One object owns the body: weights, cache shape, tokenizer handle, dtype regime.
+ * @serves Actus verbs and ConscientiaStream.
+ */
 // model.h — Qwen3.5 model weight structures and forward pass
 //
 // Supports multiple Qwen3.5 variants (9B BF16, 27B GPTQ-Int4, etc.)

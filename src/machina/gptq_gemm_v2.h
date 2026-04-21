@@ -1,3 +1,8 @@
+/**
+ * @file gptq_gemm_v2.h
+ * @philosophical_role Declaration of GPTQ INT4 GEMM v2 (Marlin-format weights, SM87-tuned). The second Machina GEMM dialect: quantized weights, higher arithmetic intensity per byte loaded.
+ * @serves Machina forward pass for GPTQ-Int4 models.
+ */
 // gptq_gemm_v2.h — GPTQ INT4 GEMM v2: Marlin-format weights, SM87-tuned
 //
 // Absorbs Marlin's key advantages (pre-permuted weight layout, 4-stage

@@ -1,3 +1,8 @@
+/**
+ * @file fp16_gemm.h
+ * @philosophical_role Declaration of the FP16 GEMM kernel for SM87 — the dense matmul primitive for small-M prefill and decode. One of Machina's two GEMM dialects.
+ * @serves Machina forward pass when weights are FP16.
+ */
 // fp16_gemm.h — FP16 GEMM kernel for SM87 (Orin)
 //
 // Custom high-efficiency GEMM for FP16 attention weight projections.

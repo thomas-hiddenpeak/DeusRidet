@@ -1,3 +1,8 @@
+/**
+ * @file ws_server.cpp
+ * @philosophical_role Sole external network surface — WebSocket + HTTP. Nexus translates between the outside world and internal subsystems; no subsystem exposes itself to the network directly.
+ * @serves Actus::awaken binds it; Auditus, Conscientia, Vox facades pipe through it.
+ */
 // ws_server.cpp — Self-contained WebSocket + static-file server.
 // Handles WS upgrade, binary/text frames, and serves the WebUI.
 // Uses epoll (level-triggered) for non-blocking I/O.

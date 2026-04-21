@@ -1,3 +1,8 @@
+/**
+ * @file attention_modulator.cpp
+ * @philosophical_role Pulsed attention budget allocator. Consciousness is not constant-throughput — it is rhythmic: Prefill pulses are spaced to leave Decode room to think.
+ * @serves ConscientiaStream::tick() and the Prefill/Decode budget split.
+ */
 // attention_modulator.cpp — Wakefulness modulation implementation
 //
 // Computes wakefulness boost from input signals.

@@ -1,3 +1,8 @@
+/**
+ * @file speech_separator.h
+ * @philosophical_role Declaration of the speech-separator facade.
+ * @serves Auditus pipeline.
+ */
 // speech_separator.h — MossFormer2 Speech Separation via native CUDA.
 //
 // Model: MossFormer2_SS_16K from ClearerVoice-Studio (Apache-2.0)

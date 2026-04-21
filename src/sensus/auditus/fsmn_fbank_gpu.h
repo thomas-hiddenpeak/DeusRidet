@@ -1,3 +1,8 @@
+/**
+ * @file fsmn_fbank_gpu.h
+ * @philosophical_role Declaration of the fused FSMN Fbank kernel used by VAD and FRCRN frontends.
+ * @serves Auditus VAD path, FRCRN enhancer.
+ */
 // fsmn_fbank_gpu.h — GPU Fbank feature extractor.
 //
 // Computes: window → DFT → power spectrum → Mel(80) → log on GPU.

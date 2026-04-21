@@ -1,3 +1,8 @@
+/**
+ * @file scheduler.h
+ * @philosophical_role Declaration of the frame-boundary scheduler interface. Enforces the invariant that only the scheduler advances the frame counter.
+ * @serves ConscientiaStream and any subsystem that needs frame phase.
+ */
 // scheduler.h — Wakefulness-driven consciousness state machine
 //
 // Manages the consciousness state transitions based on input activity:

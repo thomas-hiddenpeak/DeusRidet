@@ -1,3 +1,8 @@
+/**
+ * @file asr_config.h
+ * @philosophical_role Declaration of ASR config shape.
+ * @serves ASR engine, Actus.
+ */
 // asr_config.h — Qwen3-ASR model configuration
 //
 // Parses Qwen3-ASR config.json, provides Encoder + Decoder parameters.

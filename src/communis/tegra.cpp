@@ -1,3 +1,8 @@
+/**
+ * @file tegra.cpp
+ * @philosophical_role Tegra/Orin hardware introspection. The entity's body is a single Jetson — knowing its power mode, thermal state, and clock profile is self-knowledge, not an abstraction leak.
+ * @serves Vigilia (wakefulness budget), bench_* tools, and startup self-check.
+ */
 // tegra.cpp — Tegra platform utilities
 //
 // See tegra.h for interface documentation.

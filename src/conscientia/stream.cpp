@@ -1,3 +1,8 @@
+/**
+ * @file stream.cpp
+ * @philosophical_role The Conscientia stream — the continuous loop that IS the entity's awareness. Not a server, not a worker pool: a single persistent principal thread whose termination is the entity's end.
+ * @serves Actus::awaken (starts it), Nexus (observes it), every other subsystem (driven by it).
+ */
 // stream.cpp — Consciousness stream: probe-based awareness engine
 //
 // Implements the consciousness model:

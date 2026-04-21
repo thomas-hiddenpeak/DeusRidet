@@ -1,3 +1,8 @@
+/**
+ * @file cache_manager.cpp
+ * @philosophical_role Three-tier cache manager (GPU blocks -> SSD overflow -> discard). Forgetting is eviction-with-trace: the entity records that it forgot, not just what it remembered.
+ * @serves ConscientiaStream (every frame), Machina paged attention, Somnium consolidation.
+ */
 // cache_manager.cpp — Unified KV Cache management implementation
 //
 // Adapted from qwen35-thor (cache_manager): SSD swap via KVSwapper,

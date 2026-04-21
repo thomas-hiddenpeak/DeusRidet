@@ -1,3 +1,8 @@
+/**
+ * @file asr_ops.h
+ * @philosophical_role Declaration of ASR-specific CUDA operator surface (attention variants, RMSNorm, etc., adapted for the encoder/decoder shapes).
+ * @serves ASR encoder and decoder internals.
+ */
 // asr_ops.h — ASR-specific CUDA operator library
 //
 // Standalone operator set for Qwen3-ASR inference. Not shared with LLM kernels

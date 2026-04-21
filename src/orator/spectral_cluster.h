@@ -1,3 +1,8 @@
+/**
+ * @file spectral_cluster.h
+ * @philosophical_role Declaration of spectral clustering for unsupervised speaker diarization. When the entity does not yet know the voices, it at least counts them.
+ * @serves Orator diarisation pipeline.
+ */
 // spectral_cluster.h — Warm-up spectral clustering for online speaker diarization.
 //
 // Adapted from qwen35-orin transcription_pipeline.cpp (Phase 3b):

@@ -1,3 +1,8 @@
+/**
+ * @file vad.h
+ * @philosophical_role Declaration of the energy-VAD fallback + shared VAD state types.
+ * @serves Auditus pipeline, VAD implementations.
+ */
 // vad.h — Voice Activity Detection (energy-based, GPU-accelerated).
 //
 // Simple frame-level VAD operating on Mel spectrogram output.

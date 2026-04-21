@@ -1,3 +1,8 @@
+/**
+ * @file silero_vad.h
+ * @philosophical_role Declaration of the Silero VAD facade.
+ * @serves Auditus pipeline.
+ */
 // silero_vad.h — Silero VAD v5 native C++ inference (safetensors weights).
 //
 // Model: ~310K params, STFT(Conv1d) + 4×Conv1d encoder + LSTM + linear decoder.

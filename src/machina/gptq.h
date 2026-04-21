@@ -1,3 +1,8 @@
+/**
+ * @file gptq.h
+ * @philosophical_role Declaration of GPTQ Int4 dequant + GEMV/GEMM. The original GPTQ path kept alongside v2 for correctness cross-check and small-M decode.
+ * @serves Machina forward pass, weight-quant parity tests.
+ */
 // gptq.h — GPTQ-Int4 dequantization and linear layer kernels
 //
 // Supports GPTQ: bits=4, group_size=128, sym=true, desc_act=false

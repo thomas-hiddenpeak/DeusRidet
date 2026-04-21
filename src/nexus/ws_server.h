@@ -1,3 +1,8 @@
+/**
+ * @file ws_server.h
+ * @philosophical_role Declaration of the WS/HTTP server and the callback shape each subsystem must adhere to when publishing state.
+ * @serves Actus::awaken, all subsystem facades that publish to the WebUI.
+ */
 #pragma once
 // ws_server.h — Self-contained WebSocket + static file server (epoll-based).
 // Serves the WebUI and handles bidirectional binary/text WebSocket streams.

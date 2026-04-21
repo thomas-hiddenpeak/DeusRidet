@@ -1,3 +1,8 @@
+/**
+ * @file block_pool.h
+ * @philosophical_role Declaration of the block pool. Fixes the invariant that no subsystem allocates KV memory except through the pool.
+ * @serves Memoria internals.
+ */
 // block_pool.h — GPU KV Cache block pool allocator
 //
 // Pre-allocates a contiguous GPU buffer and manages fixed-size KV blocks

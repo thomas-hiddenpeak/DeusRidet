@@ -1,3 +1,8 @@
+/**
+ * @file pyannote_seg3.h
+ * @philosophical_role Declaration of pyannote/segmentation-3.0 native CUDA inference — SincNet + 4xBiLSTM + linear head, used for diarisation and overlap.
+ * @serves Auditus diarisation, Orator.
+ */
 // pyannote_seg3.h — Native CUDA implementation of pyannote/segmentation-3.0.
 //
 // Architecture: PyanNet (SincNet + 4x BiLSTM + Linear head)

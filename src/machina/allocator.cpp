@@ -1,3 +1,8 @@
+/**
+ * @file allocator.cpp
+ * @philosophical_role Device memory arena. Machina owns GPU bytes; every other subsystem borrows through this arena so that OOM is a single, visible event — not 20 scattered mallocs.
+ * @serves All Machina tensor allocations, KV cache backing storage.
+ */
 // allocator.cpp — Memory allocator implementations for Tegra iGPU
 //
 // Adapted from qwen35-orin (src/engine/allocator.cpp): allocator architecture

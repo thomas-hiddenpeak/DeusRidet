@@ -1,3 +1,8 @@
+/**
+ * @file tokenizer.h
+ * @philosophical_role Declaration of the tokenizer facade. Keeps the merge table and vocab in one place so Machina, ASR, and logs all tokenize consistently.
+ * @serves Machina, ASR decoder, debug logging of token streams.
+ */
 // tokenizer.h — GPT2-style Byte-Level BPE Tokenizer for Qwen3.5
 //
 // Loads vocab.json + merges.txt from model directory.

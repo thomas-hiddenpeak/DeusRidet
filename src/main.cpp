@@ -1,3 +1,8 @@
+/**
+ * @file main.cpp
+ * @philosophical_role The single entry point into the program. main() dispatches to one Actus verb and exits; it holds NO business logic, NO subsystem state — pure dispatch only.
+ * @serves Every Actus verb declared in actus.h.
+ */
 // main.cpp — DeusRidet entry point
 //
 // Thin entry: signal handling → config parsing → command dispatch → cleanup.

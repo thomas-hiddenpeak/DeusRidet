@@ -1,3 +1,8 @@
+/**
+ * @file tokenizer.cpp
+ * @philosophical_role BPE tokenizer. Words become tokens become embeddings become thought; the tokenizer is the entity's first translation from human text to internal state.
+ * @serves Machina prefill, ASR decoder output, Cogitatio inputs.
+ */
 // tokenizer.cpp — GPT2-style Byte-Level BPE Tokenizer implementation
 //
 // Qwen3.5 tokenizer: vocab.json (248044 base entries) + merges.txt (247587

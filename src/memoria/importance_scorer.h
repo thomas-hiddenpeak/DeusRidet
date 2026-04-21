@@ -1,3 +1,8 @@
+/**
+ * @file importance_scorer.h
+ * @philosophical_role Declaration of attention-score based KV block importance. Importance decays with inattention — forgetting begins as under-attention, not as erasure.
+ * @serves CacheManager eviction policy.
+ */
 // importance_scorer.h — Attention-score based KV block importance tracking
 //
 // Runs asynchronously on a separate CUDA stream after each Prefill frame.

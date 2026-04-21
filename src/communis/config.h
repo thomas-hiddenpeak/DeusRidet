@@ -1,3 +1,8 @@
+/**
+ * @file config.h
+ * @philosophical_role Declarative shape of every runtime knob the operator may turn. A header that forbids implicit defaults from spreading into subsystem code.
+ * @serves All subsystems that include runtime configuration.
+ */
 // config.h — Unified configuration parser
 //
 // Parses key=value .conf files. Supports comments (#), whitespace trimming.

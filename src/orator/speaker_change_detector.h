@@ -1,3 +1,8 @@
+/**
+ * @file speaker_change_detector.h
+ * @philosophical_role Declaration of lightweight speaker-change detection over the WavLM CNN frontend. Detecting 'someone else is speaking now' is a cheaper, faster question than 'who is it' and must be answerable per frame.
+ * @serves Auditus pipeline, Orator diarisation.
+ */
 // speaker_change_detector.h — Lightweight speaker change detection
 //
 // Reuses the WavLM CNN frontend (7 conv layers, ~1ms for 0.5s audio) to

@@ -1,3 +1,8 @@
+/**
+ * @file timeline_logger.h
+ * @philosophical_role Declaration of the Tempus-stamped append-only timeline. Enforces the invariant that no event is written without a full three-tier timestamp.
+ * @serves All subsystems that emit timeline events.
+ */
 // timeline_logger.h — Persistent JSONL timeline data recorder
 //
 // Records all timeline-relevant events (pipeline_stats, ASR transcripts,

@@ -1,3 +1,8 @@
+/**
+ * @file speaker_encoder.h
+ * @philosophical_role Declaration of the CAM++ GPU speaker encoder. Turns a few seconds of voice into a vector; that vector is identity.
+ * @serves Orator enrolment and verification paths.
+ */
 // speaker_encoder.h — CAM++ GPU Speaker Encoder.
 //
 // Adapted from qwen35-orin speaker_encoder_gpu (Thomas Zhu)

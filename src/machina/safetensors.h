@@ -1,3 +1,8 @@
+/**
+ * @file safetensors.h
+ * @philosophical_role Declaration of the safetensors mmap interface. Enforces zero-copy: weights live exactly once in unified memory.
+ * @serves Machina model loading.
+ */
 // safetensors.h — Zero-copy safetensors weight loader
 //
 // Parses safetensors file header (JSON metadata), provides direct mmap'd

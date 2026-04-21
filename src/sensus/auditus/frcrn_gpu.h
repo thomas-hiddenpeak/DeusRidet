@@ -1,3 +1,8 @@
+/**
+ * @file frcrn_gpu.h
+ * @philosophical_role Declaration of the FRCRN GPU forward pass (STFT + dual UNet1/UNet2 + iSTFT).
+ * @serves frcrn_enhancer, Auditus.
+ */
 // frcrn_gpu.h — FRCRN speech enhancement: custom CUDA forward pass.
 //
 // Implements the full FRCRN (Frequency Recurrent CRN) inference pipeline

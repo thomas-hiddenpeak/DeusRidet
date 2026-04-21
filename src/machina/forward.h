@@ -1,3 +1,8 @@
+/**
+ * @file forward.h
+ * @philosophical_role Declaration of the Qwen3.5 forward-pass entry points (prefill + decode). Machina's public face to Conscientia: 'give me tokens and a KV cache, I give you the next logit'.
+ * @serves ConscientiaStream, Cogitatio decode branches.
+ */
 // forward.h — Qwen3.5-27B forward pass skeleton
 //
 // Single-token decode path for initial testing.

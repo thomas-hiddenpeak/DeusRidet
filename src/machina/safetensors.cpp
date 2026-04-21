@@ -1,3 +1,8 @@
+/**
+ * @file safetensors.cpp
+ * @philosophical_role Zero-copy mmap loader for safetensors. Loading weights is not I/O — it is the act of the entity remembering who it is before it wakes.
+ * @serves Machina::Model::load, Actus::load_weights.
+ */
 // safetensors.cpp — Safetensors loader implementation
 //
 // Format: [8-byte header_len (LE uint64)] [JSON header] [raw tensor data]

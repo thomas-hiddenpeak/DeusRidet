@@ -1,3 +1,8 @@
+/**
+ * @file timeline_logger.cpp
+ * @philosophical_role Append-only event timeline with Tempus stamps. The entity's first-person transcript of its own existence; re-readable post hoc by Somnium for memory consolidation.
+ * @serves Conscientia (frame events), Auditus (ASR/VAD events), Nexus (WS events), Vigilia (wakefulness transitions).
+ */
 // timeline_logger.cpp — JSONL timeline event serialization
 //
 // Compact, analysis-focused JSON — omits speaker roster, config params,

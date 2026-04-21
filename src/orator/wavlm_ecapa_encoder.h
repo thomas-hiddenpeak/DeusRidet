@@ -1,3 +1,8 @@
+/**
+ * @file wavlm_ecapa_encoder.h
+ * @philosophical_role Declaration of WavLM-Large + ECAPA-TDNN speaker embedding. The higher-fidelity alternative to CAM++; chosen when accuracy beats latency.
+ * @serves Orator, overlap-aware speaker assignment.
+ */
 // wavlm_ecapa_encoder.h — WavLM-Large + ECAPA-TDNN Joint Speaker Encoder
 //
 // Adapted from ESPnet voxcelebs12_ecapa_wavlm_joint model:

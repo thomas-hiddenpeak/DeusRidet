@@ -1,3 +1,8 @@
+/**
+ * @file tempus.h
+ * @philosophical_role Three-tier TimeStamp triple (wall / monotonic / logical). Tempus is NOT a utility — it is the identity of a moment across the entity's perception, computation, and memory.
+ * @serves Every subsystem that records an event; all DEVLOG-grade artifacts carry a Tempus.
+ */
 // tempus.h — Unified temporal architecture (Tempus Reale)
 //
 // DeusRidet operates on a THREE-TIER clock hierarchy. Every event, every

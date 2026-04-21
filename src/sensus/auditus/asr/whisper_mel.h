@@ -1,3 +1,8 @@
+/**
+ * @file whisper_mel.h
+ * @philosophical_role Declaration of the Whisper-family mel spectrogram GPU kernel (reflect-pad, framing, cuFFT, mel, log10 + Whisper normalise).
+ * @serves ASR engine preprocessing.
+ */
 // whisper_mel.h — GPU Whisper Mel Spectrogram (128-channel, cuFFT)
 //
 // Computes STFT → power spectrum → mel filterbank → log10 + Whisper normalization.

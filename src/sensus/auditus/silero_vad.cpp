@@ -1,3 +1,8 @@
+/**
+ * @file silero_vad.cpp
+ * @philosophical_role Silero VAD — the lightweight VAD chosen as the default gate. Fast, robust, and noiseland-friendly.
+ * @serves Auditus pipeline default VAD.
+ */
 // silero_vad.cpp — Silero VAD v5 native C++ inference.
 //
 // Pure CPU implementation using safetensors weights.

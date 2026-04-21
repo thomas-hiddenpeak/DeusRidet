@@ -1,3 +1,8 @@
+/**
+ * @file attention_modulator.h
+ * @philosophical_role Declaration of the attention-budget interface. Defines who decides how the next 100 ms of compute is split between perception and thought.
+ * @serves ConscientiaStream, Machina forward scheduler.
+ */
 // attention_modulator.h — Wakefulness modulation based on input significance
 //
 // The AttentionModulator does NOT decide whether to respond.

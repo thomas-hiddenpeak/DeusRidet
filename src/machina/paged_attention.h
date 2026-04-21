@@ -1,3 +1,8 @@
+/**
+ * @file paged_attention.h
+ * @philosophical_role Declaration of paged KV-cache attention kernels. Paged because the entity's working memory is NOT a contiguous tape — blocks are allocated, evicted, and resurrected.
+ * @serves Machina forward pass, Memoria cache manager.
+ */
 // paged_attention.h — Paged KV Cache attention kernel declarations
 //
 // Paged variants of the GQA decode/prefill attention and KV cache write.

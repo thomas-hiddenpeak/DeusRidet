@@ -1,3 +1,8 @@
+/**
+ * @file cache_kernels.h
+ * @philosophical_role Declaration of GPU extract/inject kernels for paged KV blocks. The movement of memory between tiers is itself a cognitive act.
+ * @serves KVSwapper, CacheManager fast paths.
+ */
 // cache_kernels.h — CUDA kernels for paged KV cache extract/inject
 //
 // Scatter/gather operations between paged KV layout and flat contiguous

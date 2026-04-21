@@ -1,3 +1,8 @@
+/**
+ * @file asr_engine.cpp
+ * @philosophical_role End-to-end ASR engine: mel -> encoder -> decoder -> tokens -> text. The entity's ear-to-word translator.
+ * @serves Auditus pipeline, Actus asr-test verbs.
+ */
 // asr_engine.cpp — Qwen3-ASR inference engine implementation
 //
 // Weight loading via SafetensorsLoader (mmap → cudaMalloc device copy).

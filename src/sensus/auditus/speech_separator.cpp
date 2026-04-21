@@ -1,3 +1,8 @@
+/**
+ * @file speech_separator.cpp
+ * @philosophical_role Speech separation driver on top of MossFormer2. Invoked only when the overlap detector fires — a deliberate cost-gated capability.
+ * @serves Auditus pipeline, Orator per-speaker assignment.
+ */
 // speech_separator.cpp — MossFormer2 native CUDA inference for speech separation.
 //
 // Segmented processing with overlap-add for audio > 2s.

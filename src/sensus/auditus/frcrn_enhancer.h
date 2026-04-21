@@ -1,3 +1,8 @@
+/**
+ * @file frcrn_enhancer.h
+ * @philosophical_role Declaration of the FRCRN enhancer facade.
+ * @serves Auditus pipeline.
+ */
 // frcrn_enhancer.h — FRCRN speech enhancement (denoising) via custom CUDA.
 //
 // Model: FRCRN_SE_16K (~55 MB safetensors, DCCRN dual-UNet architecture)

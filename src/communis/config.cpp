@@ -1,3 +1,8 @@
+/**
+ * @file config.cpp
+ * @philosophical_role Single source of truth for runtime configuration. Config is not logic — it is the declared contract between the operator and the entity before awakening.
+ * @serves All subsystems that read CLI args, environment, or config files.
+ */
 // config.cpp — Configuration parser implementation
 
 #include "config.h"

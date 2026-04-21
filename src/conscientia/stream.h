@@ -1,3 +1,8 @@
+/**
+ * @file stream.h
+ * @philosophical_role Declaration of ConscientiaStream — the single seam through which the rest of the system interacts with the consciousness loop.
+ * @serves Actus::awaken, Nexus facade, Auditus facade, Conscientia facade.
+ */
 // stream.h — Consciousness stream (continuous awareness engine)
 //
 // The ConscientiStream implements the consciousness model:

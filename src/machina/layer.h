@@ -1,3 +1,8 @@
+/**
+ * @file layer.h
+ * @philosophical_role Declaration of per-layer ops (RMSNorm, embedding, elementwise, cuBLAS linear, greedy sample). Layer is the brick Machina stacks into a Transformer.
+ * @serves Machina forward pass, ASR encoder/decoder.
+ */
 // layer.h — CUDA kernel declarations for Qwen3.5 layer operations
 //
 // All kernels operate on FP16 data (BF16 converted at load time).

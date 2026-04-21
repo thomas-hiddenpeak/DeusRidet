@@ -1,3 +1,8 @@
+/**
+ * @file asr_config.cpp
+ * @philosophical_role ASR runtime configuration (model paths, beam, dtype). Kept distinct from Machina config because the ear has its own tolerances.
+ * @serves ASR engine construction, Actus ASR-test verbs.
+ */
 // asr_config.cpp — Qwen3-ASR config.json parser
 //
 // Adapted from qwen35-orin (src/plugins/asr/asr_config.cpp): minimal JSON

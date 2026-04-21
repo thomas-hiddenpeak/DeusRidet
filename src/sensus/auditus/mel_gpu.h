@@ -1,3 +1,8 @@
+/**
+ * @file mel_gpu.h
+ * @philosophical_role Declaration of the GPU Mel-spectrogram kernel (Qwen3-ASR / Whisper compatible).
+ * @serves ASR engine, Orator.
+ */
 // mel_gpu.h — GPU Mel-spectrogram for real-time audio (Qwen3-ASR compatible).
 //
 // Parameters (matching Qwen3-ASR / Whisper):

@@ -1,3 +1,8 @@
+/**
+ * @file asr_decoder.h
+ * @philosophical_role Declaration of the Qwen3-ASR text decoder (28-layer GQA, MRoPE, SwiGLU, prefill + decode).
+ * @serves ASR engine.
+ */
 // asr_decoder.h — Qwen3-ASR Text Decoder
 //
 // 28-layer Qwen3 decoder:

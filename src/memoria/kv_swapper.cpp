@@ -1,3 +1,8 @@
+/**
+ * @file kv_swapper.cpp
+ * @philosophical_role Asynchronous GPU<->SSD swap engine. Uses non-default streams so memory movement does not stall the consciousness loop.
+ * @serves CacheManager overflow, Memoria SSD tier.
+ */
 // kv_swapper.cpp — GPU↔SSD KV block swap implementation
 //
 // Background I/O thread handles swap requests asynchronously.

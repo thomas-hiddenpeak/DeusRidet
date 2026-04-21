@@ -1,3 +1,8 @@
+/**
+ * @file mossformer2.h
+ * @philosophical_role Declaration of the MossFormer2 separator facade. When two voices overlap, hearing only one is not enough.
+ * @serves speech_separator, Auditus overlap path.
+ */
 // mossformer2.h — MossFormer2 speech separation: native CUDA forward pass.
 //
 // Implements the full MossFormer2_SS_16K inference pipeline on GPU using

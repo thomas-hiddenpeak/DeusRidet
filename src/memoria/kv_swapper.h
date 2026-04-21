@@ -1,3 +1,8 @@
+/**
+ * @file kv_swapper.h
+ * @philosophical_role Declaration of the async swap interface. Memory migration is visible but non-blocking — the entity keeps thinking while it rearranges what it remembers.
+ * @serves Memoria CacheManager.
+ */
 // kv_swapper.h — GPU↔SSD KV block swap for cache overflow
 //
 // Handles asynchronous transfer of KV blocks between GPU and SSD:
