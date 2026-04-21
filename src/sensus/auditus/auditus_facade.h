@@ -18,6 +18,7 @@ namespace deusridet {
 class AudioPipeline;
 class WsServer;
 class TimelineLogger;
+class ConscientiStream;
 
 namespace auditus {
 
@@ -86,6 +87,33 @@ void install_asr_partial_callback(AudioPipeline& audio,
 void install_drop_callback(AudioPipeline& audio,
                            WsServer& server,
                            TimelineLogger& timeline);
+
+// ── Callback installers (Step 7b scope) ───────────────────────────────────────
+
+// Full ASR transcript → ws "asr_transcript" envelope + timeline log_asr +
+// stdout trace + optional injection into the consciousness input stream.
+// `llm_loaded` is a snapshot of whether a language model is available at the
+// moment of install; the transcript→consciousness injection is gated on it.
+void install_transcript_callback(AudioPipeline& audio,
+                                 WsServer& server,
+                                 TimelineLogger& timeline,
+                                 ConscientiStream& consciousness,
+                                 bool llm_loaded);
+
+// ASR detail log (wrapped as "asr_log") → ws broadcast only.
+void install_asr_log_callback(AudioPipeline& audio,
+                              WsServer& server);
+
+// Per-tick audio-pipeline stats → ws "pipeline_stats" envelope + timeline log_stats.
+// This is the largest single broadcast in the system — it carries VAD, ASR, speaker,
+// tracker, overlap-detection, separation, and multi-speaker fusion state.
+void install_stats_callback(AudioPipeline& audio,
+                            WsServer& server,
+                            TimelineLogger& timeline);
+
+// One-shot speaker match (Legacy CAM++ path) → ws "speaker" envelope + stdout.
+void install_speaker_match_callback(AudioPipeline& audio,
+                                    WsServer& server);
 
 }  // namespace auditus
 }  // namespace deusridet
