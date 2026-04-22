@@ -16,3 +16,6 @@ tests/*_mapped.txt
 tests/*.server.log.txt
 tests/asrTest*.txt
 
+# Auditus Evaluation Harness run artifacts (Step 15+).
+runs/
+
