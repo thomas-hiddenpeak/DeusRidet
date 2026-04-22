@@ -77,8 +77,106 @@ def load_hyp(path: Path) -> list[dict]:
     return out
 
 
+def _diarization_summary(gt: list[dict], hyp: list[dict]) -> list[str]:
+    """Diarization-focused aggregation. NOT scoring — counts + majority-vote
+    id→name mapping so the human-style reader can focus on failure modes
+    instead of bookkeeping. The agent still judges correctness by reading
+    the timeline below.
+    """
+    from collections import Counter, defaultdict
+    out: list[str] = []
+    out.append("## Diarization summary (Step 16)")
+    out.append("")
+    gt_counts = Counter(r["speaker"] for r in gt)
+    out.append(f"- GT utterances: {len(gt)} across {len(gt_counts)} speakers")
+    for name, n in gt_counts.most_common():
+        out.append(f"    - {name}: {n}")
+    hyp_counts = Counter(r["speaker_id"] for r in hyp)
+    out.append(f"- HYP segments: {len(hyp)} across {len(hyp_counts)} ids "
+               f"(including id=-1 = unidentified)")
+    for sid, n in sorted(hyp_counts.items()):
+        out.append(f"    - spk{sid}: {n}")
+    out.append("")
+
+    # Majority-vote HYP_id → GT_name: for each HYP segment, find GT utterance
+    # whose [t0_start, t0_end] contains the HYP midpoint (first containing match).
+    gt_sorted = sorted(gt, key=lambda r: r["t0_start"])
+    def find_gt(t: float) -> dict | None:
+        # linear is fine for ~100 rows; robust against overlapping GT.
+        for u in gt_sorted:
+            if u["t0_start"] <= t < u["t0_end"]:
+                return u
+        # Fall back: closest by midpoint distance.
+        best = None; best_d = 1e9
+        for u in gt_sorted:
+            d = min(abs(t - u["t0_start"]), abs(t - u["t0_end"]))
+            if d < best_d: best_d, best = d, u
+        return best if best_d < 2.0 else None
+
+    votes: dict[int, Counter] = defaultdict(Counter)
+    matched_pairs = []
+    for h in hyp:
+        mid = 0.5 * (h["t0_start"] + h["t0_end"])
+        u = find_gt(mid)
+        if u is None:
+            matched_pairs.append((h, None))
+            continue
+        votes[h["speaker_id"]][u["speaker"]] += 1
+        matched_pairs.append((h, u))
+
+    id2name: dict[int, str] = {}
+    out.append("- HYP id → GT name (majority vote over overlapping HYP segments):")
+    for sid in sorted(votes.keys()):
+        total = sum(votes[sid].values())
+        top_name, top_n = votes[sid].most_common(1)[0]
+        id2name[sid] = top_name
+        share = f"{top_n}/{total} = {100.0*top_n/total:.0f}%"
+        rest = ", ".join(f"{n}:{c}" for n, c in votes[sid].most_common()[1:])
+        rest = f" (rest: {rest})" if rest else ""
+        out.append(f"    - spk{sid} → **{top_name}** [{share}]{rest}")
+    out.append("")
+
+    # Per-HYP match count against its mapped name.
+    hyp_ok = sum(1 for h, u in matched_pairs
+                 if u is not None and id2name.get(h["speaker_id"]) == u["speaker"])
+    hyp_total = sum(1 for _, u in matched_pairs if u is not None)
+    out.append(f"- HYP-side accuracy (mapped id matches overlapping GT speaker): "
+               f"**{hyp_ok}/{hyp_total} = "
+               f"{100.0*hyp_ok/max(hyp_total,1):.1f}%**")
+
+    # Per-GT coverage: any HYP segment overlaps this GT, and its mapped name matches.
+    # Stricter: this is the metric the user cares about ("who is speaking right now").
+    gt_covered = 0; gt_correct = 0
+    for u in gt:
+        overlapping = [h for h in hyp
+                       if h["t0_end"] > u["t0_start"] and h["t0_start"] < u["t0_end"]]
+        if not overlapping: continue
+        gt_covered += 1
+        # Majority vote of the mapped names across overlapping HYP segments.
+        names = [id2name.get(h["speaker_id"], f"spk{h['speaker_id']}")
+                 for h in overlapping]
+        majority = Counter(names).most_common(1)[0][0]
+        if majority == u["speaker"]:
+            gt_correct += 1
+    out.append(f"- GT-side accuracy (GT utterances whose overlapping HYP majority "
+               f"maps to the right speaker): **{gt_correct}/{gt_covered} = "
+               f"{100.0*gt_correct/max(gt_covered,1):.1f}%**  "
+               f"(of {len(gt)} total GT; "
+               f"{len(gt)-gt_covered} had no overlapping HYP)")
+    out.append("")
+    out.append("Target: ≥90% GT-side accuracy before advancing to the next "
+               "10-minute segment.")
+    out.append("")
+    return out
+
+
 def render(gt: list[dict], hyp: list[dict], gt_meta: dict,
-           hyp_meta: dict, out_path: Path) -> None:
+           hyp_meta: dict, out_path: Path, window: tuple[float, float] | None) -> None:
+    if window is not None:
+        wa, wb = window
+        gt  = [r for r in gt  if r["t0_start"] < wb and r["t0_end"] > wa]
+        hyp = [r for r in hyp if r["t0_start"] < wb and r["t0_end"] > wa]
+
     merged = sorted(gt + hyp, key=lambda r: (r["t0_start"], 0 if r["kind"] == "gt" else 1))
 
     lines: list[str] = []
@@ -86,6 +184,8 @@ def render(gt: list[dict], hyp: list[dict], gt_meta: dict,
     lines.append("")
     lines.append(f"- source audio: `{gt_meta.get('source_audio', '?')}`")
     lines.append(f"- duration: {gt_meta.get('duration_sec', 0.0):.3f} s")
+    if window is not None:
+        lines.append(f"- window: [{window[0]:.1f}s, {window[1]:.1f}s)")
     lines.append(f"- GT utterances: {len(gt)}")
     lines.append(f"- HYP transcripts: {len(hyp)}")
     if hyp_meta:
@@ -97,14 +197,16 @@ def render(gt: list[dict], hyp: list[dict], gt_meta: dict,
     lines.append("- **HYP** = DeusRidet pipeline output (ASR + speaker attribution).")
     lines.append("- Times are in source-audio seconds (T0).")
     lines.append("")
-    lines.append("Reader instructions (Step 15d):")
-    lines.append("1. For each GT row, find the nearest HYP row(s) overlapping its "
-                 "`[t0_start, t0_end]` window. ")
-    lines.append("2. Mark the match: speaker ✅/❌, transcription ✅/⚠️/❌ "
-                 "(semantic equivalence, not character-diff).")
-    lines.append("3. Flag HYP rows with no corresponding GT (hallucination / "
-                 "segmentation error) and GT rows with no HYP (drop / miss).")
-    lines.append("4. Roll up findings into docs/{en,zh}/devlog/<date>.md.")
+    lines.extend(_diarization_summary(gt, hyp))
+    lines.append("Reader instructions (Step 16):")
+    lines.append("1. Read the per-minute tables below. For each GT row, find the "
+                 "nearest HYP row(s) overlapping its `[t0_start, t0_end]` window.")
+    lines.append("2. Mark speaker ✅/❌ using the id→name mapping in the summary "
+                 "above. Transcription can be ignored for Step 16 (we are "
+                 "tuning the SpeakerTracker, not the ASR).")
+    lines.append("3. Flag the failure modes you see: cold-start stickiness, "
+                 "short-interjection drift, identity swap, unidentified (-1), etc.")
+    lines.append("4. Roll findings into docs/{en,zh}/devlog/<date>.md.")
     lines.append("")
 
     current_bucket = -1
@@ -167,7 +269,15 @@ def main() -> int:
                     help="directory containing hyp.jsonl and run_meta.json")
     ap.add_argument("--out", default=None,
                     help="output markdown path (default: <run-dir>/judge.md)")
+    ap.add_argument("--window", default=None,
+                    help="restrict to [start,end) source-audio seconds, "
+                         "e.g. --window 0,600")
     args = ap.parse_args()
+
+    window = None
+    if args.window:
+        a, b = args.window.split(",")
+        window = (float(a), float(b))
 
     gt_path  = Path(args.gt)
     run_dir  = Path(args.run_dir)
@@ -183,7 +293,7 @@ def main() -> int:
     gt  = load_gt(gt_path)
     hyp = load_hyp(hyp_path)
 
-    render(gt, hyp, gt_meta, hyp_meta, out_path)
+    render(gt, hyp, gt_meta, hyp_meta, out_path, window)
     print(f"Wrote {out_path} ({len(gt)} GT + {len(hyp)} HYP rows)")
     return 0
 
