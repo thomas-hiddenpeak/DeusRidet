@@ -107,9 +107,10 @@ class Capture:
             self.hyp_fh.flush()
             self.n_transcripts += 1
             n = self.n_transcripts
+        spk_label = rec["speaker_name"] or f"spk{rec['speaker_id']}"
         print(
             f"  [{n:4d}] {rec['t0_start_sec']:7.2f}-{rec['t0_end_sec']:7.2f}s "
-            f"spk={rec['speaker_name'] or f'spk{rec[\"speaker_id\"]}':<10} "
+            f"spk={spk_label:<10} "
             f"src={rec['speaker_source']:<14} {rec['text']}",
             flush=True,
         )
@@ -197,6 +198,16 @@ def main() -> int:
 
     def on_open(ws):
         print("--- WS connected ---", flush=True)
+        # Ask the server to enable ASR for this session. The awaken router
+        # accepts text messages of the form "asr_enable:on"/"asr_enable:off".
+        # Without this the pipeline defaults to speaker-only (enable_asr_=false)
+        # and no asr_transcript broadcasts are ever emitted.
+        try:
+            ws.send("asr_enable:on", opcode=websocket.ABNF.OPCODE_TEXT)
+            print("    -> sent asr_enable:on", flush=True)
+        except Exception as e:
+            print(f"    ! failed to send asr_enable:on: {e}", file=sys.stderr,
+                  flush=True)
         connected.set()
 
     def on_message(ws, message):
