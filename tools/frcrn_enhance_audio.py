@@ -138,11 +138,13 @@ def main():
 
     print(f"\nDone! Total inference: {total_inference_ms/1000:.1f}s "
           f"(RTF={total_inference_ms/1000/duration:.3f})")
-    print(f"\nTo test accuracy:")
-    print(f"  1. Start server: ./build/deusridet awaken")
-    print(f"  2. Run original:  python3 tools/test_audio_ws.py {args.input} --speed 10")
-    print(f"  3. Run enhanced:  python3 tools/test_audio_ws.py {args.output} --speed 10")
-    print(f"  4. Compare:       python3 tools/eval_speaker_accuracy.py")
+    print(f"\nTo test the enhancement effect:")
+    print(f"  1. Start server: DEUSRIDET_TEST_WS_ENABLE_ASR=1 ./build/deusridet awaken")
+    print(f"  2. Capture orig: python3 tools/capture_auditus_run.py {args.input} --out runs/orig")
+    print(f"  3. Capture enh:  python3 tools/capture_auditus_run.py {args.output} --out runs/enh")
+    print(f"  4. Read both:    python3 tools/make_judge_doc.py --run-dir runs/orig; ")
+    print(f"                   python3 tools/make_judge_doc.py --run-dir runs/enh")
+    print(f"     then read the two judge.md files side by side (no scripted scoring).")
 
 
 if __name__ == "__main__":
