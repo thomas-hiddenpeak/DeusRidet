@@ -205,6 +205,30 @@ int awaken(const std::string& webui_dir,
     audio.set_silero_threshold(0.001f);
     printf("[awaken] Default VAD policy: source=silero, silero=ON, fsmn=OFF, gain=4.0, silero_threshold=0.001\n");
 
+    // Load configs/auditus.conf (diarization runtime knobs). Missing keys
+    // fall back to AudioPipelineConfig defaults, so the file is optional.
+    {
+        Config aud_cfg;
+        if (aud_cfg.load("configs/auditus.conf")) {
+            audio_cfg.speaker_threshold          = (float)aud_cfg.get_double("speaker_threshold",          audio_cfg.speaker_threshold);
+            audio_cfg.speaker_register_threshold = (float)aud_cfg.get_double("speaker_register_threshold", audio_cfg.speaker_register_threshold);
+            audio_cfg.speaker_discovery_count    =        aud_cfg.get_int   ("speaker_discovery_count",    audio_cfg.speaker_discovery_count);
+            audio_cfg.speaker_discovery_boost    = (float)aud_cfg.get_double("speaker_discovery_boost",    audio_cfg.speaker_discovery_boost);
+            audio_cfg.speaker_recency_window_sec = (float)aud_cfg.get_double("speaker_recency_window_sec", audio_cfg.speaker_recency_window_sec);
+            audio_cfg.speaker_recency_bonus      = (float)aud_cfg.get_double("speaker_recency_bonus",      audio_cfg.speaker_recency_bonus);
+            audio_cfg.speaker_margin_abstain     = (float)aud_cfg.get_double("speaker_margin_abstain",     audio_cfg.speaker_margin_abstain);
+            audio_cfg.speaker_max_auto_reg_count =        aud_cfg.get_int   ("speaker_max_auto_reg_count", audio_cfg.speaker_max_auto_reg_count);
+            printf("[awaken] Auditus diarization knobs loaded from configs/auditus.conf:\n"
+                   "           match=%.3f reg=%.3f disc=[count=%d,boost=%.3f] recency=[win=%.1fs,bonus=%.3f] margin=%.3f max_autoreg=%d\n",
+                   audio_cfg.speaker_threshold, audio_cfg.speaker_register_threshold,
+                   audio_cfg.speaker_discovery_count, audio_cfg.speaker_discovery_boost,
+                   audio_cfg.speaker_recency_window_sec, audio_cfg.speaker_recency_bonus,
+                   audio_cfg.speaker_margin_abstain, audio_cfg.speaker_max_auto_reg_count);
+        } else {
+            printf("[awaken] configs/auditus.conf not found — using compiled defaults\n");
+        }
+    }
+
     // Start audio pipeline.
     if (!audio.start(audio_cfg)) {
         fprintf(stderr, "[awaken] Failed to start audio pipeline\n");

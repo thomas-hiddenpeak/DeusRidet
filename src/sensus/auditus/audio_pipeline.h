@@ -69,6 +69,17 @@ struct AudioPipelineConfig {
     size_t ring_buffer_bytes = 1 << 22;  // 4 MB (~128 seconds of int16 mono 16kHz)
     int process_chunk_ms     = 100;      // process in 100ms chunks (10 mel frames)
     float speaker_threshold  = 0.45f;    // dual 384D cosine sim match threshold (v22c level)
+    // Diarization knobs — overridable via configs/auditus.conf (no rebuild
+    // required). Defaults mirror the historical hardcoded values in
+    // audio_pipeline_process_saas_full.cpp so behavior is unchanged when
+    // the file is absent. See configs/auditus.conf for documentation.
+    float speaker_register_threshold = 0.55f; // pending-pool confirmation sim
+    int   speaker_discovery_count    = 50;    // # FULL extractions treated as cold-start
+    float speaker_discovery_boost    = 0.07f; // additive to match_thresh during discovery
+    float speaker_recency_window_sec = 15.0f; // recency stabilizer window
+    float speaker_recency_bonus      = 0.05f; // match_thresh lowered by this while recency active
+    float speaker_margin_abstain     = 0.05f; // min (top1 - top2) to trust a match
+    int   speaker_max_auto_reg_count = 1000;  // disable auto-reg after this many FULLs
     // Replay speed for benchmark/testing input. 1.0 = real-time; >1.0 means
     // the upstream driver feeds samples faster than wall time (e.g. speed=2.0
     // pushes two seconds of source audio per wall second). This ONLY affects

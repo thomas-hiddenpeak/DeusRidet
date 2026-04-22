@@ -45,7 +45,8 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                             // every legitimate speaker should already be registered.
                             // Further registrations have historically been drift
                             // clones (observed in v8/v9 test runs at count ≈ 180).
-                            static constexpr int kMaxAutoRegCount = 1000;
+                            // Tunable: configs/auditus.conf:speaker_max_auto_reg_count
+                            const int kMaxAutoRegCount = cfg_.speaker_max_auto_reg_count;
                             if (campp_full_count_ >= kMaxAutoRegCount) {
                                 auto_reg = false;
                             }
@@ -55,20 +56,31 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                             // early extractions to force speaker separation.
                             // Without this, similar speakers (e.g. 徐子景/朱杰)
                             // get absorbed into the first registered speaker.
-                            static constexpr int kDiscoveryCount = 50;
-                            static constexpr float kDiscoveryBoost = 0.07f;
+                            // Tunable: configs/auditus.conf:speaker_discovery_{count,boost}
+                            const int   kDiscoveryCount = cfg_.speaker_discovery_count;
+                            const float kDiscoveryBoost = cfg_.speaker_discovery_boost;
                             if (campp_full_count_ < kDiscoveryCount) {
-                                match_thresh += kDiscoveryBoost;  // 0.45 → 0.52
+                                match_thresh += kDiscoveryBoost;
                             }                            // v24: Temporal recency bonus — lower threshold when recent
                             // speaker still active, reducing false negatives (fragmentation).
                             float seg_mid_time = (float)(audio_t1_processed_ - (int64_t)speech_pcm_buf_.size() / 2) / 16000.0f;
                             float time_since_prev = seg_mid_time - prev_full_time_;
-                            static constexpr float kRecencyWindow = 15.0f;
-                            // v32: reverted to 0.05 — v31's 0.03 hurt spk2
-                            // (徐子景 28 vs GT 73). 0.05 was fine in v9.
-                            static constexpr float kRecencyBonus  = 0.05f;
-                            bool recency_active = (prev_full_speaker_id_ >= 0 &&
-                                                   time_since_prev < kRecencyWindow);
+                            // Tunable: configs/auditus.conf:speaker_recency_{window_sec,bonus}
+                            const float kRecencyWindow = cfg_.speaker_recency_window_sec;
+                            const float kRecencyBonus  = cfg_.speaker_recency_bonus;
+                            // Step 16 iter 1: recency is a post-discovery
+                            // stabilizer only. During discovery (first
+                            // kDiscoveryCount FULL extractions) its combined
+                            // effect — lowered threshold + auto_reg=false —
+                            // absorbs every cold-start speaker into spk0
+                            // (baseline: 48.4% GT-side on seg0 0–600s). We
+                            // therefore gate recency on post-discovery so
+                            // newcomers within 15 s of another speaker still
+                            // get a clean registration chance at reg_thresh.
+                            bool recency_active =
+                                (prev_full_speaker_id_ >= 0 &&
+                                 time_since_prev < kRecencyWindow &&
+                                 campp_full_count_ >= kDiscoveryCount);
                             if (recency_active) {
                                 match_thresh -= kRecencyBonus;
                                 // v32: restored from v30 — lowered threshold
@@ -135,8 +147,8 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
 
                             // Margin gate: abstain on ambiguous matches where
                             // top-1 and top-2 are too close to distinguish.
-                            // Threshold 0.05 yields ~91% accuracy on test.mp3.
-                            static constexpr float kMarginAbstainThresh = 0.05f;
+                            // Tunable: configs/auditus.conf:speaker_margin_abstain
+                            const float kMarginAbstainThresh = cfg_.speaker_margin_abstain;
                             if (match.speaker_id >= 0 && !match.is_new &&
                                 match.second_best_id >= 0 &&
                                 (match.similarity - match.second_best_sim) < kMarginAbstainThresh) {
