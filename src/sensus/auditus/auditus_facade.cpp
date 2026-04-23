@@ -27,21 +27,23 @@ namespace auditus {
 void install_vad_callback(AudioPipeline& audio,
                           WsServer& server,
                           TimelineLogger& timeline) {
-    audio.set_on_vad([&server, &timeline](const VadResult& vr, int frame_idx, uint64_t audio_t1) {
+    audio.set_on_vad([&server, &timeline](bool is_speech, bool segment_start,
+                                          bool segment_end, float prob,
+                                          int frame_idx, uint64_t audio_t1) {
         char json[256];
         snprintf(json, sizeof(json),
-            R"({"type":"vad","audio_t1":%lu,"speech":%s,"event":"%s","frame":%d,"energy":%.2f})",
+            R"({"type":"vad","audio_t1":%lu,"speech":%s,"event":"%s","frame":%d,"prob":%.3f})",
             (unsigned long)audio_t1,
-            vr.is_speech ? "true" : "false",
-            vr.segment_start ? "start" : (vr.segment_end ? "end" : "none"),
-            frame_idx, vr.energy);
+            is_speech ? "true" : "false",
+            segment_start ? "start" : (segment_end ? "end" : "none"),
+            frame_idx, prob);
         server.broadcast_text(json);
-        timeline.log_vad(vr.is_speech, vr.segment_start, vr.segment_end,
-                         frame_idx, vr.energy, audio_t1);
-        if (vr.segment_start)
-            printf("[awaken] VAD: speech START at frame %d (energy=%.2f)\n",
-                   frame_idx, vr.energy);
-        if (vr.segment_end)
+        timeline.log_vad(is_speech, segment_start, segment_end,
+                         frame_idx, prob, audio_t1);
+        if (segment_start)
+            printf("[awaken] VAD: speech START at frame %d (prob=%.3f)\n",
+                   frame_idx, prob);
+        if (segment_end)
             printf("[awaken] VAD: speech END at frame %d\n", frame_idx);
     });
 }

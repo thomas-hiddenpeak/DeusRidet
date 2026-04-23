@@ -1,5 +1,5 @@
 // timeline-panel.js — Wrapping time-aligned visualization.
-// 4 independent lanes per time row: VAD, ASR, SAAS, Tracker.
+// 3 independent lanes per time row: VAD, ASR, SAAS.
 // Time wraps to next row at panel edge — no horizontal scrolling.
 // Container scrolls vertically, auto-follows latest data.
 
@@ -84,7 +84,6 @@ export class TimelinePanel {
                 <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#58a6ff"></span>Early</span>
                 <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#d29922"></span>Change</span>
                 <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#8b949e"></span>Inherit</span>
-                <span class="tl-legend-item"><span class="tl-legend-dot" style="background:#b48ead"></span>Tracker</span>
                 <span class="tl-legend-item"><span style="color:#e5534b;font-weight:bold">⬥</span> Spk Change</span>
                 <span class="tl-legend-item"><span style="color:#3fb950;font-weight:bold">▲</span> Register</span>
                 <span class="tl-legend-item"><span style="color:#d29922;font-weight:bold">✕</span> Overlap</span>
@@ -166,67 +165,6 @@ export class TimelinePanel {
         }
         // Extend current speech interval visually
         if (this._vadSpeech) this._dirty = true;
-
-        // Track SpeakerTracker from pipeline_stats
-        if (obj.tracker_enabled && obj.tracker_check_active) {
-            const trkId    = obj.tracker_spk_id ?? -1;
-            const trkName  = obj.tracker_spk_name || '';
-            const trkState = obj.tracker_state ?? 0;
-            const trkSim   = obj.tracker_sim_to_ref || 0;
-            const switches = obj.tracker_switches || 0;
-
-            // Detect speaker change (switches increment or ID change)
-            if (this._trkPrevId !== -2) {
-                if (switches > this._trkPrevSwitches) {
-                    // Speaker change event
-                    this.trackerEvents.push({
-                        time: streamSec, type: 'change',
-                        oldId: this._trkPrevId, newId: trkId,
-                        name: trkName, sim: trkSim, state: trkState,
-                    });
-                    if (this.trackerEvents.length > this.maxEntries) this.trackerEvents.shift();
-                }
-                if (trkState === 3 && this._trkPrevState !== 3) {
-                    // OVERLAP start
-                    this.trackerEvents.push({
-                        time: streamSec, type: 'overlap',
-                        oldId: this._trkPrevId, newId: trkId,
-                        name: '', sim: trkSim, state: 3,
-                    });
-                    if (this.trackerEvents.length > this.maxEntries) this.trackerEvents.shift();
-                }
-            }
-
-            // Registration event
-            if (obj.tracker_reg_event) {
-                this.trackerEvents.push({
-                    time: streamSec, type: 'register',
-                    oldId: -1, newId: obj.tracker_reg_id ?? trkId,
-                    name: obj.tracker_reg_name || trkName, sim: trkSim, state: trkState,
-                });
-                if (this.trackerEvents.length > this.maxEntries) this.trackerEvents.shift();
-            }
-
-            // Build continuous spans — close old span on ID or state change
-            if (trkId !== this._trkPrevId || trkState !== this._trkPrevState) {
-                if (this._trkPrevId !== -2) {
-                    this.trackerSpans.push({
-                        start: this._trkSpanStart, end: streamSec,
-                        trkId: this._trkPrevId, trkName: this._trkPrevName || '',
-                        state: this._trkPrevState, sim: this._trkPrevSim || 0,
-                    });
-                    if (this.trackerSpans.length > this.maxEntries) this.trackerSpans.shift();
-                }
-                this._trkSpanStart = streamSec;
-            }
-
-            this._trkPrevId = trkId;
-            this._trkPrevName = trkName;
-            this._trkPrevState = trkState;
-            this._trkPrevSim = trkSim;
-            this._trkPrevSwitches = switches;
-            this._dirty = true;
-        }
     }
 
     onTranscript(obj) {

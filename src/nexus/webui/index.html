@@ -51,22 +51,12 @@
             <div class="audio-stats" aria-live="polite">
                 <span class="stat">Mel: <strong id="pipe-mel">0</strong></span>
                 <span class="stat">Speech: <strong id="pipe-speech">0</strong></span>
-                <span class="stat">Energy: <strong id="pipe-energy">0</strong></span>
-                <span class="stat">Noise: <strong id="pipe-noise">—</strong></span>
             </div>
             <div class="vad-indicator" id="vad-indicator" aria-live="polite">
                 <span class="vad-dot" id="vad-dot"></span>
                 <span id="vad-label">Silence</span>
                 <span class="stat silero-prob">Silero: <strong id="silero-prob">—</strong></span>
                 <span class="stat fsmn-prob">FSMN: <strong id="fsmn-prob">—</strong></span>
-            </div>
-            <div class="vad-threshold-control">
-                <label for="vad-threshold" class="vad-threshold-label">
-                    Threshold: <strong id="vad-threshold-val">-6.0</strong>
-                </label>
-                <input type="range" id="vad-threshold" class="vad-threshold-slider"
-                       min="-15" max="0" step="0.5" value="-6"
-                       aria-label="VAD energy threshold">
             </div>
             <div class="vad-threshold-control">
                 <label for="input-gain" class="vad-threshold-label">
@@ -180,9 +170,6 @@
         </section>
 
         <section class="panel speaker-debug-panel" aria-label="Speaker Debug" id="speaker-debug">
-        </section>
-
-        <section class="panel tracker-panel" aria-label="Speaker Tracker" id="tracker-panel">
         </section>
 
         <section class="panel asr-panel" aria-label="ASR" id="asr-panel">

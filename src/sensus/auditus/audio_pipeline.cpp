@@ -40,9 +40,6 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
         return false;
     }
 
-    // Initialize VAD.
-    vad_.init(cfg_.vad);
-
     // Initialize FRCRN speech enhancement (optional — non-fatal).
     if (!cfg_.frcrn.weights_dir.empty() && cfg_.frcrn.enabled) {
         if (!frcrn_.init(cfg_.frcrn)) {
@@ -52,14 +49,14 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
 
     // Initialize P1: overlap detector (optional — non-fatal).
     if (!cfg_.overlap_det.model_path.empty() && cfg_.overlap_det.enabled) {
-        if (!tracker_.init_overlap_det(cfg_.overlap_det)) {
+        if (!overlap_det_.init(cfg_.overlap_det)) {
             LOG_WARN("AudioPipe", "Overlap detector init failed — using heuristic fallback");
         }
     }
 
     // Initialize P2: speech separator (optional — lazy loaded).
     if (!cfg_.separator.model_path.empty()) {
-        if (!tracker_.init_separator(cfg_.separator)) {
+        if (!separator_.init(cfg_.separator)) {
             LOG_WARN("AudioPipe", "Speech separator init failed");
         }
     }
@@ -103,8 +100,6 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
             LOG_WARN("AudioPipe", "WavLM-ECAPA native GPU init failed");
         } else {
             LOG_INFO("AudioPipe", "WavLM-ECAPA native GPU encoder ready (192-dim)");
-            // Initialize SpeakerTracker (shares encoder, independent DB).
-            tracker_.init(&wlecapa_enc_);
             // Enable dual-encoder matching (384D = CAM++ 192D + WL-ECAPA 192D).
             use_dual_encoder_ = true;
             LOG_INFO("AudioPipe", "Dual-encoder matching enabled (384D)");
@@ -257,8 +252,6 @@ void AudioPipeline::asr_loop() {
                                                  job.speaker_id, job.speaker_name,
                                                  job.speaker_sim, job.speaker_confidence,
                                                  job.speaker_source, job.trigger_reason,
-                                                 job.tracker_id, job.tracker_name,
-                                                 job.tracker_sim,
                                                  job.stream_start_sec, job.stream_end_sec);
         } else {
             LOG_INFO("AudioPipe", "ASR: (empty) (%.1fms, %.2fs audio)",

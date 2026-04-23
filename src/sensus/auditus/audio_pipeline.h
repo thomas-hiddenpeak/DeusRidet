@@ -22,7 +22,6 @@
 #include "silero_vad.h"
 #include "fsmn_vad.h"
 #include "fsmn_fbank_gpu.h"
-#include "vad.h"
 #include "asr/asr_engine.h"
 #include "../../communis/ring_buffer.h"
 #include "../../orator/speaker_encoder.h"
@@ -56,7 +55,6 @@ enum class VadSource : int {
 
 struct AudioPipelineConfig {
     MelConfig mel;
-    VadConfig vad;
     FrcrnConfig frcrn;                  // FRCRN speech enhancement (P0)
     OverlapDetectorConfig overlap_det;  // pyannote overlap detection (P1)
     SpeechSeparatorConfig separator;    // MossFormer2 speech separation (P2)
@@ -91,8 +89,11 @@ struct AudioPipelineConfig {
 
 class AudioPipeline {
 public:
-    using OnVadEvent  = std::function<void(const VadResult&, int frame_idx,
-                                           uint64_t audio_t1)>;
+    // VAD callback fires only on speech segment boundaries (start/end).
+    //   prob = Silero probability for this window (energy-VAD removed April 2026).
+    using OnVadEvent  = std::function<void(bool is_speech, bool segment_start,
+                                           bool segment_end, float prob,
+                                           int frame_idx, uint64_t audio_t1)>;
     using OnStats     = std::function<void(const AudioPipelineStats&)>;
     using OnSpeaker   = std::function<void(const SpeakerMatch&)>;
     using OnTranscript = std::function<void(const asr::ASRResult& result, float audio_sec,
@@ -100,8 +101,6 @@ public:
                                              float speaker_sim, float speaker_confidence,
                                              const std::string& speaker_source,
                                              const std::string& trigger_reason,
-                                             int tracker_id, const std::string& tracker_name,
-                                             float tracker_sim,
                                              float stream_start_sec, float stream_end_sec)>;
     using OnAsrLog = std::function<void(const std::string& json)>;
     using OnAsrPartial = std::function<void(const std::string& text, float audio_sec)>;
@@ -135,11 +134,6 @@ public:
 
     const AudioPipelineStats& stats() const { return stats_; }
 
-    // Runtime VAD threshold adjustment (thread-safe: atomic float write).
-    void set_vad_threshold(float t) { vad_.set_threshold(t); }
-    float vad_threshold() const { return vad_.config().energy_threshold; }
-    float vad_noise_floor() const { return vad_.noise_floor(); }
-
     // Silero VAD threshold.
     void set_silero_threshold(float t) { silero_.set_threshold(t); }
     float silero_threshold() const { return silero_.threshold(); }
@@ -150,15 +144,16 @@ public:
     bool frcrn_enabled() const { return enable_frcrn_.load(std::memory_order_relaxed); }
     bool frcrn_loaded() const { return frcrn_.initialized(); }
 
-    // P1: Overlap detection enable/disable — delegates to tracker.
-    void set_overlap_det_enabled(bool e) { tracker_.set_overlap_det_enabled(e); }
-    bool overlap_det_enabled() const { return tracker_.overlap_det_enabled(); }
-    bool overlap_det_loaded() const { return tracker_.overlap_det_loaded(); }
+    // P1: Overlap detection enable/disable (model loaded but currently not
+    // wired into the process loop — retained for future reintroduction).
+    void set_overlap_det_enabled(bool e) { enable_overlap_det_.store(e, std::memory_order_relaxed); }
+    bool overlap_det_enabled() const { return enable_overlap_det_.load(std::memory_order_relaxed); }
+    bool overlap_det_loaded() const { return overlap_det_.initialized(); }
 
-    // P2: Speech separation enable/disable — delegates to tracker.
-    void set_separator_enabled(bool e) { tracker_.set_separator_enabled(e); }
-    bool separator_enabled() const { return tracker_.separator_enabled(); }
-    bool separator_loaded() const { return tracker_.separator_loaded(); }
+    // P2: Speech separation enable/disable (see overlap note above).
+    void set_separator_enabled(bool e) { enable_separator_.store(e, std::memory_order_relaxed); }
+    bool separator_enabled() const { return enable_separator_.load(std::memory_order_relaxed); }
+    bool separator_loaded() const { return separator_.loaded(); }
 
     // FSMN VAD threshold.
     void set_fsmn_threshold(float t) { fsmn_.set_threshold(t); }
@@ -264,10 +259,6 @@ public:
     SpeakerVectorStore& campp_db() { return campp_db_; }
     SpeakerVectorStore& wlecapa_db() { return wlecapa_db_; }
 
-    // Speaker Tracker (independent pipeline for comparison).
-    SpeakerTracker& tracker() { return tracker_; }
-    const SpeakerTracker& tracker() const { return tracker_; }
-
     // Per-backend clear and name.
     void clear_speaker_db() {
         speaker_db_.clear();
@@ -322,7 +313,6 @@ private:
     MelSpectrogram mel_;
     FrcrnEnhancer frcrn_;
 
-    VoiceActivityDetector vad_;
     SileroVad silero_;
     FsmnVad fsmn_;
     SpeakerEncoder speaker_enc_;
@@ -457,11 +447,7 @@ private:
         std::string speaker_name;       // resolved speaker name
         float speaker_sim = 0.0f;       // similarity from best-authority source
         float speaker_confidence = 0.0f; // timeline fusion confidence (weighted vote)
-        std::string speaker_source;      // source name ("SAAS_FULL", "TRACKER", etc.)
-        // SpeakerTracker snapshot (independent pipeline for A/B comparison).
-        int tracker_id = -1;
-        std::string tracker_name;
-        float tracker_sim = 0.0f;
+        std::string speaker_source;      // source name ("SAAS_FULL", "SAAS_CHANGE", etc.)
     };
     std::thread asr_thread_;
     std::mutex asr_mutex_;
@@ -472,8 +458,15 @@ private:
     // Change detection: previous segment embedding for inter-segment cosine similarity.
     std::vector<float> prev_wlecapa_emb_;  // 192-dim, empty if first segment
 
-    // Speaker Tracker (independent pipeline for A/B comparison with SAAS).
-    SpeakerTracker tracker_;
+    // Overlap detection (pyannote) + speech separator (MossFormer2). Loaded
+    // from config but currently not wired into the process loop — they were
+    // previously invoked via SpeakerTracker. Retained as owned members so
+    // the WebUI toggles, config paths, and test suites continue to work and
+    // so future reintroduction has a clean home.
+    OverlapDetector overlap_det_;
+    SpeechSeparator separator_;
+    std::atomic<bool> enable_overlap_det_{true};
+    std::atomic<bool> enable_separator_{true};
 
     OnVadEvent on_vad_;
     OnStats    on_stats_;

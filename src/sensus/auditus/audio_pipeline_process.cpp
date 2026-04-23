@@ -3,8 +3,8 @@
  * @philosophical_role
  *   AudioPipeline::process_loop — the auditus mainloop.
  *   Per-chunk phases (gain/RMS, FRCRN, Silero, FSMN, speaker pipeline,
- *   tracker pipe, ASR, Mel/VAD, stats) are invoked here in order; heavy
- *   phases are extracted to peer TUs so each stage stays independently
+ *   ASR, Mel, stats) are invoked here in order; heavy phases are
+ *   extracted to peer TUs so each stage stays independently
  *   inspectable and trace-taggable (Step 11 A1).
  *     A1a — process_asr_pipeline_ → audio_pipeline_process_asr.cpp
  *     A1b — speaker pipeline (next)
@@ -28,10 +28,6 @@ void AudioPipeline::process_loop() {
     int chunk_samples = cfg_.mel.sample_rate * cfg_.process_chunk_ms / 1000;
     size_t chunk_bytes = chunk_samples * sizeof(int16_t);
     std::vector<int16_t> pcm_buf(chunk_samples);
-
-    // Host buffer for reading back Mel frames for VAD.
-    int n_mels = cfg_.mel.n_mels;
-    std::vector<float> mel_host(n_mels);
 
     // Silero VAD processes 512-sample windows from float PCM.
     int silero_window = silero_.initialized() ? cfg_.silero.window_samples : 0;
@@ -87,16 +83,8 @@ void AudioPipeline::process_loop() {
         // FRCRN speech enhancement: denoise PCM before all downstream processing.
         // Uses direct per-chunk enhancement (no accumulation latency).
         // FRCRN internally pads to valid STFT alignment.
-        //
-        // NOTE: the speaker tracker also needs the *pre-FRCRN* signal for
-        // MossFormer2 separation in overlap regions (S3: FRCRN suppresses
-        // the weaker speaker, which defeats separation). We stash a raw
-        // copy here and hand it to tracker_.feed() alongside the denoised
-        // buffer below. The copy is skipped entirely when FRCRN is off.
         stats_.frcrn_active = false;
-        std::vector<int16_t> pcm_raw_buf;
         if (frcrn_.initialized() && enable_frcrn_.load(std::memory_order_relaxed)) {
-            pcm_raw_buf.assign(pcm_buf.begin(), pcm_buf.begin() + n_samples);
             frcrn_.enhance_inplace(pcm_buf.data(), n_samples);
             stats_.frcrn_active = true;
             stats_.frcrn_lat_ms = frcrn_.last_latency_ms();
@@ -124,12 +112,9 @@ void AudioPipeline::process_loop() {
                 // Use Silero result as authoritative VAD if available.
                 stats_.is_speech = svr.is_speech;
                 if (on_vad_ && (svr.segment_start || svr.segment_end)) {
-                    VadResult vr{};
-                    vr.is_speech = svr.is_speech;
-                    vr.segment_start = svr.segment_start;
-                    vr.segment_end = svr.segment_end;
-                    vr.energy = svr.probability;  // repurpose energy field for prob
-                    on_vad_(vr, (int)stats_.mel_frames, audio_t1_processed_);
+                    on_vad_(svr.is_speech, svr.segment_start, svr.segment_end,
+                            svr.probability, (int)stats_.mel_frames,
+                            audio_t1_processed_);
                 }
             }
             // Keep remainder for next chunk.
@@ -168,8 +153,7 @@ void AudioPipeline::process_loop() {
                 case VadSource::FSMN:   vad_speech = stats_.fsmn_speech; break;
                 case VadSource::ANY:
                 default:
-                    vad_speech = stats_.is_speech || stats_.silero_speech ||
-                                 stats_.fsmn_speech;
+                    vad_speech = stats_.silero_speech || stats_.fsmn_speech;
                     break;
             }
             if (vad_speech && !in_speech_segment_) {
@@ -248,52 +232,6 @@ void AudioPipeline::process_loop() {
             }
         }
 
-        // SpeakerTracker: independent continuous pipeline.
-        // Uses same VAD source as SAAS for consistency but tracks independently.
-        {
-            VadSource src = static_cast<VadSource>(vad_source_.load(std::memory_order_relaxed));
-            bool tracker_vad = false;
-            switch (src) {
-                case VadSource::SILERO: tracker_vad = stats_.silero_speech; break;
-                case VadSource::FSMN:   tracker_vad = stats_.fsmn_speech; break;
-                case VadSource::ANY:
-                default:
-                    tracker_vad = stats_.is_speech || stats_.silero_speech ||
-                                  stats_.fsmn_speech;
-                    break;
-            }
-            tracker_.feed(pcm_buf.data(), n_samples, tracker_vad,
-                          pcm_raw_buf.empty() ? nullptr : pcm_raw_buf.data());
-            if (tracker_.check()) {
-                // Timeline: Tracker identification event.
-                // Skip when dual encoder active — tracker uses its own DB with
-                // different speaker IDs from dual_db_.
-                auto& ts = tracker_.stats();
-                if (ts.speaker_id >= 0 && !use_dual_encoder_) {
-                    int win = tracker_.window_ms() * 16;  // window in samples
-                    SpeakerEvent ev{};
-                    ev.audio_start = audio_t1_processed_ - win;
-                    ev.audio_end   = audio_t1_processed_;
-                    ev.source      = SpkEventSource::TRACKER;
-                    ev.speaker_id  = ts.speaker_id;
-                    ev.similarity  = ts.speaker_sim;
-                    strncpy(ev.name, ts.speaker_name, sizeof(ev.name) - 1);
-                    spk_timeline_.push(ev);
-                }
-            }
-            // Copy P1/P2 stats from tracker to pipeline stats.
-            {
-                auto& ts = tracker_.stats();
-                stats_.overlap_detected   = ts.overlap_detected;
-                stats_.overlap_ratio      = ts.overlap_ratio;
-                stats_.od_latency_ms      = ts.od_latency_ms;
-                stats_.separation_active  = ts.separation_active;
-                stats_.separation_lat_ms  = ts.separation_lat_ms;
-                stats_.sep_source1_energy = ts.sep_source1_energy;
-                stats_.sep_source2_energy = ts.sep_source2_energy;
-            }
-        }
-
         // ASR pipeline — continuous accumulation + VAD/speaker-change triggered split.
         // Extracted to audio_pipeline_process_asr.cpp (Step 11 A1a).
         process_asr_pipeline_(pcm_buf.data(), n_samples);
@@ -304,33 +242,11 @@ void AudioPipeline::process_loop() {
         stats_.asr_busy = asr_busy_.load(std::memory_order_relaxed);
 
         // Push to Mel spectrogram (GPU).
+        // Mel spectrogram is still computed (its frame count powers diagnostic
+        // stats and matches the ASR encoder's framing), but no per-frame VAD
+        // runs here — Silero/FSMN handle voice activity detection on raw PCM.
         int new_frames = mel_.push_pcm(pcm_buf.data(), n_samples);
         stats_.mel_frames += new_frames;
-
-        if (new_frames <= 0) continue;
-
-        // Run VAD on new frames.
-        //   Copy new Mel frames back to host one at a time for state machine.
-        int start_frame = mel_.frames_ready() - new_frames;
-        for (int i = 0; i < new_frames; i++) {
-            int frame_idx = start_frame + i;
-            cudaMemcpy(mel_host.data(),
-                       mel_.mel_buffer() + frame_idx * n_mels,
-                       n_mels * sizeof(float),
-                       cudaMemcpyDeviceToHost);
-
-            VadResult vr = vad_.process_frame(mel_host.data(), n_mels);
-            stats_.last_energy = vr.energy;
-            if (vr.is_speech) stats_.speech_frames++;
-
-            // Energy VAD drives is_speech only when Silero is not available.
-            if (!silero_.initialized()) {
-                stats_.is_speech = vr.is_speech;
-                if (on_vad_ && (vr.segment_start || vr.segment_end)) {
-                    on_vad_(vr, frame_idx, audio_t1_processed_);
-                }
-            }
-        }
 
         // Report stats.
         if (on_stats_) {

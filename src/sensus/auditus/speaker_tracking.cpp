@@ -25,7 +25,6 @@ ResolvedSpeaker SpeakerTimeline::resolve(int64_t start_sample, int64_t end_sampl
             1.00f,  // SAAS_FULL    — end-of-segment, highest authority
             0.90f,  // SAAS_CHANGE  — speaker change detection, high authority
             0.50f,  // SAAS_INHERIT — inherited from previous, could be wrong
-            0.40f,  // TRACKER      — independent pipeline, lower authority
         };
 
         int64_t query_len = end_sample - start_sample;

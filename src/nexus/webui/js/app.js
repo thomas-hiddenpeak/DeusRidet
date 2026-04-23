@@ -11,7 +11,6 @@ import { AsrLogPanel } from './components/asr-log-panel.js';
 import { ConsciousnessPanel } from './components/consciousness-panel.js';
 import { TextOutputPanel } from './components/text-output-panel.js';
 import { ConfigPanel } from './components/config-panel.js';
-import { TrackerPanel } from './components/tracker-panel.js';
 import { TimelinePanel } from './components/timeline-panel.js';
 import { spkColor } from './utils/speaker-colors.js';
 
@@ -55,7 +54,6 @@ ws.onText = (msg) => {
             updateSpeakerPanel(obj);
             speakerDebug.onPipelineStats(obj);
             asrPanel.onPipelineStats(obj);
-            trackerPanel.onPipelineStats(obj);
             timelinePanel.onPipelineStats(obj);
             return;
         }
@@ -146,10 +144,6 @@ ws.onText = (msg) => {
             log(`Loopback ${obj.enabled ? 'ON' : 'OFF'}`);
             return;
         }
-        if (obj.type === 'vad_threshold') {
-            log(`VAD threshold → ${obj.value}`);
-            return;
-        }
         if (obj.type === 'gain') {
             log(`Gain → ${obj.value}x`);
             return;
@@ -175,7 +169,6 @@ const asrLogPanel = new AsrLogPanel(ws);
 const consciousnessPanel = new ConsciousnessPanel(ws);
 const textOutputPanel = new TextOutputPanel(ws);
 const configPanel = new ConfigPanel(ws);
-const trackerPanel = new TrackerPanel(ws);
 const timelinePanel = new TimelinePanel();
 
 // --- VAD source selector ---

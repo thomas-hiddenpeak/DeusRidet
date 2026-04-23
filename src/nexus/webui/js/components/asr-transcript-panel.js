@@ -49,9 +49,6 @@ export class AsrTranscriptPanel {
             speaker_sim: obj.speaker_sim || 0,
             speaker_confidence: obj.speaker_confidence || 0,
             speaker_source: obj.speaker_source || '',
-            tracker_id: obj.tracker_id ?? -1,
-            tracker_name: obj.tracker_name || '',
-            tracker_sim: obj.tracker_sim || 0,
             trigger: obj.trigger || '',
             ts
         };
@@ -134,26 +131,16 @@ export class AsrTranscriptPanel {
             ? (entry.speaker_name || `S${entry.speaker_id}`)
             : '?';
         // Source abbreviation for badge superscript.
-        const srcMap = {SAAS_FULL:'F', SAAS_EARLY:'E', SAAS_CHANGE:'C', SAAS_INHERIT:'I', TRACKER:'T', SNAPSHOT:'S'};
+        const srcMap = {SAAS_FULL:'F', SAAS_EARLY:'E', SAAS_CHANGE:'C', SAAS_INHERIT:'I', SNAPSHOT:'S'};
         const srcAbbr = srcMap[entry.speaker_source] || '';
         const confPct = (entry.speaker_confidence * 100).toFixed(0);
         const spkTitle = entry.speaker_id >= 0
             ? `Speaker ${entry.speaker_id}: ${entry.speaker_name || '(unnamed)'} (sim=${entry.speaker_sim.toFixed(3)}, conf=${confPct}%, src=${entry.speaker_source})`
             : 'Unknown speaker';
 
-        // Tracker speaker badge
-        const trkColor = this._getSpeakerColor(entry.tracker_id, true);
-        const trkLabel = entry.tracker_id >= 0
-            ? (entry.tracker_name || `T${entry.tracker_id}`)
-            : '?';
-        const trkTitle = entry.tracker_id >= 0
-            ? `Tracker Speaker ${entry.tracker_id}: ${entry.tracker_name || '(unnamed)'} (sim=${entry.tracker_sim.toFixed(3)})`
-            : 'Tracker: Unknown speaker';
-
         row.innerHTML = `
             <span class="asr-tx-ts">${entry.ts}</span>
             <span class="asr-tx-speaker" style="--spk-color:${spkColor}" title="${spkTitle}">${this._esc(spkLabel)}${srcAbbr ? `<sup>${srcAbbr}</sup>` : ''}</span>
-            <span class="asr-tx-speaker asr-tx-speaker--trk" style="--spk-color:${trkColor}" title="${trkTitle}">${this._esc(trkLabel)}</span>
             <span class="asr-tx-text">${this._esc(entry.text)}</span>
             <span class="asr-tx-meta">
                 <span class="asr-tx-metric ${latClass}">${entry.latency_ms.toFixed(0)}ms</span>

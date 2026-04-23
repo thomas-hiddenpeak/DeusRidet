@@ -27,7 +27,7 @@ namespace auditus {
 namespace {
 
 // Serialize a SpeakerDb's roster as a JSON array string. Templated so it accepts
-// the various SpeakerDb-shaped types (CAM++, Legacy, WL-ECAPA, Tracker).
+// the various SpeakerDb-shaped types (CAM++, Legacy, WL-ECAPA).
 template <class Db>
 std::string speaker_list_json(Db& db) {
     auto spks = db.all_speakers();
@@ -59,12 +59,9 @@ void install_transcript_callback(AudioPipeline& audio,
                              float speaker_sim, float speaker_confidence,
                              const std::string& speaker_source,
                              const std::string& trigger_reason,
-                             int tracker_id, const std::string& tracker_name,
-                             float tracker_sim,
                              float stream_start_sec, float stream_end_sec) {
         std::string escaped = json_escape(result.text);
         std::string spk_escaped = json_escape(speaker_name);
-        std::string trk_escaped = json_escape(tracker_name);
         std::string src_escaped = json_escape(speaker_source);
         char json[2048];
         snprintf(json, sizeof(json),
@@ -72,30 +69,25 @@ void install_transcript_callback(AudioPipeline& audio,
             R"("stream_start_sec":%.2f,"stream_end_sec":%.2f,)"
             R"("mel_ms":%.1f,"encoder_ms":%.1f,"decode_ms":%.1f,"tokens":%d,"mel_frames":%d,)"
             R"("speaker_id":%d,"speaker_name":"%s","speaker_sim":%.3f,"speaker_confidence":%.3f,"speaker_source":"%s",)"
-            R"("trigger":"%s",)"
-            R"("tracker_id":%d,"tracker_name":"%s","tracker_sim":%.3f})",
+            R"("trigger":"%s"})",
             escaped.c_str(), result.total_ms, audio_sec,
             stream_start_sec, stream_end_sec,
             result.mel_ms, result.encoder_ms, result.decode_ms,
             result.token_count, result.mel_frames,
             speaker_id, spk_escaped.c_str(), speaker_sim, speaker_confidence, src_escaped.c_str(),
-            trigger_reason.c_str(),
-            tracker_id, trk_escaped.c_str(), tracker_sim);
+            trigger_reason.c_str());
         server.broadcast_text(json);
         timeline.log_asr(result.text.c_str(), stream_start_sec, stream_end_sec,
                          result.total_ms, audio_sec, trigger_reason.c_str(),
                          speaker_id, speaker_name.c_str(), speaker_sim,
-                         speaker_confidence, speaker_source.c_str(),
-                         tracker_id, tracker_name.c_str(), tracker_sim);
+                         speaker_confidence, speaker_source.c_str());
         if (speaker_id >= 0)
-            printf("[awaken] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s conf=%.2f src=%s | trk=%d %s]\n",
+            printf("[awaken] ASR: \"%s\" (%.1f ms, %.2f s) [spk=%d %s conf=%.2f src=%s]\n",
                    result.text.c_str(), result.total_ms, audio_sec,
-                   speaker_id, speaker_name.c_str(), speaker_confidence, speaker_source.c_str(),
-                   tracker_id, tracker_name.c_str());
+                   speaker_id, speaker_name.c_str(), speaker_confidence, speaker_source.c_str());
         else
-            printf("[awaken] ASR: \"%s\" (%.1f ms, %.2f s) [trk=%d %s]\n",
-                   result.text.c_str(), result.total_ms, audio_sec,
-                   tracker_id, tracker_name.c_str());
+            printf("[awaken] ASR: \"%s\" (%.1f ms, %.2f s)\n",
+                   result.text.c_str(), result.total_ms, audio_sec);
 
         // Inject ASR transcript into consciousness stream.
         if (llm_loaded && !result.text.empty()) {
@@ -143,8 +135,8 @@ void install_stats_callback(AudioPipeline& audio,
         char json[3200];
         snprintf(json, sizeof(json),
             R"({"type":"pipeline_stats","audio_t1":%lu,"audio_t1_in":%lu,"mel_frames":%lu,)"
-            R"("speech_frames":%lu,"rms":%.4f,"energy":%.2f,"is_speech":%s,)"
-            R"("threshold":%.2f,"noise_floor":%.2f,"gain":%.1f,)"
+            R"("rms":%.4f,"is_speech":%s,)"
+            R"("gain":%.1f,)"
             R"("frcrn_active":%s,"frcrn_enabled":%s,"frcrn_loaded":%s,"frcrn_lat_ms":%.1f,)"
             R"("silero_prob":%.3f,"silero_speech":%s,"silero_threshold":%.2f,"silero_enabled":%s,)"
             R"("fsmn_prob":%.3f,"fsmn_speech":%s,"fsmn_threshold":%.2f,"fsmn_enabled":%s,)"
@@ -157,10 +149,8 @@ void install_stats_callback(AudioPipeline& audio,
             (unsigned long)st.audio_t1_processed,
             (unsigned long)st.audio_t1_in,
             (unsigned long)st.mel_frames,
-            (unsigned long)st.speech_frames,
-            st.last_rms, st.last_energy,
+            st.last_rms,
             st.is_speech ? "true" : "false",
-            audio.vad_threshold(), audio.vad_noise_floor(),
             audio.gain(),
             st.frcrn_active ? "true" : "false",
             audio.frcrn_enabled() ? "true" : "false",
@@ -284,108 +274,39 @@ void install_stats_callback(AudioPipeline& audio,
             }
         }
 
-        // SpeakerTracker stats.
-        bool tracker_overlap_state = false;
-        bool sep_confirm_overlap = false;
-        int tracker_speaker_count = 0;
-        int sep_spk1_id = -1;
-        int sep_spk2_id = -1;
-        {
-            auto& ts = audio.tracker().stats();
-            tracker_overlap_state = (ts.state == TrackerState::OVERLAP);
-            tracker_speaker_count = ts.speaker_count;
-            sep_confirm_overlap = ts.overlap_confirm_valid &&
-                                  ts.overlap_spk1_id >= 0 &&
-                                  ts.overlap_spk2_id >= 0 &&
-                                  ts.overlap_spk1_id != ts.overlap_spk2_id;
-            sep_spk1_id = ts.overlap_spk1_id;
-            sep_spk2_id = ts.overlap_spk2_id;
-            char trk[512];
-            snprintf(trk, sizeof(trk),
-                R"(,"tracker_enabled":%s,"tracker_state":%d,"tracker_spk_id":%d,"tracker_spk_sim":%.3f)"
-                R"(,"tracker_spk_name":"%s","tracker_confidence":%d,"tracker_spk_count":%d)"
-                R"(,"tracker_timeline_len":%d,"tracker_switches":%d)"
-                R"(,"tracker_f0_hz":%.1f,"tracker_f0_jitter":%.3f)"
-                R"(,"tracker_sim_to_ref":%.3f,"tracker_sim_avg":%.3f)"
-                R"(,"tracker_check_active":%s,"tracker_check_lat_ms":%.1f)"
-                R"(,"tracker_interval_ms":%d,"tracker_window_ms":%d,"tracker_threshold":%.2f)",
-                ts.enabled ? "true" : "false",
-                static_cast<int>(ts.state),
-                ts.speaker_id, ts.speaker_sim,
-                ts.speaker_name,
-                static_cast<int>(ts.confidence),
-                ts.speaker_count,
-                ts.timeline_len, ts.switches,
-                ts.f0_hz, ts.f0_jitter,
-                ts.sim_to_ref, ts.sim_running_avg,
-                ts.check_active ? "true" : "false",
-                ts.check_lat_ms,
-                audio.tracker().interval_ms(),
-                audio.tracker().window_ms(),
-                audio.tracker().threshold());
-            full_json += trk;
+        // SpeakerTracker removed April 2026 — see devlog.
 
-            if (ts.reg_event) {
-                // Buffer sized generously: fixed template is ~60B, %d up to
-                // ~11B, reg_name up to 63B per tracker contract — 256 leaves
-                // plenty of headroom and silences -Wformat-truncation.
-                char reg[256];
-                snprintf(reg, sizeof(reg),
-                    R"(,"tracker_reg_event":true,"tracker_reg_id":%d,"tracker_reg_name":"%s")",
-                    ts.reg_id, ts.reg_name);
-                full_json += reg;
-            }
-
-            // Tracker speaker list.
-            full_json += R"(,"tracker_speakers":)" + speaker_list_json(audio.tracker().db());
-        }
-
-        // Multi-speaker assessment stage: fuse OD, tracker overlap state, and
-        // separator-confirmed dual speaker IDs.
+        // Multi-speaker assessment: fuse OD heuristic and CAM++ DB count.
         bool od_overlap = st.overlap_detected && st.overlap_ratio >= 0.15f;
-        bool multi_by_count = (tracker_speaker_count >= 2) || (st.speaker_count >= 2);
-        bool multi_speaker = od_overlap || tracker_overlap_state || sep_confirm_overlap || multi_by_count;
+        bool multi_by_count = (st.speaker_count >= 2);
+        bool multi_speaker = od_overlap || multi_by_count;
         float multi_score = st.overlap_ratio;
-        if (tracker_overlap_state && multi_score < 0.60f) multi_score = 0.60f;
-        if (sep_confirm_overlap) multi_score = 1.00f;
         if (multi_by_count && multi_score < 0.50f) multi_score = 0.50f;
 
         char multi_source[64];
         multi_source[0] = '\0';
         if (od_overlap) strcat(multi_source, "od");
-        if (tracker_overlap_state) {
-            if (multi_source[0] != '\0') strcat(multi_source, "+");
-            strcat(multi_source, "tracker");
-        }
-        if (sep_confirm_overlap) {
-            if (multi_source[0] != '\0') strcat(multi_source, "+");
-            strcat(multi_source, "sep_confirm");
-        }
         if (multi_by_count) {
             if (multi_source[0] != '\0') strcat(multi_source, "+");
             strcat(multi_source, "speaker_count");
         }
         if (multi_source[0] == '\0') strcpy(multi_source, "none");
 
-        char ms[256];
+        char ms[128];
         snprintf(ms, sizeof(ms),
-            R"(,"multi_speaker":%s,"multi_score":%.3f,"multi_source":"%s","multi_sep_spk1":%d,"multi_sep_spk2":%d)",
+            R"(,"multi_speaker":%s,"multi_score":%.3f,"multi_source":"%s")",
             multi_speaker ? "true" : "false",
             multi_score,
-            multi_source,
-            sep_spk1_id,
-            sep_spk2_id);
+            multi_source);
         full_json += ms;
 
         if (!st_ptr->multi_speaker_initialized || multi_speaker != st_ptr->multi_speaker_last) {
             st_ptr->multi_speaker_initialized = true;
             st_ptr->multi_speaker_last = multi_speaker;
-            printf("[awaken] MULTI-SPEAKER %s (score=%.2f source=%s sep=[%d,%d])\n",
+            printf("[awaken] MULTI-SPEAKER %s (score=%.2f source=%s)\n",
                    multi_speaker ? "ON" : "OFF",
                    multi_score,
-                   multi_source,
-                   sep_spk1_id,
-                   sep_spk2_id);
+                   multi_source);
         }
 
         full_json += lists_json;
@@ -393,7 +314,7 @@ void install_stats_callback(AudioPipeline& audio,
         server.broadcast_text(full_json);
 
         // Timeline log: compact stats.
-        timeline.log_stats(st, audio.tracker().stats(),
+        timeline.log_stats(st,
                            audio.wlecapa_db().min_margin(),
                            st.wlecapa_change_sim,
                            st.wlecapa_change_valid && !st.wlecapa_is_early);

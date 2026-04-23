@@ -44,8 +44,7 @@ void AudioPipeline::process_asr_pipeline_(const int16_t* pcm_buf, int n_samples)
                 case VadSource::DIRECT: asr_vad_speech = true; break;  // always "speech" — trigger on buffer duration
                 case VadSource::ANY:
                 default:
-                    asr_vad_speech = stats_.is_speech || stats_.silero_speech ||
-                                     stats_.fsmn_speech;
+                    asr_vad_speech = stats_.silero_speech || stats_.fsmn_speech;
                     break;
             }
 
@@ -146,7 +145,7 @@ void AudioPipeline::process_asr_pipeline_(const int16_t* pcm_buf, int n_samples)
                     std::string spk_name(resolved.name);
                     std::string spk_source;
                     {
-                        static const char* kSN[] = {"SAAS_EARLY","SAAS_FULL","SAAS_CHANGE","SAAS_INHERIT","TRACKER"};
+                        static const char* kSN[] = {"SAAS_EARLY","SAAS_FULL","SAAS_CHANGE","SAAS_INHERIT"};
                         // Fallback: if timeline has no result, use seg_ref (old speaker snapshot).
                         if (spk_id < 0) {
                             spk_id = seg_ref_speaker_id_;
@@ -162,11 +161,6 @@ void AudioPipeline::process_asr_pipeline_(const int16_t* pcm_buf, int n_samples)
                                      asr_audio_start / 16000.0f, asr_audio_end / 16000.0f);
                         }
                     }
-                    // Capture tracker pipeline speaker for A/B comparison.
-                    auto& tst = tracker_.stats();
-                    int trk_id = tst.speaker_id;
-                    float trk_sim = tst.speaker_sim;
-                    std::string trk_name(tst.speaker_name);
                     {
                         std::lock_guard<std::mutex> lock(asr_mutex_);
                         ASRJob job;
@@ -181,9 +175,6 @@ void AudioPipeline::process_asr_pipeline_(const int16_t* pcm_buf, int n_samples)
                         job.speaker_sim = spk_sim;
                         job.speaker_confidence = spk_conf;
                         job.speaker_source = std::move(spk_source);
-                        job.tracker_id = trk_id;
-                        job.tracker_name = std::move(trk_name);
-                        job.tracker_sim = trk_sim;
                         asr_queue_.push(std::move(job));
                     }
                     asr_cv_.notify_one();
@@ -295,7 +286,7 @@ void AudioPipeline::process_asr_pipeline_(const int16_t* pcm_buf, int n_samples)
                     }
 
                     // Push job to async ASR thread (non-blocking).
-                    // Resolve speaker label via timeline (fused SAAS + Tracker).
+                    // Resolve speaker label via SAAS timeline.
                     int64_t asr_audio_start = audio_t1_processed_ - (int64_t)asr_pcm_buf_.size();
                     int64_t asr_audio_end = audio_t1_processed_;
                     auto resolved = spk_timeline_.resolve(asr_audio_start, asr_audio_end);
@@ -304,7 +295,7 @@ void AudioPipeline::process_asr_pipeline_(const int16_t* pcm_buf, int n_samples)
                     float spk_conf = resolved.confidence;
                     std::string spk_name(resolved.name);
                     std::string spk_source;
-                    static const char* kSourceNames[] = {"SAAS_EARLY","SAAS_FULL","SAAS_CHANGE","SAAS_INHERIT","TRACKER"};
+                    static const char* kSourceNames[] = {"SAAS_EARLY","SAAS_FULL","SAAS_CHANGE","SAAS_INHERIT"};
                     // Fallback: if timeline has no result, use current SAAS snapshot.
                     // Prefer CAM++ (speaker_id) over WL-ECAPA when both available.
                     if (spk_id < 0) {
@@ -327,11 +318,6 @@ void AudioPipeline::process_asr_pipeline_(const int16_t* pcm_buf, int n_samples)
                                  spk_source.c_str(),
                                  asr_audio_start / 16000.0f, asr_audio_end / 16000.0f);
                     }
-                    // Capture tracker pipeline speaker for A/B comparison.
-                    auto& ts = tracker_.stats();
-                    int trk_id = ts.speaker_id;
-                    float trk_sim = ts.speaker_sim;
-                    std::string trk_name(ts.speaker_name);
                     {
                         std::lock_guard<std::mutex> lock(asr_mutex_);
                         ASRJob job;
@@ -346,9 +332,6 @@ void AudioPipeline::process_asr_pipeline_(const int16_t* pcm_buf, int n_samples)
                         job.speaker_sim = spk_sim;
                         job.speaker_confidence = spk_conf;
                         job.speaker_source = std::move(spk_source);
-                        job.tracker_id = trk_id;
-                        job.tracker_name = std::move(trk_name);
-                        job.tracker_sim = trk_sim;
                         asr_queue_.push(std::move(job));
                     }
                     asr_cv_.notify_one();

@@ -15,7 +15,6 @@
 namespace deusridet {
 
 void TimelineLogger::log_stats(const AudioPipelineStats& st,
-                               const TrackerStats& ts,
                                 float wlecapa_margin,
                                 float change_sim, bool change_valid) {
     std::lock_guard<std::mutex> lk(mu_);
@@ -56,24 +55,7 @@ void TimelineLogger::log_stats(const AudioPipelineStats& st,
         }
     }
 
-    // Tracker.
-    if (ts.check_active) {
-        n += snprintf(buf + n, sizeof(buf) - n,
-            R"("trk_check":true,"trk_state":%d,"trk_id":%d,"trk_name":"%s",)"
-            R"("trk_sim":%.3f,"trk_avg":%.3f,"trk_conf":%d,)"
-            R"("trk_switches":%d,"trk_f0":%.1f,"trk_jitter":%.3f,)",
-            static_cast<int>(ts.state), ts.speaker_id, ts.speaker_name,
-            ts.sim_to_ref, ts.sim_running_avg,
-            static_cast<int>(ts.confidence),
-            ts.switches, ts.f0_hz, ts.f0_jitter);
-    }
-
-    // Tracker registration event.
-    if (ts.reg_event) {
-        n += snprintf(buf + n, sizeof(buf) - n,
-            R"("trk_reg":true,"trk_reg_id":%d,"trk_reg_name":"%s",)",
-            ts.reg_id, ts.reg_name);
-    }
+    // Tracker (removed April 2026 — retained comment for grep locality).
 
     // ASR buffer state.
     n += snprintf(buf + n, sizeof(buf) - n,
@@ -97,8 +79,7 @@ void TimelineLogger::log_asr(const char* text, float stream_start, float stream_
                                float latency_ms, float audio_sec,
                                const char* trigger,
                                int spk_id, const char* spk_name, float spk_sim,
-                               float spk_conf, const char* spk_src,
-                               int trk_id, const char* trk_name, float trk_sim) {
+                               float spk_conf, const char* spk_src) {
     std::lock_guard<std::mutex> lk(mu_);
     if (!fp_) return;
 
@@ -121,15 +102,13 @@ void TimelineLogger::log_asr(const char* text, float stream_start, float stream_
     int n = snprintf(buf, sizeof(buf),
         R"({"t":"asr","t0":%lu,"s":%.2f,"e":%.2f,"text":"%s",)"
         R"("trigger":"%s","latency":%.1f,"audio":%.2f,)"
-        R"("spk_id":%d,"spk_name":"%s","spk_sim":%.3f,"spk_conf":%.3f,"spk_src":"%s",)"
-        R"("trk_id":%d,"trk_name":"%s","trk_sim":%.3f})"
+        R"("spk_id":%d,"spk_name":"%s","spk_sim":%.3f,"spk_conf":%.3f,"spk_src":"%s"})"
         "\n",
         (unsigned long)t0_ns,
         stream_start, stream_end, esc.c_str(),
         trigger ? trigger : "", latency_ms, audio_sec,
         spk_id, spk_name ? spk_name : "", spk_sim, spk_conf,
-        spk_src ? spk_src : "",
-        trk_id, trk_name ? trk_name : "", trk_sim);
+        spk_src ? spk_src : "");
     (void)n;
 
     fputs(buf, fp_);

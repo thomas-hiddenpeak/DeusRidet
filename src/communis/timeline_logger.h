@@ -31,8 +31,6 @@ namespace deusridet {
 
 // Forward declarations — avoid pulling in heavy headers.
 struct AudioPipelineStats;
-struct VadResult;
-struct TrackerStats;
 
 class TimelineLogger {
 public:
@@ -122,7 +120,6 @@ public:
 
     // Log pipeline stats tick — compact subset relevant for timeline analysis.
     void log_stats(const AudioPipelineStats& st,
-                   const TrackerStats& ts,
                    float wlecapa_margin,
                    float change_sim, bool change_valid);
 
@@ -131,8 +128,7 @@ public:
                  float latency_ms, float audio_sec,
                  const char* trigger,
                  int spk_id, const char* spk_name, float spk_sim,
-                 float spk_conf, const char* spk_src,
-                 int trk_id, const char* trk_name, float trk_sim);
+                 float spk_conf, const char* spk_src);
 
     // Log VAD event (start/end only — not every frame).
     // audio_t1 is the AUDIO sample index at the moment of emission. Combined

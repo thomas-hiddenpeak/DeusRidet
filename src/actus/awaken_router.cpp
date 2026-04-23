@@ -2,7 +2,7 @@
  * @file awaken_router.cpp
  * @philosophical_role The bus that carries every WebUI knob-turn to the
  *         subsystem that owns that knob. Matching on command prefix, delegates
- *         to AudioPipeline / SpeakerTracker / ConscientiStream and replies
+ *         to AudioPipeline / ConscientiStream and replies
  *         with a JSON envelope that names the same key the WebUI sent.
  *         Extracted from awaken.cpp (Step 7d) — behaviour identical.
  * @serves awaken_router.h.
@@ -36,14 +36,6 @@ void handle_ws_text_command(int fd,
         loopback.store(false, std::memory_order_relaxed);
         server.send_text(fd, R"({"type":"loopback","enabled":false})");
         printf("[awaken] Loopback OFF (fd=%d)\n", fd);
-    } else if (msg.rfind("vad_threshold:", 0) == 0) {
-        float t = std::strtof(msg.c_str() + 14, nullptr);
-        audio.set_vad_threshold(t);
-        char json[128];
-        snprintf(json, sizeof(json),
-            R"({"type":"vad_threshold","value":%.2f})", t);
-        server.send_text(fd, json);
-        printf("[awaken] VAD threshold = %.2f (fd=%d)\n", t, fd);
     } else if (msg.rfind("gain:", 0) == 0) {
         float g = std::strtof(msg.c_str() + 5, nullptr);
         if (g < 0.1f) g = 0.1f;
@@ -242,72 +234,6 @@ void handle_ws_text_command(int fd,
                 dst, src, ok ? "true" : "false");
             server.send_text(fd, json);
             printf("[awaken] WL-ECAPA merge #%d←#%d %s (fd=%d)\n", dst, src, ok ? "OK" : "FAIL", fd);
-        }
-    // ── SpeakerTracker controls ──
-    } else if (msg == "tracker_enable:on" || msg == "tracker_enable:off") {
-        bool on = msg.back() == 'n';
-        audio.tracker().set_enabled(on);
-        char json[128];
-        snprintf(json, sizeof(json),
-            R"({"type":"tracker_enable","enabled":%s})", on ? "true" : "false");
-        server.send_text(fd, json);
-        printf("[awaken] Tracker %s (fd=%d)\n", on ? "ON" : "OFF", fd);
-    } else if (msg.rfind("tracker_threshold:", 0) == 0) {
-        float t = std::strtof(msg.c_str() + 18, nullptr);
-        if (t < 0.0f) t = 0.0f;
-        if (t > 1.0f) t = 1.0f;
-        audio.tracker().set_threshold(t);
-        char json[128];
-        snprintf(json, sizeof(json),
-            R"({"type":"tracker_threshold","value":%.2f})", t);
-        server.send_text(fd, json);
-        printf("[awaken] Tracker threshold = %.2f (fd=%d)\n", t, fd);
-    } else if (msg.rfind("tracker_change_threshold:", 0) == 0) {
-        float t = std::strtof(msg.c_str() + 24, nullptr);
-        if (t < 0.0f) t = 0.0f;
-        if (t > 1.0f) t = 1.0f;
-        audio.tracker().set_change_threshold(t);
-        char json[128];
-        snprintf(json, sizeof(json),
-            R"({"type":"tracker_change_threshold","value":%.2f})", t);
-        server.send_text(fd, json);
-        printf("[awaken] Tracker change threshold = %.2f (fd=%d)\n", t, fd);
-    } else if (msg.rfind("tracker_interval:", 0) == 0) {
-        int ms = std::stoi(msg.substr(17));
-        if (ms < 250) ms = 250;
-        if (ms > 5000) ms = 5000;
-        audio.tracker().set_interval_ms(ms);
-        char json[128];
-        snprintf(json, sizeof(json),
-            R"({"type":"tracker_interval","value":%d})", ms);
-        server.send_text(fd, json);
-        printf("[awaken] Tracker interval = %d ms (fd=%d)\n", ms, fd);
-    } else if (msg.rfind("tracker_window:", 0) == 0) {
-        int ms = std::stoi(msg.substr(15));
-        if (ms < 500) ms = 500;
-        if (ms > 5000) ms = 5000;
-        audio.tracker().set_window_ms(ms);
-        char json[128];
-        snprintf(json, sizeof(json),
-            R"({"type":"tracker_window","value":%d})", ms);
-        server.send_text(fd, json);
-        printf("[awaken] Tracker window = %d ms (fd=%d)\n", ms, fd);
-    } else if (msg == "tracker_clear") {
-        audio.tracker().clear();
-        server.send_text(fd, R"({"type":"tracker_clear"})");
-        printf("[awaken] Tracker DB cleared (fd=%d)\n", fd);
-    } else if (msg.rfind("tracker_name:", 0) == 0) {
-        auto rest = msg.substr(13);
-        auto colon = rest.find(':');
-        if (colon != std::string::npos) {
-            int id = std::stoi(rest.substr(0, colon));
-            std::string name = rest.substr(colon + 1);
-            audio.tracker().set_speaker_name(id, name);
-            char json[256];
-            snprintf(json, sizeof(json),
-                R"({"type":"tracker_name","id":%d,"name":"%s"})", id, name.c_str());
-            server.send_text(fd, json);
-            printf("[awaken] Tracker Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
         }
     } else if (msg == "asr_enable:on" || msg == "asr_enable:off") {
         bool on = msg.back() == 'n';

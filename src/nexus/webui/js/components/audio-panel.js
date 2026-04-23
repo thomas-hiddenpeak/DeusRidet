@@ -33,14 +33,8 @@ export class AudioPanel {
         // Pipeline stats elements.
         this.pipeMel     = document.getElementById('pipe-mel');
         this.pipeSpeech  = document.getElementById('pipe-speech');
-        this.pipeEnergy  = document.getElementById('pipe-energy');
-        this.pipeNoise   = document.getElementById('pipe-noise');
         this.vadDot      = document.getElementById('vad-dot');
         this.vadLabel    = document.getElementById('vad-label');
-
-        // VAD threshold slider.
-        this.vadSlider   = document.getElementById('vad-threshold');
-        this.vadSliderVal = document.getElementById('vad-threshold-val');
 
         // Input gain slider.
         this.gainSlider   = document.getElementById('input-gain');
@@ -67,7 +61,6 @@ export class AudioPanel {
 
         this.btnMic.addEventListener('click', () => this.toggle());
         this.btnLoopback.addEventListener('click', () => this.toggleLoopback());
-        this.vadSlider.addEventListener('input', () => this._onThresholdChange());
         this.gainSlider.addEventListener('input', () => this._onGainChange());
         this.sileroSlider.addEventListener('input', () => this._onSileroThresholdChange());
         this.fsmnSlider.addEventListener('input', () => this._onFsmnThresholdChange());
@@ -120,10 +113,6 @@ export class AudioPanel {
     updatePipelineStats(stats) {
         this.pipeMel.textContent    = stats.mel_frames;
         this.pipeSpeech.textContent = stats.speech_frames;
-        this.pipeEnergy.textContent = stats.energy.toFixed(2);
-        if (stats.noise_floor !== undefined) {
-            this.pipeNoise.textContent = stats.noise_floor.toFixed(2);
-        }
         // Silero probability display.
         if (stats.silero_prob !== undefined) {
             this.sileroProb.textContent = stats.silero_prob.toFixed(3);
@@ -259,12 +248,6 @@ export class AudioPanel {
         this.btnMic.textContent = 'Enable Mic';
         this.btnMic.setAttribute('aria-pressed', 'false');
         this._clearViz();
-    }
-
-    _onThresholdChange() {
-        const val = parseFloat(this.vadSlider.value);
-        this.vadSliderVal.textContent = val.toFixed(1);
-        this.ws.sendText('vad_threshold:' + val.toFixed(1));
     }
 
     _onGainChange() {
