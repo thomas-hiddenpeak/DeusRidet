@@ -290,6 +290,12 @@ def main() -> int:
                     help="if >0, truncate both audio and GT to this many "
                          "seconds of source audio (sanity-check mode)")
     ap.add_argument("--out-dir", default=None)
+    ap.add_argument("--enable-asr", action="store_true",
+                    help="After WS connect, send 'asr_enable:on' so the server "
+                         "emits asr_transcript events. Server must have been "
+                         "launched with DEUSRIDET_TEST_WS_ENABLE_ASR=1 so the "
+                         "ASR model is actually loaded. With ASR on, replay "
+                         "speed > 2.0x is unreliable.")
     ap.add_argument("--timeline", default=None,
                     help="Path to the TimelineLogger jsonl produced by this "
                          "awaken run (VAD segment boundaries). If omitted, "
@@ -318,6 +324,7 @@ def main() -> int:
 
     # WS setup.
     speaker_events: list[dict] = []  # order-preserving capture
+    asr_events: list[dict] = []      # asr_transcript captures (Step 5e)
     stats_count = 0
     last_audio_t1_in = 0  # updated from every pipeline_stats broadcast
     lock = threading.Lock()
@@ -359,6 +366,20 @@ def main() -> int:
                 last_audio_t1_in = int(obj.get("audio_t1_in", last_audio_t1_in))
             except (TypeError, ValueError):
                 pass
+        elif t == "asr_transcript":
+            with lock:
+                asr_events.append({
+                    "start_sec":  float(obj.get("stream_start_sec", 0.0)),
+                    "end_sec":    float(obj.get("stream_end_sec", 0.0)),
+                    "text":       obj.get("text", ""),
+                    "speaker_id": int(obj.get("speaker_id", -1)),
+                    "speaker_name": obj.get("speaker_name", ""),
+                    "speaker_sim": float(obj.get("speaker_sim", 0.0)),
+                    "speaker_source": obj.get("speaker_source", ""),
+                    "trigger":    obj.get("trigger", ""),
+                    "latency_ms": float(obj.get("latency_ms", 0.0)),
+                    "audio_sec":  float(obj.get("audio_sec", 0.0)),
+                })
 
     connected = threading.Event()
 
@@ -378,9 +399,31 @@ def main() -> int:
         print("[ws] connect timeout", file=sys.stderr)
         return 2
 
+    if args.enable_asr:
+        if args.speed > 2.0:
+            print(f"[asr] WARNING: --speed={args.speed} > 2.0 with ASR on; "
+                  f"transcripts will be incomplete.", flush=True)
+        try:
+            ws.send("asr_enable:on", opcode=websocket.ABNF.OPCODE_TEXT)
+            print("[asr] sent asr_enable:on", flush=True)
+        except Exception as e:
+            print(f"[asr] failed to enable: {e}", file=sys.stderr, flush=True)
+
     stream_pcm(ws, pcm, args.chunk, args.speed)
     print(f"[drain] waiting {args.drain_sec}s for tail segments...", flush=True)
     time.sleep(args.drain_sec)
+
+    # Anchor the ASR transcripts back to source-audio time. The pipeline's
+    # audio_t1_in clock started counting at server boot; by the time
+    # streaming ends it equals (boot_offset + total_src_samples). We
+    # subtract total_src_samples to recover the offset.
+    total_src_sec = len(pcm) / 2 / 16000.0
+    with lock:
+        final_audio_t1_sec = last_audio_t1_in / 16000.0
+    stream_anchor_sec = max(0.0, final_audio_t1_sec - total_src_sec)
+    print(f"[anchor] final_audio_t1_sec={final_audio_t1_sec:.2f} "
+          f"total_src_sec={total_src_sec:.2f} -> "
+          f"stream_anchor_sec={stream_anchor_sec:.2f}", flush=True)
 
     try:
         ws.close()
@@ -392,6 +435,36 @@ def main() -> int:
     with (out_dir / "speaker_events.jsonl").open("w", encoding="utf-8") as f:
         for e in speaker_events:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+    # Save ASR transcripts (if any) and a human-readable interleaved
+    # transcript ready for manual diff against tests/test.txt. Both the
+    # source-relative (src_*) and raw pipeline (start_sec/end_sec) times
+    # are stored so the offset can be re-derived later.
+    if asr_events:
+        for e in asr_events:
+            e["src_start_sec"] = e["start_sec"] - stream_anchor_sec
+            e["src_end_sec"]   = e["end_sec"]   - stream_anchor_sec
+        with (out_dir / "asr_transcripts.jsonl").open("w", encoding="utf-8") as f:
+            for e in asr_events:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        # Sort by source-relative start for comparison with tests/test.txt.
+        asr_sorted = sorted(asr_events, key=lambda e: e["src_start_sec"])
+        with (out_dir / "asr_transcripts.txt").open("w", encoding="utf-8") as f:
+            f.write(f"# source-relative time (anchor_sec={stream_anchor_sec:.2f} "
+                    f"subtracted from raw stream_start)\n")
+            f.write("# HH:MM:SS  [src_start -> src_end]  spk_id  spk_name  text\n")
+            for e in asr_sorted:
+                s = max(0.0, e["src_start_sec"])
+                hh = int(s) // 3600
+                mm = (int(s) // 60) % 60
+                ss = int(s) % 60
+                f.write(f"{hh:02d}:{mm:02d}:{ss:02d}  "
+                        f"[{e['src_start_sec']:7.2f} -> {e['src_end_sec']:7.2f}]  "
+                        f"id={e['speaker_id']:>2}  "
+                        f"{e['speaker_name'] or '?':<10}  "
+                        f"{e['text']}\n")
+        print(f"[capture] asr_transcript events={len(asr_events)} -> "
+              f"asr_transcripts.{{jsonl,txt}}")
 
     print(f"\n[capture] speaker events={len(speaker_events)} "
           f"(pipeline_stats broadcasts seen: {stats_count})")
