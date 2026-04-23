@@ -6,6 +6,11 @@ hub/
 *.wav
 logs/
 __pycache__/
+
+# Evaluation artifacts — large binary embeddings, reproducible via tools/.
+tests/fixtures/*.f32
+tests/fixtures/*_embeddings_*.meta.json
+
 models/
 checkpoints/MossFormer2_SS_16K/last_best_checkpoint
 checkpoints/MossFormer2_SS_16K/last_best_checkpoint.pt

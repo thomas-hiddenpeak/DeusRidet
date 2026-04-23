@@ -247,6 +247,26 @@ add_executable(test_silero_vad tests/test_silero_vad.cpp)
 target_include_directories(test_silero_vad PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(test_silero_vad PRIVATE sensus machina communis CUDA::cudart CUDA::cublas cudnn)
 
+# Tool: dump voiced segments of an audio file via SileroVad (Step 2a GT refinement)
+add_executable(silero_vad_segments tools/silero_vad_segments.cpp)
+target_include_directories(silero_vad_segments PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(silero_vad_segments PRIVATE sensus machina communis CUDA::cudart CUDA::cublas cudnn)
+
+# Tool: offline FSMN VAD → voiced regions (CAM++'s official companion, Step 2a²)
+add_executable(fsmn_vad_segments tools/fsmn_vad_segments.cpp)
+target_include_directories(fsmn_vad_segments PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(fsmn_vad_segments PRIVATE sensus machina communis CUDA::cudart CUDA::cublas cudnn)
+
+# Tool: extract CAM++ embeddings for every GT segment x window-strategy (Step 2b)
+add_executable(cam_extract_embeddings tools/cam_extract_embeddings.cpp)
+target_include_directories(cam_extract_embeddings PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(cam_extract_embeddings PRIVATE sensus machina communis orator CUDA::cudart CUDA::cublas cudnn)
+
+# Tool: extract WavLM+ECAPA embeddings in parallel layout (Step 2c)
+add_executable(wl_extract_embeddings tools/wl_extract_embeddings.cpp)
+target_include_directories(wl_extract_embeddings PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(wl_extract_embeddings PRIVATE orator sensus machina communis CUDA::cudart CUDA::cublas cudnn)
+
 add_executable(test_fsmn_vad tests/test_fsmn_vad.cpp)
 target_include_directories(test_fsmn_vad PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(test_fsmn_vad PRIVATE sensus machina communis CUDA::cudart CUDA::cublas cudnn)

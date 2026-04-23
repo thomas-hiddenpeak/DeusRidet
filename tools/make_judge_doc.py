@@ -203,7 +203,7 @@ def render(gt: list[dict], hyp: list[dict], gt_meta: dict,
                  "nearest HYP row(s) overlapping its `[t0_start, t0_end]` window.")
     lines.append("2. Mark speaker ✅/❌ using the id→name mapping in the summary "
                  "above. Transcription can be ignored for Step 16 (we are "
-                 "tuning the SpeakerTracker, not the ASR).")
+                 "tuning SAAS, not the ASR).")
     lines.append("3. Flag the failure modes you see: cold-start stickiness, "
                  "short-interjection drift, identity swap, unidentified (-1), etc.")
     lines.append("4. Roll findings into docs/{en,zh}/devlog/<date>.md.")
