@@ -139,7 +139,6 @@ void install_stats_callback(AudioPipeline& audio,
             R"("gain":%.1f,)"
             R"("frcrn_active":%s,"frcrn_enabled":%s,"frcrn_loaded":%s,"frcrn_lat_ms":%.1f,)"
             R"("silero_prob":%.3f,"silero_speech":%s,"silero_threshold":%.2f,"silero_enabled":%s,)"
-            R"("fsmn_prob":%.3f,"fsmn_speech":%s,"fsmn_threshold":%.2f,"fsmn_enabled":%s,)"
             R"("vad_source":%d,)"
             R"("speaker_id":%d,"speaker_sim":%.3f,"speaker_new":%s,"speaker_count":%d,)"
             R"("speaker_name":"%s","speaker_enabled":%s,"speaker_threshold":%.2f,"speaker_active":%s,)"
@@ -159,9 +158,6 @@ void install_stats_callback(AudioPipeline& audio,
             st.silero_prob, st.silero_speech ? "true" : "false",
             audio.silero_threshold(),
             audio.silero_enabled() ? "true" : "false",
-            st.fsmn_prob, st.fsmn_speech ? "true" : "false",
-            audio.fsmn_threshold(),
-            audio.fsmn_enabled() ? "true" : "false",
             static_cast<int>(audio.vad_source()),
             st.speaker_id, st.speaker_sim,
             st.speaker_new ? "true" : "false",

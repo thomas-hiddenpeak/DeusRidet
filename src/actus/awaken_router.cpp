@@ -56,16 +56,6 @@ void handle_ws_text_command(int fd,
             R"({"type":"silero_threshold","value":%.2f})", t);
         server.send_text(fd, json);
         printf("[awaken] Silero threshold = %.2f (fd=%d)\n", t, fd);
-    } else if (msg.rfind("fsmn_threshold:", 0) == 0) {
-        float t = std::strtof(msg.c_str() + 15, nullptr);
-        if (t < 0.0f) t = 0.0f;
-        if (t > 1.0f) t = 1.0f;
-        audio.set_fsmn_threshold(t);
-        char json[128];
-        snprintf(json, sizeof(json),
-            R"({"type":"fsmn_threshold","value":%.2f})", t);
-        server.send_text(fd, json);
-        printf("[awaken] FSMN threshold = %.2f (fd=%d)\n", t, fd);
     } else if (msg == "silero_enable:on" || msg == "silero_enable:off") {
         bool on = msg.back() == 'n';
         audio.set_silero_enabled(on);
@@ -82,19 +72,10 @@ void handle_ws_text_command(int fd,
             R"({"type":"frcrn_enable","enabled":%s})", on ? "true" : "false");
         server.send_text(fd, json);
         printf("[awaken] FRCRN %s (fd=%d)\n", on ? "ON" : "OFF", fd);
-    } else if (msg == "fsmn_enable:on" || msg == "fsmn_enable:off") {
-        bool on = msg.back() == 'n';
-        audio.set_fsmn_enabled(on);
-        char json[128];
-        snprintf(json, sizeof(json),
-            R"({"type":"fsmn_enable","enabled":%s})", on ? "true" : "false");
-        server.send_text(fd, json);
-        printf("[awaken] FSMN %s (fd=%d)\n", on ? "ON" : "OFF", fd);
     } else if (msg.rfind("vad_source:", 0) == 0) {
         auto val = msg.substr(11);
         VadSource src = VadSource::ANY;
         if (val == "silero") src = VadSource::SILERO;
-        else if (val == "fsmn") src = VadSource::FSMN;
         else src = VadSource::ANY;
         audio.set_vad_source(src);
         char json[128];
@@ -247,7 +228,6 @@ void handle_ws_text_command(int fd,
         auto val = msg.substr(15);
         VadSource src = VadSource::ANY;
         if (val == "silero") src = VadSource::SILERO;
-        else if (val == "fsmn") src = VadSource::FSMN;
         else if (val == "direct") src = VadSource::DIRECT;
         else src = VadSource::ANY;
         audio.set_asr_vad_source(src);

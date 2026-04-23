@@ -56,7 +56,6 @@
                 <span class="vad-dot" id="vad-dot"></span>
                 <span id="vad-label">Silence</span>
                 <span class="stat silero-prob">Silero: <strong id="silero-prob">—</strong></span>
-                <span class="stat fsmn-prob">FSMN: <strong id="fsmn-prob">—</strong></span>
             </div>
             <div class="vad-threshold-control">
                 <label for="input-gain" class="vad-threshold-label">
@@ -78,19 +77,6 @@
             </div>
             <div class="level-bar-wrap">
                 <div class="level-bar level-bar--silero" id="silero-prob-bar"></div>
-            </div>
-            <div class="vad-threshold-control">
-                <label for="fsmn-threshold" class="vad-threshold-label">
-                    <button id="fsmn-toggle" class="btn btn--vad"
-                            aria-pressed="false">FSMN</button>
-                    <strong id="fsmn-threshold-val">0.50</strong>
-                </label>
-                <input type="range" id="fsmn-threshold" class="vad-threshold-slider"
-                       min="0" max="1" step="0.05" value="0.5"
-                       aria-label="FSMN VAD threshold">
-            </div>
-            <div class="level-bar-wrap">
-                <div class="level-bar level-bar--fsmn" id="fsmn-prob-bar"></div>
             </div>
         </section>
 
@@ -114,7 +100,6 @@
                     <select id="vad-source-select" class="vad-source-select">
                         <option value="any">Any (OR)</option>
                         <option value="silero" selected>Silero</option>
-                        <option value="fsmn">FSMN</option>
                     </select>
                 </div>
                 <div class="spk-thresh-row">

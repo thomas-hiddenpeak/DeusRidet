@@ -46,15 +46,8 @@ export class AudioPanel {
         this.sileroSlider    = document.getElementById('silero-threshold');
         this.sileroSliderVal = document.getElementById('silero-threshold-val');
 
-        // FSMN VAD elements.
-        this.fsmnProb      = document.getElementById('fsmn-prob');
-        this.fsmnProbBar   = document.getElementById('fsmn-prob-bar');
-        this.fsmnSlider    = document.getElementById('fsmn-threshold');
-        this.fsmnSliderVal = document.getElementById('fsmn-threshold-val');
-
         // Per-VAD toggle buttons.
         this.sileroToggle = document.getElementById('silero-toggle');
-        this.fsmnToggle   = document.getElementById('fsmn-toggle');
 
         // Log output.
         this.logOutput = document.getElementById('log-output');
@@ -63,9 +56,7 @@ export class AudioPanel {
         this.btnLoopback.addEventListener('click', () => this.toggleLoopback());
         this.gainSlider.addEventListener('input', () => this._onGainChange());
         this.sileroSlider.addEventListener('input', () => this._onSileroThresholdChange());
-        this.fsmnSlider.addEventListener('input', () => this._onFsmnThresholdChange());
         this.sileroToggle.addEventListener('click', () => this._toggleVad('silero'));
-        this.fsmnToggle.addEventListener('click', () => this._toggleVad('fsmn'));
     }
 
     enable() {
@@ -120,22 +111,11 @@ export class AudioPanel {
             this.sileroProbBar.classList.toggle('level-bar--speech',
                 stats.silero_speech);
         }
-        // FSMN probability display.
-        if (stats.fsmn_prob !== undefined) {
-            this.fsmnProb.textContent = stats.fsmn_prob.toFixed(3);
-            this.fsmnProbBar.style.width = (stats.fsmn_prob * 100) + '%';
-            this.fsmnProbBar.classList.toggle('level-bar--speech',
-                stats.fsmn_speech);
-        }
 
         // Sync enable toggle state from server.
         if (stats.silero_enabled !== undefined) {
             this.sileroToggle.classList.toggle('btn--active', stats.silero_enabled);
             this.sileroToggle.setAttribute('aria-pressed', String(stats.silero_enabled));
-        }
-        if (stats.fsmn_enabled !== undefined) {
-            this.fsmnToggle.classList.toggle('btn--active', stats.fsmn_enabled);
-            this.fsmnToggle.setAttribute('aria-pressed', String(stats.fsmn_enabled));
         }
 
         // Log VAD results (throttled — every ~500ms).
@@ -143,7 +123,6 @@ export class AudioPanel {
             this._lastLogTime = Date.now();
             const parts = [];
             if (stats.silero_enabled) parts.push(`Silero=${stats.silero_prob.toFixed(3)}${stats.silero_speech ? '▲' : '▽'}`);
-            if (stats.fsmn_enabled) parts.push(`FSMN=${stats.fsmn_prob.toFixed(3)}${stats.fsmn_speech ? '▲' : '▽'}`);
             if (parts.length > 0) {
                 this._appendLog(parts.join('  ') + `  rms=${stats.rms.toFixed(4)}`);
             }
@@ -262,14 +241,8 @@ export class AudioPanel {
         this.ws.sendText('silero_threshold:' + val.toFixed(2));
     }
 
-    _onFsmnThresholdChange() {
-        const val = parseFloat(this.fsmnSlider.value);
-        this.fsmnSliderVal.textContent = val.toFixed(2);
-        this.ws.sendText('fsmn_threshold:' + val.toFixed(2));
-    }
-
     _toggleVad(name) {
-        const btnMap = { silero: this.sileroToggle, fsmn: this.fsmnToggle };
+        const btnMap = { silero: this.sileroToggle };
         const btn = btnMap[name];
         const isActive = btn.classList.contains('btn--active');
         const newState = !isActive;

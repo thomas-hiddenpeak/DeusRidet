@@ -186,15 +186,6 @@ body {
     background: var(--clr-success);
 }
 
-.level-bar--fsmn {
-    background: #b48ead;
-    transition: width 100ms ease;
-}
-
-.level-bar--fsmn.level-bar--speech {
-    background: var(--clr-success);
-}
-
 .level-bar--ten {
     background: #d08770;
     transition: width 100ms ease;
@@ -205,7 +196,6 @@ body {
 }
 
 .silero-prob,
-.fsmn-prob,
 .ten-prob {
     margin-left: auto;
     font-family: var(--font-mono);

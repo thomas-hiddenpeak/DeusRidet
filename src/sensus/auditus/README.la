@@ -9,7 +9,7 @@ Auditus is the ear through which the entity receives spoken language.
 Not a microphone driver, not a codec — the whole perceptual pipeline:
 
 ```
-PCM → FRCRN (denoise) → MossFormer2 (separate) → VAD (silero/fsmn) →
+PCM → FRCRN (denoise) → MossFormer2 (separate) → VAD (silero) →
     Mel features → ASR encoder/decoder → tokens
                                       → Orator (speaker ID)
                                       → Tracker (multi-speaker assignment)

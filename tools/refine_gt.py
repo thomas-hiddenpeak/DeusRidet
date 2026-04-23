@@ -38,7 +38,6 @@ AUDIO     = ROOT / "tests" / "test.mp3"
 PCM_CACHE = Path("/tmp") / "test_mp3_16k_mono.f32"
 VAD_BINS  = {
     "silero": ROOT / "build" / "silero_vad_segments",
-    "fsmn":   ROOT / "build" / "fsmn_vad_segments",
 }
 
 
@@ -63,7 +62,7 @@ def decode_audio() -> None:
 def run_vad(kind: str, threshold: float, min_speech_ms: int,
             min_silence_ms: int, pad_ms: int) -> list[dict]:
     if kind not in VAD_BINS:
-        sys.exit(f"Unknown --vad {kind}; expected silero|fsmn")
+        sys.exit(f"Unknown --vad {kind}; expected silero")
     binp = VAD_BINS[kind]
     if not binp.exists():
         sys.exit(f"VAD binary not built: {binp}\n"
@@ -106,7 +105,7 @@ def intersect(utt_start: int, utt_end: int,
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--vad",            choices=["silero", "fsmn"], default="silero")
+    ap.add_argument("--vad",            choices=["silero"], default="silero")
     ap.add_argument("--min-seg-ms",     type=int,   default=500)
     ap.add_argument("--vad-threshold",  type=float, default=0.5)
     ap.add_argument("--vad-min-speech-ms",  type=int, default=250)

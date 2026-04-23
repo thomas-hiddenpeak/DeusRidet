@@ -34,14 +34,12 @@ void AudioPipeline::process_loop() {
     std::vector<float> pcm_float;  // reused buffer for gain-applied float PCM
     std::vector<float> silero_buf; // carries remainder samples across chunks
 
-    LOG_INFO("AudioPipe", "Process loop: chunk=%d samples (%d ms), frcrn_loaded=%s frcrn_enabled=%s silero_loaded=%s silero_enabled=%s fsmn_loaded=%s fsmn_enabled=%s",
+    LOG_INFO("AudioPipe", "Process loop: chunk=%d samples (%d ms), frcrn_loaded=%s frcrn_enabled=%s silero_loaded=%s silero_enabled=%s",
              chunk_samples, cfg_.process_chunk_ms,
              frcrn_.initialized() ? "ON" : "OFF",
              enable_frcrn_.load(std::memory_order_relaxed) ? "ON" : "OFF",
              silero_.initialized() ? "ON" : "OFF",
-             enable_silero_.load(std::memory_order_relaxed) ? "ON" : "OFF",
-             fsmn_.initialized() ? "ON" : "OFF",
-             enable_fsmn_.load(std::memory_order_relaxed) ? "ON" : "OFF");
+             enable_silero_.load(std::memory_order_relaxed) ? "ON" : "OFF");
 
     int diag_counter = 0;
 
@@ -125,12 +123,8 @@ void AudioPipeline::process_loop() {
         }
 
         // Run FSMN VAD on raw PCM chunk (accumulates fbank internally).
-        if (fsmn_.initialized() &&
-            enable_fsmn_.load(std::memory_order_relaxed)) {
-            FsmnVadResult fvr = fsmn_.process(pcm_buf.data(), n_samples);
-            stats_.fsmn_prob = fvr.probability;
-            stats_.fsmn_speech = fvr.is_speech;
-        }
+        // FSMN removed April 2026 — lost to Silero at every tested threshold
+        // (see docs/.../step2-vad-encoder-matrix). Silero is now the sole VAD.
 
         // Buffer PCM for speaker identification during speech (VAD-gated).
         bool any_speaker_enabled =
@@ -149,11 +143,10 @@ void AudioPipeline::process_loop() {
             VadSource src = static_cast<VadSource>(vad_source_.load(std::memory_order_relaxed));
             bool vad_speech = false;
             switch (src) {
-                case VadSource::SILERO: vad_speech = stats_.silero_speech; break;
-                case VadSource::FSMN:   vad_speech = stats_.fsmn_speech; break;
+                case VadSource::SILERO:
                 case VadSource::ANY:
                 default:
-                    vad_speech = stats_.silero_speech || stats_.fsmn_speech;
+                    vad_speech = stats_.silero_speech;
                     break;
             }
             if (vad_speech && !in_speech_segment_) {
@@ -244,7 +237,7 @@ void AudioPipeline::process_loop() {
         // Push to Mel spectrogram (GPU).
         // Mel spectrogram is still computed (its frame count powers diagnostic
         // stats and matches the ASR encoder's framing), but no per-frame VAD
-        // runs here — Silero/FSMN handle voice activity detection on raw PCM.
+        // runs here — Silero handles voice activity detection on raw PCM.
         int new_frames = mel_.push_pcm(pcm_buf.data(), n_samples);
         stats_.mel_frames += new_frames;
 
@@ -255,9 +248,8 @@ void AudioPipeline::process_loop() {
 
         // Periodic diagnostic log (~every 1s = 10 chunks at 100ms).
         if (++diag_counter % 10 == 0) {
-            LOG_INFO("AudioPipe", "DIAG rms=%.4f silero=%.3f fsmn=%.3f speech=%d gain=%.1f spk=%d(%.2f)",
+            LOG_INFO("AudioPipe", "DIAG rms=%.4f silero=%.3f speech=%d gain=%.1f spk=%d(%.2f)",
                      stats_.last_rms, stats_.silero_prob,
-                     stats_.fsmn_prob,
                      (int)stats_.is_speech,
                      gain_.load(std::memory_order_relaxed),
                      stats_.speaker_id, stats_.speaker_sim);

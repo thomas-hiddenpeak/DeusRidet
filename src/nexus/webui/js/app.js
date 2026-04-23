@@ -136,7 +136,7 @@ ws.onText = (msg) => {
             return;  // silently acknowledge
         }
         if (obj.type === 'asr_vad_source') {
-            const map = {0:'silero', 1:'fsmn', 2:'ten', 3:'any', 4:'direct'};
+            const map = {0:'silero', 2:'ten', 3:'any', 4:'direct'};
             log(`ASR VAD source → ${map[obj.value] || obj.value}`);
             return;
         }
@@ -339,7 +339,7 @@ function updateSpeakerPanel(stats) {
     }
     // Sync VAD source.
     if (stats.vad_source !== undefined && vadSourceSelect && !vadSourceSelect.matches(':focus')) {
-        const map = {0:'silero', 1:'fsmn', 2:'ten', 3:'any'};
+        const map = {0:'silero', 2:'ten', 3:'any'};
         vadSourceSelect.value = map[stats.vad_source] || 'any';
     }
 

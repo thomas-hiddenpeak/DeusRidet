@@ -34,9 +34,6 @@ struct AudioPipelineStats {
     // Silero VAD.
     float    silero_prob;      // latest Silero speech probability [0,1]
     bool     silero_speech;    // Silero VAD speech state
-    // FSMN VAD.
-    float    fsmn_prob;        // latest FSMN speech probability [0,1]
-    bool     fsmn_speech;      // FSMN VAD speech state
     // Speaker identification (CAM++).
     int      speaker_id;       // current speaker ID (-1 = unknown)
     float    speaker_sim;      // best cosine similarity

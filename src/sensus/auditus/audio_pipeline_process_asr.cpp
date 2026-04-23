@@ -39,12 +39,11 @@ void AudioPipeline::process_asr_pipeline_(const int16_t* pcm_buf, int n_samples)
             VadSource asr_src = static_cast<VadSource>(asr_vad_source_.load(std::memory_order_relaxed));
             bool asr_vad_speech = false;
             switch (asr_src) {
-                case VadSource::SILERO: asr_vad_speech = stats_.silero_speech; break;
-                case VadSource::FSMN:   asr_vad_speech = stats_.fsmn_speech; break;
                 case VadSource::DIRECT: asr_vad_speech = true; break;  // always "speech" — trigger on buffer duration
+                case VadSource::SILERO:
                 case VadSource::ANY:
                 default:
-                    asr_vad_speech = stats_.silero_speech || stats_.fsmn_speech;
+                    asr_vad_speech = stats_.silero_speech;
                     break;
             }
 

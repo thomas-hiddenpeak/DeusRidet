@@ -101,9 +101,6 @@ int awaken(const std::string& webui_dir,
     audio_cfg.separator.model_path = model_root + "/vad/mossformer2_ss_16k.safetensors";
     audio_cfg.separator.lazy_load = true;
 
-    audio_cfg.fsmn.model_path = model_root + "/vad/fsmn/fsmn_vad.safetensors";
-    audio_cfg.fsmn.cmvn_path  = model_root + "/vad/fsmn/am.mvn";
-
     // Configure CAM++ speaker encoder model path.
     audio_cfg.speaker.model_path = model_root + "/speaker/campplus/campplus.safetensors";
 
@@ -194,16 +191,14 @@ int awaken(const std::string& webui_dir,
     // Auditus facade.
     auditus::install_ws_binary_callback(server, audio, total_frames, total_bytes, loopback);
 
-    // Default runtime policy for next-stage tests:
-    // Silero as primary VAD, FSMN kept available but disabled by default.
-    // Tuned baseline from current Silero-only sweep.
+    // Default runtime policy: Silero is the sole VAD (FSMN removed April 2026,
+    // lost to Silero at every tested threshold per Step 2 evaluation matrix).
     audio.set_vad_source(VadSource::SILERO);
     audio.set_asr_vad_source(VadSource::SILERO);
     audio.set_silero_enabled(true);
-    audio.set_fsmn_enabled(false);
     audio.set_gain(4.0f);
     audio.set_silero_threshold(0.001f);
-    printf("[awaken] Default VAD policy: source=silero, silero=ON, fsmn=OFF, gain=4.0, silero_threshold=0.001\n");
+    printf("[awaken] Default VAD policy: source=silero, silero=ON, gain=4.0, silero_threshold=0.001\n");
 
     // Load configs/auditus.conf (diarization runtime knobs). Missing keys
     // fall back to AudioPipelineConfig defaults, so the file is optional.

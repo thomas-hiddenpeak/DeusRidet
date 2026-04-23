@@ -5,13 +5,12 @@
  */
 // audio_pipeline.h — Real-time audio processing pipeline.
 //
-// Wires: WS PCM input → Ring Buffer → Gain → Mel (GPU) → Energy VAD
-//                                          └→ Silero VAD (ONNX, CPU)
-//                                          └→ FSMN VAD (ONNX, GPU fbank)
+// Wires: WS PCM input → Ring Buffer → Gain → Mel (GPU)
+//                                          └→ Silero VAD (native C++)
 //                                          └→ Speaker Encoder (CAM++ GPU)
 //                                          └→ ASR (Qwen3-ASR, native CUDA)
 // Runs a processing thread that pulls from the ring buffer, computes
-// Mel frames on GPU, runs VAD engines, extracts speaker embeddings, and reports results.
+// Mel frames on GPU, runs Silero VAD, extracts speaker embeddings, and reports results.
 
 #pragma once
 
@@ -20,8 +19,7 @@
 #include "overlap_detector.h"
 #include "speech_separator.h"
 #include "silero_vad.h"
-#include "fsmn_vad.h"
-#include "fsmn_fbank_gpu.h"
+#include "fsmn_fbank_gpu.h"  // generic Povey/Hamming GPU Fbank; name historical
 #include "asr/asr_engine.h"
 #include "../../communis/ring_buffer.h"
 #include "../../orator/speaker_encoder.h"
@@ -46,10 +44,12 @@
 namespace deusridet {
 
 // Which VAD engine drives the speech detection for speaker extraction.
+// Historical enum values preserved to keep WebUI + router wire format stable;
+// only SILERO and DIRECT are live after FSMN was removed (April 2026,
+// data-driven: FSMN lost to Silero at every tested threshold).
 enum class VadSource : int {
     SILERO = 0,
-    FSMN   = 1,
-    ANY    = 2,  // OR of all enabled VADs
+    ANY    = 2,  // alias for SILERO (kept for backward-compat WS messages)
     DIRECT = 3,  // bypass VAD — ASR triggers on buffer duration only
 };
 
@@ -59,7 +59,6 @@ struct AudioPipelineConfig {
     OverlapDetectorConfig overlap_det;  // pyannote overlap detection (P1)
     SpeechSeparatorConfig separator;    // MossFormer2 speech separation (P2)
     SileroVadConfig silero;             // Silero VAD model config
-    FsmnVadConfig fsmn;                 // FSMN VAD model config
     SpeakerEncoderConfig speaker;       // CAM++ speaker encoder config
     std::string wavlm_ecapa_model;         // WavLM-Large+ECAPA-TDNN safetensors path (native GPU)
     float wavlm_ecapa_threshold = 0.55f;   // default cosine sim threshold
@@ -155,15 +154,9 @@ public:
     bool separator_enabled() const { return enable_separator_.load(std::memory_order_relaxed); }
     bool separator_loaded() const { return separator_.loaded(); }
 
-    // FSMN VAD threshold.
-    void set_fsmn_threshold(float t) { fsmn_.set_threshold(t); }
-    float fsmn_threshold() const { return fsmn_.threshold(); }
-
-    // Per-VAD enable/disable (thread-safe).
+    // Silero enable/disable (thread-safe). FSMN was removed April 2026.
     void set_silero_enabled(bool e) { enable_silero_.store(e, std::memory_order_relaxed); }
     bool silero_enabled() const { return enable_silero_.load(std::memory_order_relaxed); }
-    void set_fsmn_enabled(bool e) { enable_fsmn_.store(e, std::memory_order_relaxed); }
-    bool fsmn_enabled() const { return enable_fsmn_.load(std::memory_order_relaxed); }
 
     // Speaker encoder enable/disable (thread-safe).
     void set_speaker_enabled(bool e) { enable_speaker_.store(e, std::memory_order_relaxed); }
@@ -314,7 +307,6 @@ private:
     FrcrnEnhancer frcrn_;
 
     SileroVad silero_;
-    FsmnVad fsmn_;
     SpeakerEncoder speaker_enc_;
     SpeakerVectorStore campp_db_{"CamppDb", 192, 0.15f};
     SpeakerDb speaker_db_{"CAM++Db"};  // legacy — kept for UI/API backward compat
@@ -355,7 +347,6 @@ private:
     std::atomic<bool> enable_silero_{true};
     std::atomic<bool> enable_frcrn_{true};     // FRCRN speech enhancement
 
-    std::atomic<bool> enable_fsmn_{false};
     std::atomic<bool> enable_speaker_{true};    // CAM++ — primary SAAS encoder
     std::atomic<bool> enable_wlecapa_{false};    // WL-ECAPA — disabled (CAM++ is primary)
     std::atomic<float> speaker_threshold_{0.50f}; // CAM++ matching threshold

@@ -31,15 +31,13 @@ void TimelineLogger::log_stats(const AudioPipelineStats& st,
     int n = snprintf(buf, sizeof(buf),
         R"({"t":"stats","t0":%lu,"audio_t1":%lu,"audio_t1_in":%lu,"s":%.4f,)"
         R"("speech":%s,"energy":%.2f,"rms":%.4f,)"
-        R"("silero_p":%.3f,"silero_sp":%s,)"
-        R"("fsmn_p":%.3f,"fsmn_sp":%s,)",
+        R"("silero_p":%.3f,"silero_sp":%s,)",
         (unsigned long)t0_ns,
         (unsigned long)st.audio_t1_processed,
         (unsigned long)st.audio_t1_in,
         stream_sec,
         st.is_speech ? "true" : "false", st.last_energy, st.last_rms,
-        st.silero_prob, st.silero_speech ? "true" : "false",
-        st.fsmn_prob, st.fsmn_speech ? "true" : "false");
+        st.silero_prob, st.silero_speech ? "true" : "false");
 
     // WL-ECAPA (only when active).
     if (st.wlecapa_active) {

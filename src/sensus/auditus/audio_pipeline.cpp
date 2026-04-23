@@ -64,14 +64,7 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
     // Initialize Silero VAD (optional — non-fatal if model not found).
     if (!cfg_.silero.model_path.empty()) {
         if (!silero_.init(cfg_.silero)) {
-            LOG_WARN("AudioPipe", "Silero VAD init failed — running energy-only VAD");
-        }
-    }
-
-    // Initialize FSMN VAD (optional — non-fatal).
-    if (!cfg_.fsmn.model_path.empty()) {
-        if (!fsmn_.init(cfg_.fsmn)) {
-            LOG_WARN("AudioPipe", "FSMN VAD init failed");
+            LOG_WARN("AudioPipe", "Silero VAD init failed — speaker/ASR pipelines will lack VAD gating");
         }
     }
 
