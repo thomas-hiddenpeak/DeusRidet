@@ -86,6 +86,18 @@ struct AudioPipelineConfig {
     // legitimate speakers never cross the register threshold. See
     // docs/{en,zh}/devlog/ for the full negative result.
     int   speaker_min_fbank_frames   = 150;
+    // Short-segment inheritance broadcast: when a speech segment ends
+    // with fewer than speaker_min_fbank_frames fbank frames, the FULL
+    // CAM++ extraction is skipped (short audio produces noisy
+    // embeddings that poison the library). But the VAD-start hook has
+    // already populated stats_.speaker_id from the previous segment
+    // under a strict 0.8 s gap gate (SAAS_INHERIT). If this flag is
+    // enabled, the segment-end path emits that inherited identity to
+    // the on_speaker_ broadcast channel — giving downstream consumers
+    // coverage on short backchannels / fillers / continuations WITHOUT
+    // running the encoder and WITHOUT touching the speaker library
+    // (no identify, no register, no EMA, no exemplar addition).
+    bool  speaker_short_inherit_enable = true;
     // Replay speed for benchmark/testing input. 1.0 = real-time; >1.0 means
     // the upstream driver feeds samples faster than wall time (e.g. speed=2.0
     // pushes two seconds of source audio per wall second). This ONLY affects

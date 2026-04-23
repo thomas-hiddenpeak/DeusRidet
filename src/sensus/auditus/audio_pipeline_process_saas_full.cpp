@@ -252,6 +252,77 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                             }
                         }
                 }
+                // Step 4c: short-segment INHERIT-BROADCAST.
+                // prev_seg_speaker_id_ is reset to -1 whenever the previous
+                // segend took this same short-skip path (no FULL → no
+                // seg_ref / stats). To stay continuous across a run of
+                // short segments we fall back to prev_full_speaker_id_,
+                // which persists from the last successful FULL identify.
+                //
+                // RECENCY GATE: only inherit from prev_full when it is
+                // temporally fresh (≤ 2.0 s since prev FULL midpoint).
+                // Without this, every short segment for the rest of the
+                // timeline would inherit whichever speaker happened to be
+                // last identified by FULL, collapsing all clusters onto
+                // that one identity (observed empirically: decided_macro
+                // crashes from 0.92 to 0.32).
+                int         inh_id = -1;
+                std::string inh_name;
+                float       inh_sim = 0.0f;
+                const char* inh_src = "";
+                if (prev_seg_speaker_id_ >= 0) {
+                    inh_id   = prev_seg_speaker_id_;
+                    inh_name = prev_seg_speaker_name_;
+                    inh_sim  = prev_seg_speaker_sim_;
+                    inh_src  = "seg";
+                } else if (prev_full_speaker_id_ >= 0) {
+                    float now_sec = (float)audio_t1_processed_ / 16000.0f;
+                    float age     = now_sec - prev_full_time_;
+                    if (age <= 2.0f) {
+                        inh_id   = prev_full_speaker_id_;
+                        inh_name = prev_full_speaker_name_;
+                        inh_sim  = 0.0f;
+                        inh_src  = "full";
+                    }
+                }
+                if (!(speaker_enc_.initialized() &&
+                      enable_speaker_.load(std::memory_order_relaxed) &&
+                      fbank_frames >= kMinFbankFrames) &&
+                    cfg_.speaker_short_inherit_enable &&
+                    enable_speaker_.load(std::memory_order_relaxed) &&
+                    inh_id >= 0) {
+                    // Short-segment inheritance broadcast.
+                    //
+                    // This segment is too short for CAM++ FULL to produce a
+                    // trustworthy embedding. Rather than drop it silently
+                    // (→ "no_segment" in the replay scorer), forward the
+                    // last successfully-identified speaker as a best-effort
+                    // label. prev_seg_speaker_id_ is updated at the START
+                    // of every segend, so it holds whichever identity the
+                    // most recent long-enough segment produced (or the
+                    // VAD-start 0.8 s inheritance when that fired).
+                    //
+                    // Critically: we do NOT call campp_db_.identify(),
+                    // dual_db_.identify(), or register_speaker() here. The
+                    // speaker library is untouched. This is pure continuity
+                    // propagation at the broadcast layer. Wrong labels on
+                    // isolated short utterances by a new speaker will show
+                    // up in macro(all) but CANNOT pollute centroids.
+                    SpeakerMatch inh{};
+                    inh.speaker_id     = inh_id;
+                    inh.similarity     = inh_sim;
+                    inh.is_new         = false;
+                    inh.name           = inh_name;
+                    inh.exemplar_count = 0;
+                    inh.hits_above     = 0;
+                    LOG_INFO("AudioPipe",
+                             "FULL-skip INHERIT-BROADCAST: id=%d sim=%.3f %s (fbank=%d < %d, src=%s)",
+                             inh.speaker_id, inh.similarity,
+                             inh.name.empty() ? "(unnamed)" : inh.name.c_str(),
+                             fbank_frames, kMinFbankFrames,
+                             inh_src);
+                    if (on_speaker_) on_speaker_(inh);
+                }
 }
 
 } // namespace deusridet

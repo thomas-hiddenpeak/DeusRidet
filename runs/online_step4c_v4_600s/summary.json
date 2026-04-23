@@ -1,0 +1,46 @@
+{
+  "method": "time_overlap_first_seen",
+  "n_gt": 198,
+  "n_vad": 257,
+  "n_spk": 90,
+  "n_paired": 90,
+  "n_decided": 66,
+  "n_abstain": 29,
+  "n_no_seg": 103,
+  "coverage": 0.3333,
+  "macro": 0.3035,
+  "micro": 0.3081,
+  "decided_macro": 0.9254,
+  "decided_micro": 0.9242,
+  "per_spk": {
+    "唐云峰": 0.3226,
+    "徐子景": 0.2381,
+    "朱杰": 0.3455,
+    "石一": 0.3077
+  },
+  "per_spk_decided": {
+    "唐云峰": 0.8696,
+    "徐子景": 0.9091,
+    "朱杰": 1.0,
+    "石一": 0.9231
+  },
+  "mapping": {
+    "0": "朱杰",
+    "1": "唐云峰",
+    "2": "徐子景",
+    "3": "石一",
+    "4": "石一"
+  },
+  "timeline": "logs/timeline/tl_20260423_160854.jsonl",
+  "args": {
+    "audio": "tests/test.mp3",
+    "gt": "tests/fixtures/test_ground_truth_v1.jsonl",
+    "url": "ws://localhost:8080/ws",
+    "speed": 1.0,
+    "chunk": 512,
+    "drain_sec": 15.0,
+    "max_sec": 600.0,
+    "out_dir": "runs/online_step4c_v4_600s",
+    "timeline": null
+  }
+}
