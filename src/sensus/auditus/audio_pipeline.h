@@ -77,6 +77,15 @@ struct AudioPipelineConfig {
     float speaker_recency_bonus      = 0.05f; // match_thresh lowered by this while recency active
     float speaker_margin_abstain     = 0.05f; // min (top1 - top2) to trust a match
     int   speaker_max_auto_reg_count = 1000;  // disable auto-reg after this many FULLs
+    // Minimum fbank-frame count required to run CAM++ FULL extraction on
+    // a completed speech segment. Exposed as a config knob for
+    // diagnostics; default matches the long-standing hardcoded 150
+    // (~1.5 s) because the Step 4b experiment showed that lowering
+    // this value floods the EMA-updated speaker library with noisy
+    // short-segment embeddings, poisoning centroids enough that two
+    // legitimate speakers never cross the register threshold. See
+    // docs/{en,zh}/devlog/ for the full negative result.
+    int   speaker_min_fbank_frames   = 150;
     // Replay speed for benchmark/testing input. 1.0 = real-time; >1.0 means
     // the upstream driver feeds samples faster than wall time (e.g. speed=2.0
     // pushes two seconds of source audio per wall second). This ONLY affects

@@ -31,9 +31,14 @@ namespace deusridet {
 // @param fbank_frames  number of 80-dim fbank frames accumulated in seg_fbank_buf_.
 void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                 // CAM++ speaker encoder — FULL extraction using accumulated fbank.
+                // Minimum-frames gate is configurable (speaker_min_fbank_frames);
+                // default 50 (~500 ms) is the ECAPA-style stat-pooling floor,
+                // not a test-recording-specific choice. Segments below this
+                // threshold are dropped outright: no embedding, no identity.
+                const int kMinFbankFrames = cfg_.speaker_min_fbank_frames;
                 if (speaker_enc_.initialized() &&
                     enable_speaker_.load(std::memory_order_relaxed) &&
-                    fbank_frames >= 150) {
+                    fbank_frames >= kMinFbankFrames) {
                         float thresh = speaker_threshold_.load(std::memory_order_relaxed);
                         float reg_thresh = speaker_register_threshold_.load(std::memory_order_relaxed);
 
