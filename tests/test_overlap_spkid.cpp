@@ -17,7 +17,7 @@
 
 #include "../src/sensus/auditus/overlap_detector.h"
 #include "../src/sensus/auditus/speech_separator.h"
-#include "../src/sensus/auditus/fsmn_fbank_gpu.h"
+#include "../src/sensus/auditus/povey_fbank_gpu.h"
 #include "../src/orator/speaker_encoder.h"
 #include "../src/orator/wavlm_ecapa_encoder.h"
 #include "../src/orator/speaker_vector_store.h"
@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
     printf("  CAM++ ready (192D)\n");
 
     // FBank for CAM++ (80-dim, Povey window)
-    FsmnFbankGpu fbank;
+    PoveyFbankGpu fbank;
     if (!fbank.init(80, 400, 160, 512, SR, FbankWindowType::POVEY, true)) {
         fprintf(stderr, "Failed to init fbank\n");
         return 1;

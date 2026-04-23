@@ -1,12 +1,12 @@
 /**
- * @file fsmn_fbank_gpu.h
- * @philosophical_role Declaration of the fused FSMN Fbank kernel used by VAD and FRCRN frontends.
- * @serves Auditus VAD path, FRCRN enhancer.
+ * @file povey_fbank_gpu.h
+ * @philosophical_role Declaration of the fused GPU Fbank kernel (Povey/Hamming window) used by the speaker embedding frontend.
+ * @serves Auditus speaker path (CAM++), FRCRN enhancer frontend.
  */
-// fsmn_fbank_gpu.h — GPU Fbank feature extractor.
+// povey_fbank_gpu.h — GPU Fbank feature extractor.
 //
 // Computes: window → DFT → power spectrum → Mel(80) → log on GPU.
-// Supports Hamming window (FSMN VAD) and Povey window (CAM++ speaker).
+// Supports Hamming window and Povey window (CAM++ speaker frontend).
 // Parameters: n_fft=512, n_mels=80, frame_len=400 samples, hop=160.
 
 #pragma once
@@ -17,12 +17,12 @@
 namespace deusridet {
 
 enum class FbankWindowType {
-    HAMMING,  // 0.54 - 0.46*cos(2π*n/(N-1)) — used by FSMN VAD
+    HAMMING,  // 0.54 - 0.46*cos(2π*n/(N-1))
     POVEY,    // (0.5 - 0.5*cos(2π*n/(N-1)))^0.85 — Kaldi default, used by CAM++
 };
 
 // Launch the fused Fbank kernel.
-void launch_fsmn_fbank(
+void launch_povey_fbank(
     const float* d_pcm,
     const float* d_window,   // window [frame_len]
     const float* d_mel_fb,   // [n_mels * (n_fft/2+1)]
@@ -41,13 +41,13 @@ void launch_fsmn_fbank(
 // Window type and PCM normalization are configurable:
 //   FSMN VAD: Hamming window, int16 scale (normalize_pcm=false)
 //   CAM++ speaker: Povey window, [-1,1] scale (normalize_pcm=true)
-class FsmnFbankGpu {
+class PoveyFbankGpu {
 public:
-    FsmnFbankGpu();
-    ~FsmnFbankGpu();
+    PoveyFbankGpu();
+    ~PoveyFbankGpu();
 
-    FsmnFbankGpu(const FsmnFbankGpu&) = delete;
-    FsmnFbankGpu& operator=(const FsmnFbankGpu&) = delete;
+    PoveyFbankGpu(const PoveyFbankGpu&) = delete;
+    PoveyFbankGpu& operator=(const PoveyFbankGpu&) = delete;
 
     bool init(int n_mels = 80, int frame_len = 400, int hop = 160,
               int n_fft = 512, int sample_rate = 16000,

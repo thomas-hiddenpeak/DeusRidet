@@ -19,7 +19,7 @@
 #include "overlap_detector.h"
 #include "speech_separator.h"
 #include "silero_vad.h"
-#include "fsmn_fbank_gpu.h"  // generic Povey/Hamming GPU Fbank; name historical
+#include "povey_fbank_gpu.h"  // generic Povey/Hamming GPU Fbank (CAM++ frontend)
 #include "asr/asr_engine.h"
 #include "../../communis/ring_buffer.h"
 #include "../../orator/speaker_encoder.h"
@@ -310,7 +310,7 @@ private:
     SpeakerEncoder speaker_enc_;
     SpeakerVectorStore campp_db_{"CamppDb", 192, 0.15f};
     SpeakerDb speaker_db_{"CAM++Db"};  // legacy — kept for UI/API backward compat
-    FsmnFbankGpu speaker_fbank_;  // 80-dim fbank for CAM++
+    PoveyFbankGpu speaker_fbank_;  // 80-dim fbank for CAM++
     std::vector<float> seg_fbank_buf_;   // accumulated fbank frames for current speech segment
     bool campp_early_extracted_ = false; // whether CAM++ EARLY has fired this segment
 

@@ -1,21 +1,21 @@
 /**
- * @file src/sensus/auditus/fsmn_fbank_gpu.cu
+ * @file src/sensus/auditus/povey_fbank_gpu.cu
  * @philosophical_role
- *   FSMN-VAD mel-fbank kernel — the feature extractor specific to the FSMN voice-activity detector (distinct parameters from the Whisper mel used by ASR).
+ *   GPU Povey/Hamming mel-fbank kernel — the feature extractor feeding the CAM++ speaker encoder (and reusable for any Kaldi-style 80-d log-mel frontend).
  * @serves
- *   Auditus VAD stage when fsmn-VAD source is selected via awaken_router.
+ *   Auditus speaker-embedding stage (CAM++); shared frontend primitive.
  */
-// fsmn_fbank_gpu.cu — GPU Fbank kernel.
+// povey_fbank_gpu.cu — GPU Fbank kernel.
 //
 // Fused kernel: window → DFT → power spectrum → Mel filterbank → log
 // Parameters: n_fft=512, n_mels=80, frame_len=400 samples, hop=160
 //
 // Supports two window types:
-//   HAMMING — for FSMN VAD (WavFrontend convention)
-//   POVEY   — for CAM++ speaker encoder (Kaldi default, hann^0.85)
+//   HAMMING — standard Hamming window
+//   POVEY   — CAM++ speaker encoder (Kaldi default, hann^0.85)
 // One block per frame, threads split across frequency bins.
 
-#include "fsmn_fbank_gpu.h"
+#include "povey_fbank_gpu.h"
 #include "../../communis/log.h"
 
 #include <cuda_runtime.h>
@@ -34,9 +34,9 @@ namespace deusridet {
 // threadIdx.x iterates over frequency bins (n_fft/2+1 = 257).
 // ============================================================================
 
-__global__ void fsmn_fbank_kernel(
+__global__ void povey_fbank_kernel(
     const float* __restrict__ pcm,        // float PCM on device
-    const float* __restrict__ window,     // Hamming [frame_len]
+    const float* __restrict__ window,     // window [frame_len]
     const float* __restrict__ mel_fb,     // [n_mels * freq_bins]
     float*       __restrict__ out,        // [n_frames * n_mels]
     int pcm_offset,                       // starting sample for first frame
@@ -125,7 +125,7 @@ __global__ void fsmn_fbank_kernel(
 // Kernel launch wrapper
 // ============================================================================
 
-void launch_fsmn_fbank(
+void launch_povey_fbank(
     const float* d_pcm,
     const float* d_window,
     const float* d_mel_fb,
@@ -146,25 +146,26 @@ void launch_fsmn_fbank(
     // Shared memory: [raw PCM: frame_len] + [windowed: n_fft] + [power: freq_bins]
     int smem_size = (frame_len + n_fft + freq_bins) * sizeof(float);
 
-    fsmn_fbank_kernel<<<n_frames, block_size, smem_size, stream>>>(
+    povey_fbank_kernel<<<n_frames, block_size, smem_size, stream>>>(
         d_pcm, d_window, d_mel_fb, d_out,
         pcm_offset, frame_len, n_fft, hop_length, n_mels, freq_bins, min_level);
 }
 
+
 // ============================================================================
-// FsmnFbankGpu class implementation
+// PoveyFbankGpu class implementation
 // ============================================================================
 
-FsmnFbankGpu::FsmnFbankGpu() = default;
+PoveyFbankGpu::PoveyFbankGpu() = default;
 
-FsmnFbankGpu::~FsmnFbankGpu() {
+PoveyFbankGpu::~PoveyFbankGpu() {
     if (d_window_)     cudaFree(d_window_);
     if (d_mel_fb_)     cudaFree(d_mel_fb_);
     if (d_pcm_)        cudaFree(d_pcm_);
     if (d_fbank_out_)  cudaFree(d_fbank_out_);
 }
 
-bool FsmnFbankGpu::init(int n_mels, int frame_len, int hop, int n_fft,
+bool PoveyFbankGpu::init(int n_mels, int frame_len, int hop, int n_fft,
                          int sample_rate, FbankWindowType window_type,
                          bool normalize_pcm) {
     n_mels_ = n_mels;
@@ -244,12 +245,12 @@ bool FsmnFbankGpu::init(int n_mels, int frame_len, int hop, int n_fft,
 
     initialized_ = true;
     const char* win_name = (window_type_ == FbankWindowType::POVEY) ? "Povey" : "Hamming";
-    LOG_INFO("FsmnFbankGPU", "Initialized: frame=%d n_fft=%d hop=%d mels=%d window=%s normalize=%d",
+    LOG_INFO("PoveyFbankGPU", "Initialized: frame=%d n_fft=%d hop=%d mels=%d window=%s normalize=%d",
              frame_len_, n_fft_, hop_, n_mels_, win_name, (int)normalize_pcm_);
     return true;
 }
 
-int FsmnFbankGpu::push_pcm(const int16_t* pcm_host, int n_samples) {
+int PoveyFbankGpu::push_pcm(const int16_t* pcm_host, int n_samples) {
     if (!initialized_ || n_samples <= 0) return 0;
 
     if (pcm_len_ + n_samples > pcm_capacity_) {
@@ -258,7 +259,7 @@ int FsmnFbankGpu::push_pcm(const int16_t* pcm_host, int n_samples) {
 
     // Convert int16 → float on host and upload.
     // normalize_pcm_=true: divide by 32768 for [-1,1] range (CAM++ speaker)
-    // normalize_pcm_=false: keep int16 scale (FSMN VAD with CMVN from am.mvn)
+    // normalize_pcm_=false: keep int16 scale (for frontends that apply external CMVN)
     std::vector<float> pcm_f(n_samples);
     if (normalize_pcm_) {
         for (int i = 0; i < n_samples; i++) {
@@ -289,7 +290,7 @@ int FsmnFbankGpu::push_pcm(const int16_t* pcm_host, int n_samples) {
     }
 
     int pcm_offset = frames_produced_ * hop_;
-    launch_fsmn_fbank(
+    launch_povey_fbank(
         d_pcm_, d_window_, d_mel_fb_,
         d_fbank_out_ + frames_produced_ * n_mels_,
         new_frames, pcm_offset,
@@ -299,7 +300,7 @@ int FsmnFbankGpu::push_pcm(const int16_t* pcm_host, int n_samples) {
     return new_frames;
 }
 
-int FsmnFbankGpu::read_fbank(float* host_out, int max_frames) {
+int PoveyFbankGpu::read_fbank(float* host_out, int max_frames) {
     int avail = frames_produced_ - frames_read_;
     if (avail <= 0) return 0;
     int to_read = (avail < max_frames) ? avail : max_frames;
@@ -311,7 +312,7 @@ int FsmnFbankGpu::read_fbank(float* host_out, int max_frames) {
     return to_read;
 }
 
-void FsmnFbankGpu::reset() {
+void PoveyFbankGpu::reset() {
     pcm_len_ = 0;
     frames_produced_ = 0;
     frames_read_ = 0;

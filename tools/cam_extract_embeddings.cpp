@@ -24,7 +24,7 @@
  *        online CAM++ pipeline at audio_pipeline.cpp:91 exactly).
  */
 
-#include "../src/sensus/auditus/fsmn_fbank_gpu.h"
+#include "../src/sensus/auditus/povey_fbank_gpu.h"
 #include "../src/orator/speaker_encoder.h"
 
 #include <cstdio>
@@ -166,7 +166,7 @@ int main(int argc, char** argv) {
     fprintf(stderr, "[pcm] %zu samples (%.2f s)\n",
             pcm_f.size(), pcm_f.size() / (double)kSR);
 
-    // FsmnFbankGpu expects int16 PCM. Convert here (normalize_pcm=true will
+    // PoveyFbankGpu expects int16 PCM. Convert here (normalize_pcm=true will
     // rescale internally if needed, but safest to hand it int16).
     std::vector<int16_t> pcm_i16(pcm_f.size());
     for (size_t i = 0; i < pcm_f.size(); i++) {
@@ -196,7 +196,7 @@ int main(int argc, char** argv) {
     const size_t total_embs = gts.size() * (size_t)kNStrat;
     std::vector<float> embs(total_embs * kEmbDim, 0.0f);
 
-    // Process each segment with a fresh FsmnFbankGpu to avoid residual state.
+    // Process each segment with a fresh PoveyFbankGpu to avoid residual state.
     // Reset per segment is not trivial (the accumulator keeps sample offsets);
     // easier to recreate.
     int done = 0;
@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
             }
 
             // Fresh fbank per window.
-            deusridet::FsmnFbankGpu fb;
+            deusridet::PoveyFbankGpu fb;
             if (!fb.init(80, 400, 160, 512, kSR,
                          deusridet::FbankWindowType::POVEY,
                          /*normalize_pcm=*/true)) {

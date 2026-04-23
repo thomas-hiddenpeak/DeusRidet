@@ -28,7 +28,7 @@
 #pragma once
 
 #include "speaker_timeline.h"  // SpeakerEvent, SpkEventSource, SpeakerTimeline
-#include "fsmn_fbank_gpu.h"   // FsmnFbankGpu for CAM++ FBank
+#include "povey_fbank_gpu.h"   // PoveyFbankGpu for CAM++ FBank
 #include "../../orator/speaker_db.h"  // SpeakerMatch
 #include "../../orator/wavlm_ecapa_encoder.h"
 #include "../../orator/speaker_encoder.h"  // CAM++ SpeakerEncoder
@@ -155,7 +155,7 @@ private:
     SpeakerStreamConfig cfg_;
     WavLMEcapaEncoder*  encoder_ = nullptr;
     SpeakerEncoder*     cam_encoder_ = nullptr;  // CAM++ encoder for dual-encoder fusion
-    FsmnFbankGpu        cam_fbank_;              // dedicated FBank for CAM++ (80-dim Povey)
+    PoveyFbankGpu        cam_fbank_;              // dedicated FBank for CAM++ (80-dim Povey)
     SpeakerVectorStore* store_   = nullptr;
     SpeakerTimeline*    timeline_ = nullptr;
 
