@@ -150,6 +150,26 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                                 }
                             }
 
+                            // Step 16c: recency-absorb guard — when recency was
+                            // active AND we accepted a match below the unmodified
+                            // threshold, abstain even if the matched id equals
+                            // prev. Manual review of 1x baseline on tests/test.mp3
+                            // showed 徐子景 @05:21 being absorbed into the 唐云峰
+                            // cluster at sim<0.50 because the recency bonus
+                            // dropped match_thresh to 0.45 AND the v24 re-check
+                            // above only fires when matched id != prev. That
+                            // asymmetry lets cross-talk paint the wrong cluster.
+                            // Abstaining here keeps the next FULL extraction free
+                            // to register the true incoming speaker.
+                            if (recency_active && match.speaker_id >= 0 && !match.is_new &&
+                                match.similarity < thresh) {
+                                LOG_INFO("AudioPipe", "Recency absorb-guard: sim=%.3f < thresh=%.2f (matched #%d=prev); abstain",
+                                         match.similarity, thresh, match.speaker_id);
+                                match.speaker_id = -1;
+                                match.similarity = 0;
+                                match.name.clear();
+                            }
+
                             // Margin gate: abstain on ambiguous matches where
                             // top-1 and top-2 are too close to distinguish.
                             // Tunable: configs/auditus.conf:speaker_margin_abstain
