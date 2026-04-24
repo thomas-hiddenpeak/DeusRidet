@@ -73,6 +73,11 @@ struct AudioPipelineConfig {
     float speaker_register_threshold = 0.55f; // pending-pool confirmation sim
     int   speaker_discovery_count    = 50;    // # FULL extractions treated as cold-start
     float speaker_discovery_boost    = 0.07f; // additive to match_thresh during discovery
+    float speaker_discovery_reg_relax = 0.07f; // subtractive from reg_thresh during discovery
+                                               // (Step 16e symmetric to discovery_boost:
+                                               //  match stricter + pending coalesce easier,
+                                               //  so quiet 3rd/4th speakers with self-sim
+                                               //  ~0.52 still spawn their own cluster.)
     float speaker_recency_window_sec = 15.0f; // recency stabilizer window
     float speaker_recency_bonus      = 0.05f; // match_thresh lowered by this while recency active
     float speaker_margin_abstain     = 0.05f; // min (top1 - top2) to trust a match

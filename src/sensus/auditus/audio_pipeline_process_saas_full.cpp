@@ -64,8 +64,21 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                             // Tunable: configs/auditus.conf:speaker_discovery_{count,boost}
                             const int   kDiscoveryCount = cfg_.speaker_discovery_count;
                             const float kDiscoveryBoost = cfg_.speaker_discovery_boost;
+                            const float kDiscoveryRegRelax = cfg_.speaker_discovery_reg_relax;
                             if (campp_full_count_ < kDiscoveryCount) {
                                 match_thresh += kDiscoveryBoost;
+                                // Step 16e: Symmetric relaxation of pending-pool
+                                // confirmation threshold during discovery. The
+                                // discovery_boost makes matching to existing
+                                // clusters stricter; without a symmetric relax
+                                // on pending confirmation, quiet or tonally
+                                // similar new speakers (self-sim ~0.52) never
+                                // coalesce into their own cluster and get
+                                // silently absorbed into neighbors. Match
+                                // harder + pending softer is the right shape
+                                // for cold-start. Recency guard (Step 16c)
+                                // still prevents low-sim absorptions later.
+                                reg_thresh -= kDiscoveryRegRelax;
                             }                            // v24: Temporal recency bonus — lower threshold when recent
                             // speaker still active, reducing false negatives (fragmentation).
                             float seg_mid_time = (float)(audio_t1_processed_ - (int64_t)speech_pcm_buf_.size() / 2) / 16000.0f;
@@ -199,14 +212,14 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                             strncpy(stats_.speaker_name, match.name.c_str(),
                                     sizeof(stats_.speaker_name) - 1);
                             stats_.speaker_name[sizeof(stats_.speaker_name) - 1] = '\0';
-                            LOG_INFO("AudioPipe", "FULL: id=%d sim=%.3f 2nd=#%d(%.3f) m=%.3f %s%s (fbank=%d, ex=%d, recency=%s, mt=%.2f)",
+                            LOG_INFO("AudioPipe", "FULL: id=%d sim=%.3f 2nd=#%d(%.3f) m=%.3f %s%s (fbank=%d, ex=%d, recency=%s, mt=%.2f, rt=%.2f)",
                                      match.speaker_id, match.similarity,
                                      match.second_best_id, match.second_best_sim,
                                      match.similarity - match.second_best_sim,
                                      match.is_new ? "NEW " : "",
                                      match.name.empty() ? "(unnamed)" : match.name.c_str(),
                                      fbank_frames, match.exemplar_count,
-                                     recency_active ? "ON" : "off", match_thresh);
+                                     recency_active ? "ON" : "off", match_thresh, reg_thresh);
                             if (on_speaker_) on_speaker_(match);
 
                             // DEBUG: dump embedding for offline clustering analysis.

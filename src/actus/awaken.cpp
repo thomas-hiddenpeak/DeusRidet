@@ -209,6 +209,7 @@ int awaken(const std::string& webui_dir,
             audio_cfg.speaker_register_threshold = (float)aud_cfg.get_double("speaker_register_threshold", audio_cfg.speaker_register_threshold);
             audio_cfg.speaker_discovery_count    =        aud_cfg.get_int   ("speaker_discovery_count",    audio_cfg.speaker_discovery_count);
             audio_cfg.speaker_discovery_boost    = (float)aud_cfg.get_double("speaker_discovery_boost",    audio_cfg.speaker_discovery_boost);
+            audio_cfg.speaker_discovery_reg_relax = (float)aud_cfg.get_double("speaker_discovery_reg_relax", audio_cfg.speaker_discovery_reg_relax);
             audio_cfg.speaker_recency_window_sec = (float)aud_cfg.get_double("speaker_recency_window_sec", audio_cfg.speaker_recency_window_sec);
             audio_cfg.speaker_recency_bonus      = (float)aud_cfg.get_double("speaker_recency_bonus",      audio_cfg.speaker_recency_bonus);
             audio_cfg.speaker_margin_abstain       = (float)aud_cfg.get_double("speaker_margin_abstain",       audio_cfg.speaker_margin_abstain);
@@ -216,9 +217,10 @@ int awaken(const std::string& webui_dir,
             audio_cfg.speaker_min_fbank_frames     =        aud_cfg.get_int   ("speaker_min_fbank_frames",     audio_cfg.speaker_min_fbank_frames);
             audio_cfg.speaker_short_inherit_enable =        aud_cfg.get_int   ("speaker_short_inherit_enable", audio_cfg.speaker_short_inherit_enable ? 1 : 0) != 0;
             printf("[awaken] Auditus diarization knobs loaded from configs/auditus.conf:\n"
-                   "           match=%.3f reg=%.3f disc=[count=%d,boost=%.3f] recency=[win=%.1fs,bonus=%.3f] margin=%.3f max_autoreg=%d min_fbank=%d short_inherit=%s\n",
+                   "           match=%.3f reg=%.3f disc=[count=%d,boost=%.3f,reg_relax=%.3f] recency=[win=%.1fs,bonus=%.3f] margin=%.3f max_autoreg=%d min_fbank=%d short_inherit=%s\n",
                    audio_cfg.speaker_threshold, audio_cfg.speaker_register_threshold,
                    audio_cfg.speaker_discovery_count, audio_cfg.speaker_discovery_boost,
+                   audio_cfg.speaker_discovery_reg_relax,
                    audio_cfg.speaker_recency_window_sec, audio_cfg.speaker_recency_bonus,
                    audio_cfg.speaker_margin_abstain, audio_cfg.speaker_max_auto_reg_count,
                    audio_cfg.speaker_min_fbank_frames,
