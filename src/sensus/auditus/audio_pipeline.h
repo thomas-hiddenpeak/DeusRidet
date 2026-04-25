@@ -39,6 +39,7 @@
 #include <string>
 
 #include "pipeline_stats.h"
+#include "retro_full_ring.h"
 #include "speaker_tracking.h"
 
 namespace deusridet {
@@ -354,6 +355,7 @@ private:
     int prev_full_speaker_id_ = -1;
     float prev_full_time_ = -100.0f;  // seconds, init far past
     std::string prev_full_speaker_name_;  // v29: for temporal coherence swap
+    RetroFullRing retro_full_ring_;       // Step 17a: retro-relabel cache
     int speaker_run_length_ = 0;  // v15d: consecutive same-speaker count
     int seg_overlap_chunks_ = 0;  // count overlap-detected chunks in current segment
     int seg_total_chunks_ = 0;    // total chunks in current segment

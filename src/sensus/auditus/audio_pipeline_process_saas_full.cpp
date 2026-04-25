@@ -222,6 +222,92 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                                      recency_active ? "ON" : "off", match_thresh, reg_thresh);
                             if (on_speaker_) on_speaker_(match);
 
+                            // Step 17a — retro-relabel ring & scan.
+                            //
+                            // (1) Cache this FULL extraction's embedding so a
+                            // future cluster birth can re-evaluate it. We
+                            // store the same 384D dual vector the identify
+                            // path consumed, or the 192D CAM++ embedding when
+                            // dual-encoder is disabled. Slots are L2-normalised
+                            // to keep peek_best a pure cosine search.
+                            // (2) When match.is_new is true, a brand-new
+                            // cluster was just confirmed from the pending
+                            // pool. The store now contains an exemplar that
+                            // didn't exist when the cached entries were
+                            // identified. We peek_best each cached embedding
+                            // against the freshened store; entries that now
+                            // match the new cluster — especially those that
+                            // abstained or were pulled into a neighbour at
+                            // borderline margin — are the cold-start tail
+                            // we cannot fix with any threshold knob (Step 16g
+                            // ceiling analysis, devlog 05ce56a).
+                            //
+                            // 17a is diagnostic-only: candidates are LOGged,
+                            // not amended on the wire. 17b will broadcast a
+                            // speaker_amend frame and update the replay
+                            // scorer.
+                            {
+                                RetroFullSlot slot;
+                                slot.audio_end_samples = audio_t1_processed_;
+                                slot.decided_id  = match.speaker_id;
+                                slot.decided_sim = match.similarity;
+                                slot.abstained   = (match.speaker_id < 0);
+                                if (use_dual_encoder_ && !wl_emb.empty() &&
+                                    emb.size() == 192) {
+                                    slot.embedding.resize(384);
+                                    std::copy(emb.begin(), emb.end(),
+                                              slot.embedding.begin());
+                                    std::copy(wl_emb.begin(), wl_emb.end(),
+                                              slot.embedding.begin() + 192);
+                                    float n2 = 0.0f;
+                                    for (float v : slot.embedding) n2 += v * v;
+                                    float inv = 1.0f / sqrtf(n2 + 1e-12f);
+                                    for (float& v : slot.embedding) v *= inv;
+                                } else if (!use_dual_encoder_ &&
+                                           emb.size() == 192) {
+                                    slot.embedding = emb;
+                                }
+                                if (!slot.embedding.empty()) {
+                                    retro_full_ring_.push(std::move(slot));
+                                }
+                            }
+
+                            if (match.is_new && match.speaker_id >= 0) {
+                                int new_cluster = match.speaker_id;
+                                retro_full_ring_.for_each(
+                                    [&](const RetroFullSlot& s) {
+                                    if (s.decided_id == new_cluster) return;
+                                    SpeakerMatch peek = use_dual_encoder_
+                                        ? dual_db_.peek_best(s.embedding)
+                                        : campp_db_.peek_best(s.embedding);
+                                    if (peek.speaker_id != new_cluster) return;
+                                    // Abstained: any plausible match is news.
+                                    // Mis-routed: require the new cluster to
+                                    // win by a clear margin over the prior
+                                    // decision so we don't oscillate.
+                                    bool worth_logging =
+                                        s.abstained
+                                            ? (peek.similarity >= thresh - 0.05f)
+                                            : (peek.similarity >= thresh &&
+                                               peek.similarity - s.decided_sim
+                                                   >= 0.05f);
+                                    if (!worth_logging) return;
+                                    float t_close_sec =
+                                        (float)s.audio_end_samples / 16000.0f;
+                                    LOG_INFO("AudioPipe",
+                                             "RETRO-CANDIDATE t_close=%.2fs "
+                                             "prior_id=%d prior_sim=%.3f "
+                                             "-> new_id=%d new_sim=%.3f "
+                                             "2nd=#%d(%.3f) abstain=%d",
+                                             t_close_sec,
+                                             s.decided_id, s.decided_sim,
+                                             new_cluster, peek.similarity,
+                                             peek.second_best_id,
+                                             peek.second_best_sim,
+                                             (int)s.abstained);
+                                });
+                            }
+
                             // DEBUG: dump embedding for offline clustering analysis.
                             // Format per record (1560 bytes):
                             //   float32 timestamp, int32 speaker_id, int32 fbank_frames,

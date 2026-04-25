@@ -338,6 +338,50 @@ bool SpeakerVectorStore::add_exemplar(int id, const std::vector<float>& embeddin
     return true;
 }
 
+// Step 17a — read-only score against all clusters. Mirrors the search
+// half of identify() but performs no exemplar admission, no pending
+// churn, no EMA. Returns best.speaker_id == -1 only when the store is
+// empty; otherwise reports best/second even below match thresholds.
+SpeakerMatch SpeakerVectorStore::peek_best(const std::vector<float>& embedding) {
+    SpeakerMatch best;
+    best.speaker_id = -1;
+    best.similarity = 0.0f;
+    best.is_new     = false;
+
+    if ((int)embedding.size() != dim_) return best;
+
+    std::lock_guard<std::mutex> lk(mu_);
+    if (speakers_.empty() || n_total_ == 0) return best;
+
+    upload_query(embedding.data());
+    GpuSearchResult sr = gpu_search(n_total_, (int)speakers_.size());
+    if (sr.spk_idx < 0) return best;
+
+    best.speaker_id = speakers_[sr.spk_idx].external_id;
+    best.similarity = sr.similarity;
+    best.name       = speakers_[sr.spk_idx].name;
+
+    int n_spk = (int)speakers_.size();
+    if (n_spk > 1) {
+        std::vector<float> spk_sims(n_spk);
+        cudaMemcpyAsync(spk_sims.data(), d_spk_sims_,
+                        n_spk * sizeof(float),
+                        cudaMemcpyDeviceToHost, stream_);
+        cudaStreamSynchronize(stream_);
+        float second_sim = 0.0f;
+        int   second_id  = -1;
+        for (int i = 0; i < n_spk; ++i) {
+            if (i != sr.spk_idx && spk_sims[i] > second_sim) {
+                second_sim = spk_sims[i];
+                second_id  = speakers_[i].external_id;
+            }
+        }
+        best.second_best_sim = second_sim;
+        best.second_best_id  = second_id;
+    }
+    return best;
+}
+
 int SpeakerVectorStore::register_speaker(const std::string& name,
                                           const std::vector<float>& embedding) {
     if ((int)embedding.size() != dim_) return -1;

@@ -74,6 +74,13 @@ public:
                           bool  auto_register      = true,
                           float register_threshold = -1.0f);
 
+    // Read-only score against all clusters: returns best/second similarity
+    // WITHOUT any state mutation (no exemplar admit, no pending churn,
+    // no EMA, no auto-register). Used by the Step 17a retroactive
+    // re-label scan in Auditus to score cached past embeddings against
+    // a freshly born cluster.
+    SpeakerMatch peek_best(const std::vector<float>& embedding);
+
     // Register a named speaker with a known embedding.
     int register_speaker(const std::string& name,
                          const std::vector<float>& embedding);
