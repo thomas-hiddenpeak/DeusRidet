@@ -166,6 +166,34 @@ def pair_segments_with_events(vad_segs, speaker_events):
     }
 
 
+def apply_speaker_amends(speaker_events, amend_events, tolerance_sec: float = 2.0):
+    applied = 0
+    for amend in amend_events:
+        target_t = amend.get("target_t_close_sec", 0.0)
+        prior_id = amend.get("prior_id", -1)
+        best_i = -1
+        best_dt = tolerance_sec
+        for i, ev in enumerate(speaker_events):
+            if prior_id >= 0 and ev.get("id", -1) != prior_id:
+                continue
+            dt = abs(ev.get("t_close_sec", 0.0) - target_t)
+            if dt <= best_dt:
+                best_dt = dt
+                best_i = i
+        if best_i < 0:
+            continue
+        ev = speaker_events[best_i]
+        ev["amended_from_id"] = ev.get("id", -1)
+        ev["amended_from_sim"] = ev.get("sim", 0.0)
+        ev["amended_by_t_close_sec"] = target_t
+        ev["id"] = amend.get("id", ev.get("id", -1))
+        ev["sim"] = amend.get("sim", ev.get("sim", 0.0))
+        ev["name"] = amend.get("name", ev.get("name", ""))
+        ev["amended"] = True
+        applied += 1
+    return applied
+
+
 def score_by_overlap(runtime_segs, gt_rows):
     """For each GT segment, find the runtime segment with the largest
     time-overlap (intersection length). First-seen cluster → speaker
@@ -324,6 +352,7 @@ def main() -> int:
 
     # WS setup.
     speaker_events: list[dict] = []  # order-preserving capture
+    amend_events: list[dict] = []    # retroactive speaker relabels
     asr_events: list[dict] = []      # asr_transcript captures (Step 5e)
     stats_count = 0
     last_audio_t1_in = 0  # updated from every pipeline_stats broadcast
@@ -359,6 +388,17 @@ def main() -> int:
                     "name": obj.get("name", ""),
                     "order": len(speaker_events) + 1,
                     "t_close_sec": last_audio_t1_in / 16000.0,
+                })
+        elif t == "speaker_amend":
+            with lock:
+                amend_events.append({
+                    "target_t_close_sec": float(obj.get("target_t_close_sec", 0.0)),
+                    "prior_id": int(obj.get("prior_id", -1)),
+                    "prior_sim": float(obj.get("prior_sim", 0.0)),
+                    "id": int(obj.get("id", -1)),
+                    "sim": float(obj.get("sim", 0.0)),
+                    "name": obj.get("name", ""),
+                    "order": len(amend_events) + 1,
                 })
         elif t == "pipeline_stats":
             stats_count += 1
@@ -431,10 +471,16 @@ def main() -> int:
         pass
     raw_fh.close()
 
+    n_amend_applied = apply_speaker_amends(speaker_events, amend_events)
+
     # Save events snapshot.
     with (out_dir / "speaker_events.jsonl").open("w", encoding="utf-8") as f:
         for e in speaker_events:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    if amend_events:
+        with (out_dir / "speaker_amends.jsonl").open("w", encoding="utf-8") as f:
+            for e in amend_events:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
 
     # Save ASR transcripts (if any) and a human-readable interleaved
     # transcript ready for manual diff against tests/test.txt. Both the
@@ -468,6 +514,9 @@ def main() -> int:
 
     print(f"\n[capture] speaker events={len(speaker_events)} "
           f"(pipeline_stats broadcasts seen: {stats_count})")
+    if amend_events:
+        print(f"[capture] speaker_amend events={len(amend_events)} "
+              f"applied={n_amend_applied}")
 
     # Resolve timeline log: CLI arg wins, else newest logs/timeline/tl_*.jsonl.
     if args.timeline:
@@ -526,6 +575,8 @@ def main() -> int:
         "n_gt":     res["n_gt"],
         "n_vad":    pair_stats["n_vad"],
         "n_spk":    pair_stats["n_spk"],
+        "n_amend":  len(amend_events),
+        "n_amend_applied": n_amend_applied,
         "n_paired": pair_stats["paired"],
         "n_decided":  res["n_decided"],
         "n_abstain":  res["n_abstain"],

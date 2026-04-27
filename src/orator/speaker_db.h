@@ -30,6 +30,10 @@ struct SpeakerMatch {
     int    hits_above     = 0;    // exemplars above threshold in this query
     float  second_best_sim = 0.0f; // second-best speaker similarity (for margin)
     int    second_best_id  = -1;   // second-best speaker ID
+    bool   is_amend        = false; // true when this is a retroactive relabel
+    int    prior_speaker_id = -1;   // original emitted speaker for amend target
+    float  prior_similarity = 0.0f;
+    float  amend_t_close_sec = 0.0f; // source-time close of target segment
 };
 
 struct SpeakerInfo {

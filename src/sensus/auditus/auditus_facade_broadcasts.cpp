@@ -320,6 +320,22 @@ void install_stats_callback(AudioPipeline& audio,
 void install_speaker_match_callback(AudioPipeline& audio,
                                     WsServer& server) {
     audio.set_on_speaker([&server](const SpeakerMatch& match) {
+        if (match.is_amend) {
+            char json[384];
+            snprintf(json, sizeof(json),
+                R"({"type":"speaker_amend","target_t_close_sec":%.2f,"prior_id":%d,"prior_sim":%.3f,"id":%d,"sim":%.3f,"name":"%s"})",
+                match.amend_t_close_sec,
+                match.prior_speaker_id, match.prior_similarity,
+                match.speaker_id, match.similarity,
+                match.name.c_str());
+            server.broadcast_text(json);
+            printf("[awaken] Speaker amend: t=%.2f prior=%d(%.3f) -> id=%d sim=%.3f %s\n",
+                   match.amend_t_close_sec,
+                   match.prior_speaker_id, match.prior_similarity,
+                   match.speaker_id, match.similarity,
+                   match.name.empty() ? "(unnamed)" : match.name.c_str());
+            return;
+        }
         char json[256];
         snprintf(json, sizeof(json),
             R"({"type":"speaker","id":%d,"sim":%.3f,"new":%s,"name":"%s"})",

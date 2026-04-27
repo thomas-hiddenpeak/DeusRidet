@@ -6,6 +6,7 @@ To add a new entry, create `devlog/YYYY-MM-DD.md` and prepend it here.
 
 ## DEVLOG
 
+- [2026-04-26](devlog/2026-04-26.md) — Step 17b-A: RetroFullRing Live Amend (speaker_amend frames; 3× 1x replays, decided_macro 0.924 / 0.930 / 0.949; no whole-speaker collapse)
 - [2026-04-24](devlog/2026-04-24.md) — Step 11 Closed: Function-level Decomposition (A3 spectral_cluster, A2 SpeakerTracker::check, A1 AudioPipeline::process_loop 1574 → 353); Step 13: R1 residual clean-up (spectral_cluster_stages 636 → 3×≤235; audio_pipeline.h 511 → 489) — R1 fully clean
 - [2026-04-23](devlog/2026-04-23.md) — Step 10 Complete: Actus Charter Restoration (5 atomic commits; `cmd_` prefix dropped, bench/profile → tools/, engine probes → tests/integration/, `test-ws` → `awaken`)
 - [2026-04-22](devlog/2026-04-22.md) — Step 8a: Conscientia Facade Extraction (cmd_test_ws.cpp 458 → 392 lines; JSON helpers promoted to Communis)

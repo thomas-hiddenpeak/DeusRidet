@@ -20,6 +20,7 @@
 #include "../../communis/log.h"
 #include "../../communis/tempus.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -305,6 +306,40 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                                              peek.second_best_id,
                                              peek.second_best_sim,
                                              (int)s.abstained);
+
+                                    const float amend_min_sim =
+                                        std::max(reg_thresh, thresh + 0.10f);
+                                    const float amend_gain =
+                                        peek.similarity - s.decided_sim;
+                                    const float amend_margin =
+                                        peek.second_best_id >= 0
+                                            ? peek.similarity - peek.second_best_sim
+                                            : 1.0f;
+                                    bool worth_amending =
+                                        s.abstained
+                                            ? (peek.similarity >= amend_min_sim &&
+                                               amend_margin >= kMarginAbstainThresh)
+                                            : (peek.similarity >= amend_min_sim &&
+                                               amend_gain >= 0.10f &&
+                                               amend_margin >= kMarginAbstainThresh);
+                                    if (!worth_amending) return;
+
+                                    SpeakerMatch amend = peek;
+                                    amend.is_amend = true;
+                                    amend.is_new = false;
+                                    amend.prior_speaker_id = s.decided_id;
+                                    amend.prior_similarity = s.decided_sim;
+                                    amend.amend_t_close_sec = t_close_sec;
+                                    LOG_INFO("AudioPipe",
+                                             "RETRO-AMEND t_close=%.2fs "
+                                             "prior_id=%d prior_sim=%.3f "
+                                             "-> new_id=%d new_sim=%.3f "
+                                             "margin=%.3f gain=%.3f",
+                                             t_close_sec,
+                                             s.decided_id, s.decided_sim,
+                                             new_cluster, peek.similarity,
+                                             amend_margin, amend_gain);
+                                    if (on_speaker_) on_speaker_(amend);
                                 });
                             }
 

@@ -6,6 +6,7 @@
 
 ## 开发日志
 
+- [2026-04-26](devlog/2026-04-26.md) — Step 17b-A：RetroFullRing 实时修正（speaker_amend 帧；3 次 1x 回放，decided_macro 0.924 / 0.930 / 0.949；无说话人整建制坍缩）
 - [2026-04-24](devlog/2026-04-24.md) — 第 11 步收官：函数级分解（A3 spectral_cluster、A2 SpeakerTracker::check、A1 AudioPipeline::process_loop 1574 → 353）；第 13 步：R1 残余清账（spectral_cluster_stages 636 → 3×≤235；audio_pipeline.h 511 → 489）—— R1 全线合规
 - [2026-04-23](devlog/2026-04-23.md) — 第 10 步收官：Actus 宪章复位（5 个原子提交；去除 `cmd_` 前缀，bench/profile 迁往 tools/，引擎探针迁往 tests/integration/，`test-ws` → `awaken`）
 - [2026-04-22](devlog/2026-04-22.md) — 第 8a 步：Conscientia 外观抽取（cmd_test_ws.cpp 458 → 392 行；JSON 工具上提到 Communis）
