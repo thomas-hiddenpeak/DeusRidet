@@ -237,10 +237,14 @@ void MelSpectrogram::precompute_mel_filterbank() {
 int MelSpectrogram::push_pcm(const int16_t* pcm_host, int n_samples) {
     if (!initialized_ || n_samples <= 0) return 0;
 
-    // Check capacity.
+    compact_for_append(n_samples);
+
+    // Check capacity after compaction. Oversized direct pushes are outside the
+    // stream contract, but keep the next append bounded instead of writing past
+    // the allocation.
     if (pcm_buf_len_ + n_samples > pcm_buf_capacity_) {
-        LOG_WARN("Mel", "PCM buffer overflow, resetting (had %d samples)",
-                 pcm_buf_len_);
+        LOG_WARN("Mel", "PCM push too large, resetting (had %d samples, push=%d)",
+                 pcm_buf_len_, n_samples);
         reset();
     }
 
@@ -283,6 +287,25 @@ int MelSpectrogram::push_pcm(const int16_t* pcm_host, int n_samples) {
 
 void MelSpectrogram::reset() {
     pcm_buf_len_ = 0;
+    frames_produced_ = 0;
+}
+
+void MelSpectrogram::compact_for_append(int n_samples) {
+    if (pcm_buf_len_ + n_samples <= pcm_buf_capacity_) return;
+
+    int discard = frames_produced_ * cfg_.hop_length;
+    if (discard <= 0) return;
+    if (discard > pcm_buf_len_) discard = pcm_buf_len_;
+
+    int tail = pcm_buf_len_ - discard;
+    if (tail > 0) {
+        std::vector<float> tail_pcm(tail);
+        cudaMemcpy(tail_pcm.data(), d_pcm_rolling_ + discard,
+                   tail * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(d_pcm_rolling_, tail_pcm.data(),
+                   tail * sizeof(float), cudaMemcpyHostToDevice);
+    }
+    pcm_buf_len_ = tail;
     frames_produced_ = 0;
 }
 

@@ -81,6 +81,7 @@ private:
     // Precomputation on host, uploaded to GPU.
     void precompute_hann_window();
     void precompute_mel_filterbank();
+    void compact_for_append(int n_samples);
 };
 
 // Launch the Mel kernel for a batch of frames.
