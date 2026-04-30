@@ -127,17 +127,63 @@ def births(summary: dict[str, Any]) -> list[str]:
     return out
 
 
-def verdict(row: dict[str, Any]) -> str:
+def expected_births(values: list[str]) -> list[tuple[str, float]]:
+    parsed: list[tuple[str, float]] = []
+    for value in values:
+        if "=" not in value:
+            raise ValueError(f"expected birth must be speaker=seconds, got {value!r}")
+        speaker, seconds = value.split("=", 1)
+        parsed.append((speaker.strip(), float(seconds)))
+    return parsed
+
+
+def safety_blockers(row: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
     if row["authority_violations"]:
-        return "fail_authority"
+        blockers.append("authority")
     if row["clip_canary_wrong"]:
-        return "fail_wrong"
+        blockers.append("wrong")
     if row["clip_canary_unmapped"]:
-        return "fail_unmapped"
-    return "pass"
+        blockers.append("unmapped")
+    return blockers
 
 
-def build_matrix(reports: list[tuple[str, Path]]) -> dict[str, Any]:
+def promotion_blockers(row: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    blockers = safety_blockers(row)
+    if args.max_births > 0 and len(row["births"]) > args.max_births:
+        blockers.append("extra_births")
+    if len(row["births"]) < args.min_births:
+        blockers.append("births")
+    if row["stable_wrong"]:
+        blockers.append("stable_wrong")
+    if row["stable_unmapped"]:
+        blockers.append("stable_unmapped")
+    if row["stable_hit"] < args.min_stable_hit:
+        blockers.append("stable_coverage")
+    if row["clip_canary_hit"] < args.min_clip_canary_hit:
+        blockers.append("canary_coverage")
+    for speaker, expected_sec in args.expected_births:
+        candidates = [
+            birth for birth in row["birth_records"]
+            if str(birth.get("speaker", "")) == speaker
+        ]
+        if not candidates:
+            blockers.append(f"birth_missing:{speaker}")
+            continue
+        nearest = min(candidates, key=lambda birth: abs(float(birth.get("event_time_sec", 0.0)) - expected_sec))
+        delta = abs(float(nearest.get("event_time_sec", 0.0)) - expected_sec)
+        if delta > args.birth_tolerance_sec:
+            blockers.append(f"birth_time:{speaker}")
+    return blockers
+
+
+def verdict_from_blockers(blockers: list[str]) -> str:
+    if not blockers:
+        return "pass"
+    return "fail_" + blockers[0].split(":", 1)[0]
+
+
+def build_matrix(reports: list[tuple[str, Path]], args: argparse.Namespace) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for name, path in reports:
         report = load_json(path)
@@ -150,6 +196,7 @@ def build_matrix(reports: list[tuple[str, Path]]) -> dict[str, Any]:
             "transcripts": summary_int(summary, "transcripts"),
             "fusion_shadow_events": summary_int(summary, "fusion_shadow_events"),
             "clip_fusion_events": summary_int(summary, "clip_fusion_events"),
+            "birth_records": list(summary.get("id_births", [])),
             "births": births(summary),
             "accepted_hit": summary_int(summary, "source_mapped_gt_hit"),
             "accepted_wrong": summary_int(summary, "source_mapped_gt_wrong"),
@@ -166,17 +213,30 @@ def build_matrix(reports: list[tuple[str, Path]]) -> dict[str, Any]:
             "authority_violations": summary_int(summary, "ledger_authority_violations"),
             "wrong_events": clip["wrong_events"],
         }
-        row["verdict"] = verdict(row)
+        row["safety_blockers"] = safety_blockers(row)
+        row["promotion_blockers"] = promotion_blockers(row, args)
+        row["safety_verdict"] = verdict_from_blockers(row["safety_blockers"])
+        row["promotion_verdict"] = verdict_from_blockers(row["promotion_blockers"])
+        row["verdict"] = row[f"{args.gate}_verdict"]
         rows.append(row)
     failing = [row for row in rows if row["verdict"] != "pass"]
+    promotion_ready = [row["run"] for row in rows if row["promotion_verdict"] == "pass"]
     return {
         "summary": {
+            "gate": args.gate,
             "runs": len(rows),
             "pass": len(rows) - len(failing),
             "fail": len(failing),
+            "min_births": args.min_births,
+            "max_births": args.max_births,
+            "min_stable_hit": args.min_stable_hit,
+            "min_clip_canary_hit": args.min_clip_canary_hit,
+            "expected_births": [f"{speaker}={seconds}" for speaker, seconds in args.expected_births],
+            "birth_tolerance_sec": args.birth_tolerance_sec,
             "wrong_runs": [row["run"] for row in rows if row["clip_canary_wrong"]],
             "unmapped_runs": [row["run"] for row in rows if row["clip_canary_unmapped"]],
             "authority_violation_runs": [row["run"] for row in rows if row["authority_violations"]],
+            "promotion_ready_runs": promotion_ready,
         },
         "runs": rows,
     }
@@ -196,21 +256,30 @@ def render_markdown(matrix: dict[str, Any]) -> str:
         "",
         "## Summary",
         "",
+        f"- gate: {summary['gate']}",
         f"- runs: {summary['runs']}",
         f"- pass: {summary['pass']}",
         f"- fail: {summary['fail']}",
+        f"- promotion thresholds: births>={summary['min_births']} "
+        f"max_births={summary['max_births'] or 'off'} "
+        f"stable_hit>={summary['min_stable_hit']} "
+        f"clip_canary_hit>={summary['min_clip_canary_hit']} "
+        f"expected_births={summary['expected_births']} "
+        f"birth_tolerance_sec={summary['birth_tolerance_sec']}",
+        f"- promotion ready runs: {summary['promotion_ready_runs']}",
         f"- wrong runs: {summary['wrong_runs']}",
         f"- unmapped runs: {summary['unmapped_runs']}",
         f"- authority violation runs: {summary['authority_violation_runs']}",
         "",
         "## Runs",
         "",
-        "| Run | Verdict | Births | Stable H/W/U | Accepted H/W/U | Clip Canary H/W/U | Clip Would Apply | Authority |",
-        "|-----|---------|-------:|-------------:|---------------:|------------------:|-----------------:|----------:|",
+        "| Run | Verdict | Safety | Promotion | Births | Stable H/W/U | Accepted H/W/U | Clip Canary H/W/U | Clip Would Apply | Authority |",
+        "|-----|---------|--------|-----------|-------:|-------------:|---------------:|------------------:|-----------------:|----------:|",
     ]
     for row in matrix["runs"]:
         lines.append(
-            f"| {row['run']} | {row['verdict']} | {len(row['births'])} | "
+            f"| {row['run']} | {row['verdict']} | {row['safety_verdict']} | {row['promotion_verdict']} | "
+            f"{len(row['births'])} | "
             f"{row['stable_hit']}/{row['stable_wrong']}/{row['stable_unmapped']} | "
             f"{row['accepted_hit']}/{row['accepted_wrong']}/{row['accepted_unmapped']} | "
             f"{row['clip_canary_hit']}/{row['clip_canary_wrong']}/{row['clip_canary_unmapped']} | "
@@ -235,24 +304,32 @@ def main() -> int:
     parser.add_argument("--reports-glob", action="append", default=[], help="glob for runtime_shadow_batch_report.json files")
     parser.add_argument("--out-json", default="logs/fusion_canary_regression/canary_regression_matrix.json")
     parser.add_argument("--out-md", default="logs/fusion_canary_regression/canary_regression_matrix.md")
+    parser.add_argument("--gate", choices=["safety", "promotion"], default="safety")
+    parser.add_argument("--min-births", type=int, default=4)
+    parser.add_argument("--max-births", type=int, default=0, help="0 disables the upper bound")
+    parser.add_argument("--min-stable-hit", type=int, default=8)
+    parser.add_argument("--min-clip-canary-hit", type=int, default=1)
+    parser.add_argument("--expected-birth", action="append", default=[], help="speaker=seconds expected birth, repeatable")
+    parser.add_argument("--birth-tolerance-sec", type=float, default=1.5)
     parser.add_argument("--fail-on-violation", action="store_true")
     args = parser.parse_args()
+    args.expected_births = expected_births(args.expected_birth)
 
     reports = unique_reports(args.report, args.reports_glob)
     if not reports:
         parser.error("provide at least one --report or --reports-glob")
-    matrix = build_matrix(reports)
+    matrix = build_matrix(reports, args)
     write_json(Path(args.out_json), matrix)
     out_md = Path(args.out_md)
     out_md.parent.mkdir(parents=True, exist_ok=True)
     out_md.write_text(render_markdown(matrix), encoding="utf-8")
     summary = matrix["summary"]
-    print(f"[canary] runs={summary['runs']} pass={summary['pass']} fail={summary['fail']}")
+    print(f"[canary] gate={summary['gate']} runs={summary['runs']} pass={summary['pass']} fail={summary['fail']}")
     for row in matrix["runs"]:
         print(
             f"[{row['verdict']}] {row['run']} clip_canary="
             f"{row['clip_canary_hit']}/{row['clip_canary_wrong']}/{row['clip_canary_unmapped']} "
-            f"authority={row['authority_violations']}"
+            f"authority={row['authority_violations']} promotion={row['promotion_verdict']}"
         )
     print(f"[out] {args.out_json}")
     print(f"[out] {args.out_md}")
