@@ -64,6 +64,7 @@ bool SeparatioOratorProbe::init(const AudioPipelineConfig& cfg, bool use_dual) {
 ShadowSpeakerEvidence SeparatioOratorProbe::score(
         const float* samples, int n_samples, SpeakerVectorStore& db,
         WavLMEcapaEncoder* wavlm, float threshold, float min_margin,
+        float stable_min_similarity, float stable_min_margin,
         int stable_min_exemplars, int stable_min_matches) {
     ShadowSpeakerEvidence ev;
     ev.ready = ready_;
@@ -71,6 +72,8 @@ ShadowSpeakerEvidence SeparatioOratorProbe::score(
     ev.reason = reason_;
     ev.threshold = threshold;
     ev.min_margin = min_margin;
+    ev.stable_min_similarity = stable_min_similarity;
+    ev.stable_min_margin = stable_min_margin;
     ev.stable_min_exemplars = stable_min_exemplars;
     ev.stable_min_matches = stable_min_matches;
     ev.db_speakers = db.count();
@@ -118,6 +121,8 @@ ShadowSpeakerEvidence SeparatioOratorProbe::score(
     ev.accepted = match.speaker_id >= 0 &&
         match.similarity >= threshold && ev.margin >= min_margin;
     ev.stable = ev.accepted &&
+        match.similarity >= stable_min_similarity &&
+        ev.margin >= stable_min_margin &&
         ev.exemplar_count >= stable_min_exemplars &&
         ev.match_count >= stable_min_matches;
     if (ev.accepted && !ev.stable) ev.reason = "speaker_unstable";
@@ -168,6 +173,7 @@ std::string speaker_evidence_json(const ShadowSpeakerEvidence& ev) {
         R"("exemplar_count":%d,"match_count":%d,)"
         R"("similarity":%.3f,"second_id":%d,"second_similarity":%.3f,)"
         R"("margin":%.3f,"threshold":%.3f,"min_margin":%.3f,)"
+        R"("stable_min_similarity":%.3f,"stable_min_margin":%.3f,)"
         R"("stable_min_exemplars":%d,"stable_min_matches":%d,)"
         R"("extract_ms":%.1f,"match_ms":%.1f)",
         ev.ready ? "true" : "false",
@@ -178,6 +184,7 @@ std::string speaker_evidence_json(const ShadowSpeakerEvidence& ev) {
         ev.speaker_id, ev.exemplar_count, ev.match_count,
         ev.similarity, ev.second_id, ev.second_similarity,
         ev.margin, ev.threshold, ev.min_margin,
+        ev.stable_min_similarity, ev.stable_min_margin,
         ev.stable_min_exemplars, ev.stable_min_matches,
         ev.extract_ms, ev.match_ms);
     std::string out = head;

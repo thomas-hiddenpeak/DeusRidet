@@ -41,6 +41,8 @@ struct ShadowSpeakerEvidence {
     float margin = 0.0f;
     float threshold = 0.0f;
     float min_margin = 0.0f;
+    float stable_min_similarity = 0.0f;
+    float stable_min_margin = 0.0f;
     float extract_ms = 0.0f;
     float match_ms = 0.0f;
     bool stable = false;
@@ -55,6 +57,8 @@ public:
                                 SpeakerVectorStore& db,
                                 WavLMEcapaEncoder* wavlm,
                                 float threshold, float min_margin,
+                                float stable_min_similarity,
+                                float stable_min_margin,
                                 int stable_min_exemplars,
                                 int stable_min_matches);
 

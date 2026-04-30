@@ -6,7 +6,7 @@ To add a new entry, create `devlog/YYYY-MM-DD.md` and prepend it here.
 
 ## DEVLOG
 
-- [2026-04-30](devlog/2026-04-30.md) — Step 18n-18z: Auditus separated-source identity fusion selector, runtime fusion shadow ASR/speaker evidence, arbitrium + ledger/canary telemetry, deterministic/strong-pending/newborn enrollment, and Mel rolling compaction; r2 replay restored 4/4 births, 0 stable wrong, 0 authority violations
+- [2026-04-30](devlog/2026-04-30.md) — Step 18n-18aa: Auditus separated-source identity fusion selector, runtime fusion shadow ASR/speaker evidence, arbitrium + ledger/canary telemetry, deterministic/strong-pending/newborn enrollment, stable canary precision gate, and Mel rolling compaction; r2 replay restored 4/4 births, 0 stable wrong, 0 authority violations
 - [2026-04-29](devlog/2026-04-29.md) — Step 18l-18m: upstream ClearerVoice + 3D-Speaker + FunASR smoke and top30 Auditus upstream-vs-C++ probe; production py313 CUDA torch preserved
 - [2026-04-28](devlog/2026-04-28.md) — Step 18g-18k: Auditus separated-source ASR + speaker-ID validation against GT timeline; raw_o16000 kept as production primary and failure-attributed by identity monitor
 - [2026-04-27](devlog/2026-04-27.md) — Step 18: Auditus homogeneity audit, ASR split shadow metadata, real-clip MossFormer2 separation, FRCRN A/B, and fixed-window separator adaptation

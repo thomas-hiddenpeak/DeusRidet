@@ -353,19 +353,29 @@ void AudioPipeline::asr_loop() {
                         "DEUSRIDET_AUDITUS_FUSION_SPK_THRESHOLD", 0.35f);
                     float spk_min_margin = env_float_local(
                         "DEUSRIDET_AUDITUS_FUSION_SPK_MIN_MARGIN", 0.055f);
+                    float stable_spk_threshold_default =
+                        spk_threshold > 0.37f ? spk_threshold : 0.37f;
+                    float stable_spk_threshold = env_float_local(
+                        "DEUSRIDET_AUDITUS_FUSION_STABLE_SPK_THRESHOLD",
+                        stable_spk_threshold_default);
+                    float stable_spk_min_margin = env_float_local(
+                        "DEUSRIDET_AUDITUS_FUSION_STABLE_SPK_MIN_MARGIN",
+                        spk_min_margin);
                     int stable_min_exemplars = env_int_local(
                         "DEUSRIDET_AUDITUS_FUSION_STABLE_MIN_EXEMPLARS", 1);
                     int stable_min_matches = env_int_local(
-                        "DEUSRIDET_AUDITUS_FUSION_STABLE_MIN_MATCHES", 2);
+                        "DEUSRIDET_AUDITUS_FUSION_STABLE_MIN_MATCHES", 3);
                     SpeakerVectorStore& shadow_db = use_dual_encoder_ ? dual_db_ : campp_db_;
                     WavLMEcapaEncoder* shadow_wavlm = use_dual_encoder_ ? &wlecapa_enc_ : nullptr;
                     src1_speaker = shadow_speaker->score(
                         separated.source1.data(), (int)separated.source1.size(),
                         shadow_db, shadow_wavlm, spk_threshold, spk_min_margin,
+                        stable_spk_threshold, stable_spk_min_margin,
                         stable_min_exemplars, stable_min_matches);
                     src2_speaker = shadow_speaker->score(
                         separated.source2.data(), (int)separated.source2.size(),
                         shadow_db, shadow_wavlm, spk_threshold, spk_min_margin,
+                        stable_spk_threshold, stable_spk_min_margin,
                         stable_min_exemplars, stable_min_matches);
                 }
                 asr_busy_.store(false, std::memory_order_relaxed);
