@@ -82,7 +82,7 @@ public:
         fprintf(fp_, R"({"t":"header","version":3,"started":"%s","t0":%lu})" "\n",
                 iso, (unsigned long)tempus::now_t0_ns());
         clock_gettime(CLOCK_MONOTONIC, &t0_);
-        stats_count_ = asr_count_ = vad_count_ = drop_count_ = 0;
+        stats_count_ = asr_count_ = vad_count_ = drop_count_ = fusion_count_ = 0;
         return true;
     }
 
@@ -105,9 +105,9 @@ public:
                  tm.tm_hour, tm.tm_min, tm.tm_sec);
 
         fprintf(fp_,
-            R"({"t":"footer","ended":"%s","t0":%lu,"duration_sec":%.1f,"counts":{"stats":%u,"asr":%u,"vad":%u,"drop":%u}})"
+            R"({"t":"footer","ended":"%s","t0":%lu,"duration_sec":%.1f,"counts":{"stats":%u,"asr":%u,"vad":%u,"drop":%u,"fusion":%u}})"
             "\n", iso, (unsigned long)tempus::now_t0_ns(),
-            dur, stats_count_, asr_count_, vad_count_, drop_count_);
+            dur, stats_count_, asr_count_, vad_count_, drop_count_, fusion_count_);
         fclose(fp_);
         fp_ = nullptr;
     }
@@ -129,6 +129,9 @@ public:
                  const char* trigger,
                  int spk_id, const char* spk_name, float spk_sim,
                  float spk_conf, const char* spk_src);
+
+    // Log opt-in Auditus fusion shadow evidence emitted through ASR debug logs.
+    void log_fusion_shadow(const char* detail_json);
 
     // Log VAD event (start/end only — not every frame).
     // audio_t1 is the AUDIO sample index at the moment of emission. Combined
@@ -153,6 +156,7 @@ private:
     unsigned asr_count_ = 0;
     unsigned vad_count_ = 0;
     unsigned drop_count_ = 0;
+    unsigned fusion_count_ = 0;
 };
 
 }  // namespace deusridet

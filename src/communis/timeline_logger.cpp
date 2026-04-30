@@ -113,6 +113,17 @@ void TimelineLogger::log_asr(const char* text, float stream_start, float stream_
     asr_count_++;
 }
 
+void TimelineLogger::log_fusion_shadow(const char* detail_json) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!fp_) return;
+
+    uint64_t t0_ns = tempus::now_t0_ns();
+    fprintf(fp_, R"({"t":"fusion_shadow","t0":%lu,"detail":%s})" "\n",
+            (unsigned long)t0_ns,
+            detail_json ? detail_json : "{}");
+    fusion_count_++;
+}
+
 void TimelineLogger::log_vad(bool is_speech, bool segment_start, bool segment_end,
                                int frame_idx, float energy, uint64_t audio_t1) {
     // Only log segment boundaries, not every frame.

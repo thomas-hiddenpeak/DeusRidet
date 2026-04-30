@@ -62,9 +62,10 @@ void install_transcript_callback(AudioPipeline& audio,
                                  ConscientiStream& consciousness,
                                  bool llm_loaded);
 
-// ASR detail log (wrapped as "asr_log") → ws broadcast only.
+// ASR detail log (wrapped as "asr_log") → ws broadcast; fusion shadow logs persist to timeline.
 void install_asr_log_callback(AudioPipeline& audio,
-                              WsServer& server);
+                              WsServer& server,
+                              TimelineLogger& timeline);
 
 // Per-tick audio-pipeline stats → ws "pipeline_stats" envelope + timeline log_stats.
 // This is the largest single broadcast in the system — it carries VAD, ASR, speaker,

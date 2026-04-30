@@ -9,16 +9,64 @@
 // → VAD on computed frames → report stats/events via callbacks.
 
 #include "audio_pipeline.h"
+#include "separatio_orator_probe.h"
 #include "../../communis/log.h"
 #include "../../communis/tempus.h"
 #include "../../orator/spectral_cluster.h"
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace deusridet {
+
+namespace {
+
+bool fusion_shadow_enabled() {
+    const char* value = std::getenv("DEUSRIDET_AUDITUS_FUSION_SHADOW");
+    return value &&
+        (std::strcmp(value, "1") == 0 ||
+         std::strcmp(value, "true") == 0 ||
+         std::strcmp(value, "on") == 0 ||
+         std::strcmp(value, "yes") == 0);
+}
+
+std::string escape_json_local(const std::string& input) {
+    std::string out;
+    out.reserve(input.size() + 16);
+    for (char value : input) {
+        if (value == '"') out += "\\\"";
+        else if (value == '\\') out += "\\\\";
+        else if (value == '\n') out += "\\n";
+        else if (value == '\r') out += "\\r";
+        else if (value == '\t') out += "\\t";
+        else out += value;
+    }
+    return out;
+}
+
+float env_float_local(const char* name, float fallback) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) return fallback;
+    char* end = nullptr;
+    float parsed = std::strtof(value, &end);
+    return end != value ? parsed : fallback;
+}
+
+int env_int_local(const char* name, int fallback) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) return fallback;
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    return end != value ? (int)parsed : fallback;
+}
+
+}  // namespace
 
 AudioPipeline::AudioPipeline() = default;
 
@@ -177,6 +225,7 @@ void AudioPipeline::set_asr_rep_penalty(float p) {
 // ASR worker thread — picks up jobs from queue, runs transcription off-main-loop.
 void AudioPipeline::asr_loop() {
     LOG_INFO("AudioPipe", "ASR worker thread started");
+    std::unique_ptr<SeparatioOratorProbe> shadow_speaker;
     while (true) {
         ASRJob job;
         {
@@ -212,22 +261,11 @@ void AudioPipeline::asr_loop() {
             }
             // Log partial to ASR log panel for observability.
             if (on_asr_log_) {
-                auto esc = [](const std::string& s) -> std::string {
-                    std::string out;
-                    out.reserve(s.size() + 16);
-                    for (char c : s) {
-                        if (c == '"') out += "\\\"";
-                        else if (c == '\\') out += "\\\\";
-                        else if (c == '\n') out += "\\n";
-                        else out += c;
-                    }
-                    return out;
-                };
                 char json[1024];
                 snprintf(json, sizeof(json),
                     R"({"stage":"partial","audio_sec":%.2f,"total_ms":%.1f,"tokens":%d,"text":"%s"})",
                     job.audio_duration_sec, result.total_ms, result.token_count,
-                    esc(result.text).c_str());
+                    escape_json_local(result.text).c_str());
                 on_asr_log_(json);
             }
             continue;
@@ -253,20 +291,6 @@ void AudioPipeline::asr_loop() {
 
         // Send detailed ASR log for WebUI debug panel.
         if (on_asr_log_) {
-            // Escape raw_text and text for JSON.
-            auto esc = [](const std::string& s) -> std::string {
-                std::string out;
-                out.reserve(s.size() + 16);
-                for (char c : s) {
-                    if (c == '"') out += "\\\"";
-                    else if (c == '\\') out += "\\\\";
-                    else if (c == '\n') out += "\\n";
-                    else if (c == '\r') out += "\\r";
-                    else if (c == '\t') out += "\\t";
-                    else out += c;
-                }
-                return out;
-            };
             char json[2048];
             snprintf(json, sizeof(json),
                 R"({"stage":"result","trigger":"%s","audio_sec":%.2f,)"
@@ -276,8 +300,98 @@ void AudioPipeline::asr_loop() {
                 job.trigger_reason.c_str(), job.audio_duration_sec,
                 result.mel_ms, result.mel_frames, result.encoder_ms, result.encoder_out_len,
                 result.decode_ms, result.token_count, result.postprocess_ms, result.total_ms,
-                esc(result.raw_text).c_str(), esc(result.text).c_str());
+                escape_json_local(result.raw_text).c_str(), escape_json_local(result.text).c_str());
             on_asr_log_(json);
+        }
+
+        if (fusion_shadow_enabled() && on_asr_log_) {
+            auto shadow_start = std::chrono::high_resolution_clock::now();
+            std::string detail;
+            if (!separator_enabled() || !separator_.initialized()) {
+                char json[768];
+                snprintf(json, sizeof(json),
+                    R"({"stage":"fusion_shadow","enabled":true,"valid":false,)"
+                    R"("reason":"separator_unavailable","trigger":"%s","audio_sec":%.2f,)"
+                    R"("stream_start_sec":%.2f,"stream_end_sec":%.2f,"mix_text":"%s"})",
+                    job.trigger_reason.c_str(), job.audio_duration_sec,
+                    job.stream_start_sec, job.stream_end_sec,
+                    escape_json_local(result.text).c_str());
+                detail = json;
+            } else {
+                asr_busy_.store(true, std::memory_order_relaxed);
+                auto sep_start = std::chrono::high_resolution_clock::now();
+                SeparationResult separated = separator_.separate(
+                    job.pcm_f32.data(), (int)job.pcm_f32.size());
+                auto sep_end = std::chrono::high_resolution_clock::now();
+                float sep_ms = std::chrono::duration<float, std::milli>(sep_end - sep_start).count();
+
+                asr::ASRResult src1_result;
+                asr::ASRResult src2_result;
+                ShadowSpeakerEvidence src1_speaker;
+                ShadowSpeakerEvidence src2_speaker;
+                if (separated.valid) {
+                    int source_max_tok = std::min(
+                        asr_max_tokens_.load(std::memory_order_relaxed),
+                        std::max(20, (int)(job.audio_duration_sec * 8.0f)));
+                    src1_result = asr_engine_->transcribe(
+                        separated.source1.data(), (int)separated.source1.size(), 16000, source_max_tok);
+                    src2_result = asr_engine_->transcribe(
+                        separated.source2.data(), (int)separated.source2.size(), 16000, source_max_tok);
+                    if (!shadow_speaker) {
+                        shadow_speaker = std::make_unique<SeparatioOratorProbe>();
+                        shadow_speaker->init(cfg_, use_dual_encoder_);
+                    }
+                    float spk_threshold = env_float_local(
+                        "DEUSRIDET_AUDITUS_FUSION_SPK_THRESHOLD", 0.35f);
+                    float spk_min_margin = env_float_local(
+                        "DEUSRIDET_AUDITUS_FUSION_SPK_MIN_MARGIN", 0.055f);
+                    int stable_min_exemplars = env_int_local(
+                        "DEUSRIDET_AUDITUS_FUSION_STABLE_MIN_EXEMPLARS", 1);
+                    int stable_min_matches = env_int_local(
+                        "DEUSRIDET_AUDITUS_FUSION_STABLE_MIN_MATCHES", 2);
+                    SpeakerVectorStore& shadow_db = use_dual_encoder_ ? dual_db_ : campp_db_;
+                    WavLMEcapaEncoder* shadow_wavlm = use_dual_encoder_ ? &wlecapa_enc_ : nullptr;
+                    src1_speaker = shadow_speaker->score(
+                        separated.source1.data(), (int)separated.source1.size(),
+                        shadow_db, shadow_wavlm, spk_threshold, spk_min_margin,
+                        stable_min_exemplars, stable_min_matches);
+                    src2_speaker = shadow_speaker->score(
+                        separated.source2.data(), (int)separated.source2.size(),
+                        shadow_db, shadow_wavlm, spk_threshold, spk_min_margin,
+                        stable_min_exemplars, stable_min_matches);
+                }
+                asr_busy_.store(false, std::memory_order_relaxed);
+
+                auto shadow_end = std::chrono::high_resolution_clock::now();
+                float total_ms = std::chrono::duration<float, std::milli>(shadow_end - shadow_start).count();
+                char head[1536];
+                snprintf(head, sizeof(head),
+                    R"({"stage":"fusion_shadow","enabled":true,"valid":%s,)"
+                    R"("trigger":"%s","audio_sec":%.2f,"stream_start_sec":%.2f,"stream_end_sec":%.2f,)"
+                    R"("timeline_speaker_id":%d,"timeline_speaker_name":"%s",)"
+                    R"("timeline_speaker_sim":%.3f,"timeline_speaker_confidence":%.3f,)"
+                    R"("timeline_speaker_source":"%s","mix_text":"%s",)"
+                    R"("sep_ms":%.1f,"shadow_total_ms":%.1f,"src1_rms":%.5f,"src2_rms":%.5f,)",
+                    separated.valid ? "true" : "false",
+                    job.trigger_reason.c_str(), job.audio_duration_sec,
+                    job.stream_start_sec, job.stream_end_sec,
+                    job.speaker_id,
+                    escape_json_local(job.speaker_name).c_str(),
+                    job.speaker_sim, job.speaker_confidence,
+                    escape_json_local(job.speaker_source).c_str(),
+                    escape_json_local(result.text).c_str(),
+                    sep_ms, total_ms, separated.energy1, separated.energy2);
+                detail = head;
+                detail += "\"src1\":" + source_result_json(src1_result, src1_speaker) + ",";
+                detail += "\"src2\":" + source_result_json(src2_result, src2_speaker) + ",";
+                detail += "\"arbitrium\":" + fusion_arbitrium_json(
+                    src1_result, src1_speaker, src2_result, src2_speaker,
+                    job.speaker_id) + ",";
+                detail += "\"ledger\":" + fusion_evidence_ledger_json(
+                    src1_result, src1_speaker, src2_result, src2_speaker,
+                    job.speaker_id) + "}";
+            }
+            on_asr_log_(detail);
         }
     }
     LOG_INFO("AudioPipe", "ASR worker thread exited");

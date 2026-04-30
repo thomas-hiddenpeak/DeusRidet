@@ -100,6 +100,16 @@ int awaken(const std::string& webui_dir,
     // Configure P2: MossFormer2 speech separation (native CUDA, lazy loaded).
     audio_cfg.separator.model_path = model_root + "/vad/mossformer2_ss_16k.safetensors";
     audio_cfg.separator.lazy_load = true;
+    if (const char* sep_overlap_env = std::getenv("DEUSRIDET_SEPARATOR_OVERLAP_SAMPLES")) {
+        int overlap = std::atoi(sep_overlap_env);
+        if (overlap >= 0 && overlap < audio_cfg.separator.max_chunk) {
+            audio_cfg.separator.overlap_samples = overlap;
+            printf("[awaken] Separator overlap override: %d samples\n", overlap);
+        } else {
+            fprintf(stderr, "[awaken] Ignoring invalid DEUSRIDET_SEPARATOR_OVERLAP_SAMPLES=%s\n",
+                    sep_overlap_env);
+        }
+    }
 
     // Configure CAM++ speaker encoder model path.
     audio_cfg.speaker.model_path = model_root + "/speaker/campplus/campplus.safetensors";
@@ -148,7 +158,7 @@ int awaken(const std::string& webui_dir,
     auditus::install_transcript_callback(audio, server, timeline, cb.stream, cb.loaded);
 
     // ASR detail log — migrated to Auditus facade.
-    auditus::install_asr_log_callback(audio, server);
+    auditus::install_asr_log_callback(audio, server, timeline);
 
     // ASR streaming partial callback — migrated to Auditus facade.
     auditus::install_asr_partial_callback(audio, server);

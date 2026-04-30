@@ -103,11 +103,15 @@ void install_transcript_callback(AudioPipeline& audio,
 }
 
 void install_asr_log_callback(AudioPipeline& audio,
-                              WsServer& server) {
-    audio.set_on_asr_log([&server](const std::string& detail_json) {
+                              WsServer& server,
+                              TimelineLogger& timeline) {
+    audio.set_on_asr_log([&server, &timeline](const std::string& detail_json) {
         // Wrap the detail JSON inside an asr_log envelope.
         std::string msg = R"({"type":"asr_log",)" + detail_json.substr(1);
         server.broadcast_text(msg);
+        if (detail_json.find(R"("stage":"fusion_shadow")") != std::string::npos) {
+            timeline.log_fusion_shadow(detail_json.c_str());
+        }
     });
 }
 
