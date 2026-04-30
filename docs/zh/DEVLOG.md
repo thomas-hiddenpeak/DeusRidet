@@ -6,7 +6,7 @@
 
 ## 开发日志
 
-- [2026-04-30](devlog/2026-04-30.md) — Step 18n-18w：Auditus 分离源 identity fusion selector、runtime fusion shadow ASR/speaker evidence、arbitrium + ledger telemetry、deterministic enrollment replay，以及 Mel rolling compaction；r2 run1/run2 复现 4/4 个 birth、10 个 stable hit、0 wrong、0 authority violation
+- [2026-04-30](devlog/2026-04-30.md) — Step 18n-18x：Auditus 分离源 identity fusion selector、runtime fusion shadow ASR/speaker evidence、arbitrium + ledger telemetry、deterministic/strong-pending enrollment，以及 Mel rolling compaction；r2 replay 恢复 4/4 个 birth、10 个 stable hit、0 wrong、0 authority violation
 - [2026-04-29](devlog/2026-04-29.md) — Step 18l-18m：在隔离 py313_audio_labs 中完成上游 ClearerVoice + 3D-Speaker + FunASR smoke，并跑通 top30 Auditus 上游-vs-C++ 探针；生产 py313 CUDA torch 保持不变
 - [2026-04-28](devlog/2026-04-28.md) — Step 18g-18k：Auditus 分离源 ASR + speaker-ID 对 GT 时间线验证；identity monitor 保持 raw_o16000 为生产主状态并完成失败归因
 - [2026-04-27](devlog/2026-04-27.md) — Step 18：Auditus 同质性审计、ASR split shadow metadata、真实 clip MossFormer2 分离、FRCRN A/B，以及固定窗口 separator 适配
