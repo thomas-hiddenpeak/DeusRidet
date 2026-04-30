@@ -344,6 +344,11 @@ def summarize(args: argparse.Namespace) -> int:
     ledger_canary_candidates = 0
     ledger_canary_would_apply = 0
     ledger_authority_violations = 0
+    clip_canary_candidates = 0
+    clip_canary_would_apply = 0
+    clip_canary_would_apply_hit = 0
+    clip_canary_would_apply_wrong = 0
+    clip_canary_would_apply_unmapped = 0
     for event in fusion:
         arbitrium = event.get("arbitrium", {})
         action = str(arbitrium.get("action", "<missing>") or "<missing>")
@@ -410,6 +415,23 @@ def summarize(args: argparse.Namespace) -> int:
                 "reason": speaker.get("reason", ""),
                 "status": status,
             })
+        ledger = event.get("ledger", {})
+        canary_status = "abstain"
+        canary_candidate_id = int_field(ledger, "candidate_speaker_id") if ledger else -1
+        canary_mapped = id_map.get(canary_candidate_id, "") if canary_candidate_id >= 0 else ""
+        if ledger.get("canary_candidate"):
+            clip_canary_candidates += 1
+        if ledger.get("canary_would_apply"):
+            clip_canary_would_apply += 1
+            if not canary_mapped:
+                clip_canary_would_apply_unmapped += 1
+                canary_status = "would_apply_unmapped"
+            elif canary_mapped in gt_speakers:
+                clip_canary_would_apply_hit += 1
+                canary_status = "would_apply_gt_hit"
+            else:
+                clip_canary_would_apply_wrong += 1
+                canary_status = "would_apply_gt_wrong"
         clip_rows.append({
             "event_index": index,
             "stream_start_sec": event.get("stream_start_sec"),
@@ -420,8 +442,11 @@ def summarize(args: argparse.Namespace) -> int:
             "mix_text": event.get("mix_text", ""),
             "timeline_speaker_id": event.get("timeline_speaker_id"),
             "timeline_mapped_speaker": id_map.get(int_field(event, "timeline_speaker_id"), ""),
+            "canary_status": canary_status,
+            "canary_candidate_id": canary_candidate_id,
+            "canary_mapped_speaker": canary_mapped,
             "arbitrium": event.get("arbitrium", {}),
-            "ledger": event.get("ledger", {}),
+            "ledger": ledger,
             "sources": sources,
         })
 
@@ -451,6 +476,11 @@ def summarize(args: argparse.Namespace) -> int:
         "ledger_missing": ledger_missing,
         "ledger_canary_candidates": ledger_canary_candidates,
         "ledger_canary_would_apply": ledger_canary_would_apply,
+        "clip_canary_candidates": clip_canary_candidates,
+        "clip_canary_would_apply": clip_canary_would_apply,
+        "clip_canary_would_apply_gt_hit": clip_canary_would_apply_hit,
+        "clip_canary_would_apply_gt_wrong": clip_canary_would_apply_wrong,
+        "clip_canary_would_apply_unmapped": clip_canary_would_apply_unmapped,
         "ledger_blockers": dict(sorted(ledger_blockers.items())),
         "ledger_authority_violations": ledger_authority_violations,
     }
@@ -495,6 +525,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"canary_would_apply={summary['ledger_canary_would_apply']} "
         f"authority_violations={summary['ledger_authority_violations']} "
         f"blockers={summary['ledger_blockers']}",
+        f"- clip canary: candidates={summary['clip_canary_candidates']} "
+        f"would_apply={summary['clip_canary_would_apply']} "
+        f"mapped_hit={summary['clip_canary_would_apply_gt_hit']} "
+        f"mapped_wrong={summary['clip_canary_would_apply_gt_wrong']} "
+        f"unmapped={summary['clip_canary_would_apply_unmapped']}",
         "",
         "## Events",
         "",
@@ -515,6 +550,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(
             f"- ledger: canary={ledger.get('canary_candidate', False)} "
             f"would_apply={ledger.get('canary_would_apply', False)} "
+            f"status={row.get('canary_status', 'abstain')} "
+            f"candidate={row.get('canary_candidate_id', -1)} "
+            f"mapped={row.get('canary_mapped_speaker') or '?'} "
             f"blocker={ledger.get('canary_blocker', '?')} "
             f"stable_ids={ledger.get('stable_speaker_ids', [])}"
         )
