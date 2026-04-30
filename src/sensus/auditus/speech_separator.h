@@ -12,7 +12,8 @@
 // Weight size: ~213 MB safetensors (55.7M params, FP32)
 //
 // Supports lazy loading: model loaded on first overlap detection to save memory.
-// For audio > 2s, internally segments with overlap-add stitching.
+// For audio > 2s, internally segments with ClearVoice-style fixed-window
+// stitching: pad, run full windows, and discard edge regions.
 //
 // Runs natively on GPU via cuBLAS + custom CUDA kernels (zero TRT dependency).
 
@@ -31,13 +32,13 @@ struct SpeechSeparatorConfig {
     std::string model_path;          // path to mossformer2_ss_16k.safetensors
     int sample_rate     = 16000;
     int max_chunk       = 32000;     // 2s native processing chunk
-    int overlap_samples = 3200;      // 200ms overlap for stitching
+    int overlap_samples = 16000;     // 1.0s overlap, Step 18 sweep best
     bool lazy_load      = true;      // don't load until first overlap
 };
 
 struct SeparationResult {
-    std::vector<float> source1;     // separated speaker 1 PCM
-    std::vector<float> source2;     // separated speaker 2 PCM
+    std::vector<float> source1;     // separated speaker 1 PCM, raw model scale
+    std::vector<float> source2;     // separated speaker 2 PCM, raw model scale
     float energy1;                  // RMS energy of source 1
     float energy2;                  // RMS energy of source 2
     bool valid;                     // separation succeeded
@@ -56,7 +57,7 @@ public:
 
     // Separate a mixed audio chunk into 2 speaker streams.
     // Input PCM should be float32 [-1, 1], 16kHz mono.
-    // For audio > max_chunk, internally segments and stitches.
+    // For audio > max_chunk, internally pads to full windows and stitches.
     SeparationResult separate(const float* pcm, int n_samples);
 
     bool initialized() const { return initialized_; }

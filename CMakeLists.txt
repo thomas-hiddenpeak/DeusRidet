@@ -76,7 +76,7 @@ target_link_libraries(nexus PRIVATE communis)
 # ============================================================================
 # Senses library (sensus — audio pipeline, Mel, VAD)
 # ============================================================================
-file(GLOB_RECURSE SENSUS_SOURCES
+file(GLOB_RECURSE SENSUS_SOURCES CONFIGURE_DEPENDS
     "src/sensus/*.cpp"
     "src/sensus/*.cu"
 )
@@ -175,6 +175,33 @@ add_executable(bench_mossformer2 tools/bench_mossformer2.cpp)
 target_include_directories(bench_mossformer2 PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(bench_mossformer2 PRIVATE sensus machina communis CUDA::cudart CUDA::cublas)
 set_target_properties(bench_mossformer2 PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+add_executable(auditus_separatio_examen tools/auditus_separatio_examen.cpp)
+target_include_directories(auditus_separatio_examen PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(auditus_separatio_examen PRIVATE sensus machina communis CUDA::cudart CUDA::cublas)
+set_target_properties(auditus_separatio_examen PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+add_executable(auditus_separatio_asr tools/auditus_separatio_asr.cpp)
+target_include_directories(auditus_separatio_asr PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(auditus_separatio_asr PRIVATE sensus machina communis CUDA::cudart CUDA::cublas CUDA::cufft cudnn)
+set_target_properties(auditus_separatio_asr PROPERTIES
+    BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
+    LINK_FLAGS "-Wl,--disable-new-dtags"
+)
+
+add_executable(auditus_separatio_spkid tools/auditus_separatio_spkid.cpp)
+target_include_directories(auditus_separatio_spkid PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(auditus_separatio_spkid PRIVATE orator sensus machina communis CUDA::cudart CUDA::cublas CUDA::cufft cudnn)
+set_target_properties(auditus_separatio_spkid PROPERTIES
     BUILD_RPATH "${CUDAToolkit_LIBRARY_DIR}"
     INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
     LINK_FLAGS "-Wl,--disable-new-dtags"

@@ -5,7 +5,8 @@
  */
 // speech_separator.cpp — MossFormer2 native CUDA inference for speech separation.
 //
-// Segmented processing with overlap-add for audio > 2s.
+// Segmented processing follows ClearVoice-style fixed-window decoding for
+// audio > 2s: pad, run full windows, discard edge regions, then stitch.
 // Lazy loading support to conserve memory when separation is not needed.
 // GPU inference via MossFormer2 (cuBLAS + custom CUDA kernels).
 
@@ -19,6 +20,17 @@
 #include <numeric>
 
 namespace deusridet {
+
+namespace {
+
+int padded_length_for_decode(int n_samples, int window, int stride, int give_up) {
+    if (n_samples <= window) return window;
+    int min_last_start = std::max(0, n_samples - window + give_up);
+    int steps = (min_last_start + stride - 1) / stride;
+    return steps * stride + window;
+}
+
+} // namespace
 
 SpeechSeparator::SpeechSeparator() = default;
 
@@ -83,81 +95,52 @@ SeparationResult SpeechSeparator::separate(const float* pcm, int n_samples) {
         if (!ensure_loaded()) return result;
     }
 
-    if (n_samples <= cfg_.max_chunk) {
+    int window = cfg_.max_chunk;
+    int stride = cfg_.max_chunk - cfg_.overlap_samples;
+    if (stride <= 0) stride = cfg_.max_chunk / 2;
+    int give_up = std::max(0, (window - stride) / 2);
+
+    if (n_samples <= window) {
         // Single chunk — direct processing.
         if (!separate_chunk(pcm, n_samples, result.source1, result.source2))
             return result;
     } else {
-        // Segmented processing with overlap-add.
+        // Segmented processing with full-window padding. MossFormer2 is much
+        // less stable when fed arbitrary short tails; ClearVoice always runs
+        // fixed windows and drops edge regions before stitching.
         result.source1.resize(n_samples, 0.0f);
         result.source2.resize(n_samples, 0.0f);
 
-        int step = cfg_.max_chunk - cfg_.overlap_samples;
-        if (step <= 0) step = cfg_.max_chunk / 2;
+        int padded_len = padded_length_for_decode(n_samples, window, stride, give_up);
+        std::vector<float> padded(padded_len, 0.0f);
+        std::memcpy(padded.data(), pcm, n_samples * sizeof(float));
 
-        // Overlap-add weights (Hann window on overlap regions).
-        for (int offset = 0; offset < n_samples; offset += step) {
-            int chunk_len = std::min(cfg_.max_chunk, n_samples - offset);
-            if (chunk_len < 1600) break;  // skip tiny tail (<100ms)
-
+        for (int offset = 0; offset + window <= padded_len; offset += stride) {
             std::vector<float> s1, s2;
-            if (!separate_chunk(pcm + offset, chunk_len, s1, s2))
+            if (!separate_chunk(padded.data() + offset, window, s1, s2))
                 return result;
 
-            // Overlap-add: simple crossfade in overlap region.
-            for (int i = 0; i < chunk_len; i++) {
-                int pos = offset + i;
-                if (pos >= n_samples) break;
+            int dst_start = offset == 0 ? 0 : offset + give_up;
+            int src_start = offset == 0 ? 0 : give_up;
+            int dst_end = offset + window - give_up;
+            dst_start = std::min(dst_start, n_samples);
+            dst_end = std::min(dst_end, n_samples);
+            if (dst_end <= dst_start) continue;
 
-                float weight = 1.0f;
-                // Fade-in at chunk start (if not first chunk).
-                if (offset > 0 && i < cfg_.overlap_samples) {
-                    weight = (float)i / (float)cfg_.overlap_samples;
-                }
-                // Fade-out at chunk end (if not last chunk).
-                int remaining = chunk_len - i;
-                if (offset + step < n_samples && remaining <= cfg_.overlap_samples) {
-                    float fade_out = (float)remaining / (float)cfg_.overlap_samples;
-                    weight = std::min(weight, fade_out);
-                }
-
-                if (offset > 0 && i < cfg_.overlap_samples) {
-                    // In overlap region, blend with previous chunk.
-                    result.source1[pos] = result.source1[pos] * (1.0f - weight) +
-                                          s1[i] * weight;
-                    result.source2[pos] = result.source2[pos] * (1.0f - weight) +
-                                          s2[i] * weight;
-                } else {
-                    result.source1[pos] = s1[i];
-                    result.source2[pos] = s2[i];
-                }
-            }
+            int len = dst_end - dst_start;
+            std::memcpy(result.source1.data() + dst_start, s1.data() + src_start,
+                        len * sizeof(float));
+            std::memcpy(result.source2.data() + dst_start, s2.data() + src_start,
+                        len * sizeof(float));
+            if (dst_end >= n_samples) break;
         }
     }
 
-    // RMS normalization: the model outputs at an arbitrary scale.
-    // ClearVoice normalizes each output source to match the input RMS.
-    float rms_input = 0.0f;
-    {
-        double sum_sq = 0.0;
-        for (int i = 0; i < n_samples; i++) sum_sq += (double)pcm[i] * pcm[i];
-        rms_input = std::sqrt((float)(sum_sq / n_samples));
-    }
+    // Keep raw model scale. Per-source RMS normalization can make a weak
+    // residual sound like a real speaker; callers that need ClearVoice-style
+    // listening output should normalize explicitly at the presentation layer.
     result.energy1 = compute_rms(result.source1);
     result.energy2 = compute_rms(result.source2);
-
-    if (rms_input > 1e-8f) {
-        if (result.energy1 > 1e-8f) {
-            float scale1 = rms_input / result.energy1;
-            for (float& v : result.source1) v *= scale1;
-        }
-        if (result.energy2 > 1e-8f) {
-            float scale2 = rms_input / result.energy2;
-            for (float& v : result.source2) v *= scale2;
-        }
-    }
-    // Keep pre-normalization energy for reporting: post-norm is always
-    // == rms_input since both sources are scaled to match input RMS.
 
     result.valid = true;
     return result;
@@ -168,24 +151,35 @@ bool SpeechSeparator::separate_chunk(const float* pcm, int n_samples,
                                       std::vector<float>& out2) {
     if (!loaded_) return false;
 
+    int forward_samples = n_samples;
+    std::vector<float> padded;
+    if (n_samples < cfg_.max_chunk) {
+        padded.resize(cfg_.max_chunk, 0.0f);
+        std::memcpy(padded.data(), pcm, n_samples * sizeof(float));
+        pcm = padded.data();
+        forward_samples = cfg_.max_chunk;
+    }
+
     // Copy input H→D.
-    cudaMemcpyAsync(d_input_, pcm, n_samples * sizeof(float),
+    cudaMemcpyAsync(d_input_, pcm, forward_samples * sizeof(float),
                     cudaMemcpyHostToDevice, cuda_stream_);
     cudaStreamSynchronize(cuda_stream_);
 
     // Run native MossFormer2 forward pass.
-    if (!mf2_.forward(d_input_, d_source1_, d_source2_, n_samples)) {
-        LOG_ERROR("Separator", "MossFormer2 forward failed (n=%d)", n_samples);
+    if (!mf2_.forward(d_input_, d_source1_, d_source2_, forward_samples)) {
+        LOG_ERROR("Separator", "MossFormer2 forward failed (n=%d)", forward_samples);
         return false;
     }
 
     // Copy outputs D→H.
+    out1.resize(forward_samples);
+    out2.resize(forward_samples);
+    cudaMemcpy(out1.data(), d_source1_, forward_samples * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(out2.data(), d_source2_, forward_samples * sizeof(float),
+               cudaMemcpyDeviceToHost);
     out1.resize(n_samples);
     out2.resize(n_samples);
-    cudaMemcpy(out1.data(), d_source1_, n_samples * sizeof(float),
-               cudaMemcpyDeviceToHost);
-    cudaMemcpy(out2.data(), d_source2_, n_samples * sizeof(float),
-               cudaMemcpyDeviceToHost);
 
     return true;
 }
