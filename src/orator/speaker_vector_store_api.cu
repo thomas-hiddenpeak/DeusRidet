@@ -17,10 +17,30 @@
 
 #include <algorithm>
 #include <cassert>
+#include <climits>
 #include <cmath>
 #include <cstring>
 
 namespace deusridet {
+
+namespace {
+
+int pending_similarity_bucket(float similarity) {
+    return (int)std::lround(similarity * 1000.0f);
+}
+
+bool pending_slot_better(float similarity, int slot, int miss_seq,
+                         float best_similarity, int best_slot,
+                         int best_miss_seq) {
+    if (best_slot < 0) return true;
+    int bucket = pending_similarity_bucket(similarity);
+    int best_bucket = pending_similarity_bucket(best_similarity);
+    if (bucket != best_bucket) return bucket > best_bucket;
+    if (miss_seq != best_miss_seq) return miss_seq < best_miss_seq;
+    return slot < best_slot;
+}
+
+} // namespace
 
 // Forward declarations of kernels defined in speaker_vector_store.cu.
 __global__ void ema_normalize_kernel(float4* __restrict__ embedding_row,
@@ -194,15 +214,21 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
     // Multi-pending pool: find if current query matches any existing pending slot.
     int matched_slot = -1;
     float best_pending_sim = -1.0f;
+    int best_pending_seq = INT_MAX;
     for (int s = 0; s < kMaxPending; s++) {
         if (!pending_slots_[s].active) continue;
         float sim = gpu_pending_dot(s);
         LOG_INFO(label_.c_str(),
-                 "Pending[%d] vs query: sim=%.3f (reg_thresh=%.2f, age=%d)",
-                 s, sim, reg_thresh, pending_miss_seq_ - pending_slots_[s].miss_seq);
-        if (sim >= reg_thresh && sim > best_pending_sim) {
+                 "Pending[%d] vs query: sim=%.3f bucket=%d (reg_thresh=%.2f, age=%d)",
+                 s, sim, pending_similarity_bucket(sim), reg_thresh,
+                 pending_miss_seq_ - pending_slots_[s].miss_seq);
+        if (sim >= reg_thresh &&
+            pending_slot_better(sim, s, pending_slots_[s].miss_seq,
+                                best_pending_sim, matched_slot,
+                                best_pending_seq)) {
             best_pending_sim = sim;
             matched_slot = s;
+            best_pending_seq = pending_slots_[s].miss_seq;
         }
     }
 
@@ -293,7 +319,9 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
     if (target_slot < 0) {
         int oldest_seq = INT_MAX;
         for (int s = 0; s < kMaxPending; s++) {
-            if (pending_slots_[s].miss_seq < oldest_seq) {
+            if (pending_slots_[s].miss_seq < oldest_seq ||
+                (pending_slots_[s].miss_seq == oldest_seq &&
+                 (target_slot < 0 || s < target_slot))) {
                 oldest_seq = pending_slots_[s].miss_seq;
                 target_slot = s;
             }
