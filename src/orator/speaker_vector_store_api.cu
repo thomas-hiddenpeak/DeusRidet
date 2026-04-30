@@ -25,6 +25,8 @@ namespace deusridet {
 
 namespace {
 
+constexpr float kStrongPendingRegisterSim = 0.95f;
+
 int pending_similarity_bucket(float similarity) {
     return (int)std::lround(similarity * 1000.0f);
 }
@@ -241,18 +243,29 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
         if (!speakers_.empty() && second_best_id >= 0) {
             float margin = best.similarity - second_best_sim;
             if (margin >= 0 && margin < min_margin_ && best.similarity > reg_thresh * 0.8f) {
-                LOG_INFO(label_.c_str(),
-                         "Registration blocked by margin guard: "
-                         "best_db=#%d(%.3f) 2nd_db=#%d(%.3f) margin=%.3f < %.3f, pending_sim=%.3f slot=%d",
-                         best.speaker_id, best.similarity,
-                         second_best_id, second_best_sim,
-                         margin, min_margin_, pending_sim, matched_slot);
-                // Don't register, but keep the pending slot alive — the speaker
-                // might accumulate a better embedding next time.
-                best.speaker_id = -1;
-                best.similarity = 0.0f;
-                best.is_new = false;
-                return best;
+                bool strong_pending = pending_sim >= kStrongPendingRegisterSim &&
+                                      best.similarity < match_threshold;
+                if (strong_pending) {
+                    LOG_INFO(label_.c_str(),
+                             "Registration margin guard bypassed by strong pending evidence: "
+                             "best_db=#%d(%.3f) 2nd_db=#%d(%.3f) margin=%.3f < %.3f, pending_sim=%.3f slot=%d",
+                             best.speaker_id, best.similarity,
+                             second_best_id, second_best_sim,
+                             margin, min_margin_, pending_sim, matched_slot);
+                } else {
+                    LOG_INFO(label_.c_str(),
+                             "Registration blocked by margin guard: "
+                             "best_db=#%d(%.3f) 2nd_db=#%d(%.3f) margin=%.3f < %.3f, pending_sim=%.3f slot=%d",
+                             best.speaker_id, best.similarity,
+                             second_best_id, second_best_sim,
+                             margin, min_margin_, pending_sim, matched_slot);
+                    // Don't register, but keep the pending slot alive — the speaker
+                    // might accumulate a better embedding next time.
+                    best.speaker_id = -1;
+                    best.similarity = 0.0f;
+                    best.is_new = false;
+                    return best;
+                }
             }
         }
 
