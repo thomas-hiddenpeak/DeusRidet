@@ -11,6 +11,7 @@
  *   extract body itself, which lives in audio_pipeline_process_saas_full.cpp).
  */
 #include "audio_pipeline.h"
+#include "separatio_orator_probe.h"
 #include "../../communis/log.h"
 #include "../../communis/tempus.h"
 
@@ -114,7 +115,19 @@ void AudioPipeline::process_saas_segment_end_() {
                     std::vector<float> pcm_f32(speech_samples);
                     for (int i = 0; i < speech_samples; i++)
                         pcm_f32[i] = speech_pcm_buf_[i] / 32768.0f;
-                    auto emb = wlecapa_enc_.extract(pcm_f32.data(), speech_samples);
+                    std::vector<float> emb;
+                    float lat_cnn_ms = 0.0f;
+                    float lat_encoder_ms = 0.0f;
+                    float lat_ecapa_ms = 0.0f;
+                    float lat_total_ms = 0.0f;
+                    {
+                        std::lock_guard<std::mutex> lock(auditus_wlecapa_extract_mutex());
+                        emb = wlecapa_enc_.extract(pcm_f32.data(), speech_samples);
+                        lat_cnn_ms = wlecapa_enc_.last_lat_cnn_ms();
+                        lat_encoder_ms = wlecapa_enc_.last_lat_encoder_ms();
+                        lat_ecapa_ms = wlecapa_enc_.last_lat_ecapa_ms();
+                        lat_total_ms = wlecapa_enc_.last_lat_total_ms();
+                    }
                     if (!emb.empty()) {
                         float enorm = 0;
                         for (float v : emb) enorm += v * v;
@@ -132,10 +145,10 @@ void AudioPipeline::process_saas_segment_end_() {
                         stats_.wlecapa_hits_above = match.hits_above;
                         stats_.wlecapa_active = true;
                         stats_.wlecapa_is_early = false;
-                        stats_.wlecapa_lat_cnn_ms     = wlecapa_enc_.last_lat_cnn_ms();
-                        stats_.wlecapa_lat_encoder_ms = wlecapa_enc_.last_lat_encoder_ms();
-                        stats_.wlecapa_lat_ecapa_ms   = wlecapa_enc_.last_lat_ecapa_ms();
-                        stats_.wlecapa_lat_total_ms   = wlecapa_enc_.last_lat_total_ms();
+                        stats_.wlecapa_lat_cnn_ms     = lat_cnn_ms;
+                        stats_.wlecapa_lat_encoder_ms = lat_encoder_ms;
+                        stats_.wlecapa_lat_ecapa_ms   = lat_ecapa_ms;
+                        stats_.wlecapa_lat_total_ms   = lat_total_ms;
 
                         // SAAS: track speaker ref for ASR annotation and inheritance.
                         // When dual encoder active, dual_db_ FULL path already sets seg_ref.
@@ -166,7 +179,7 @@ void AudioPipeline::process_saas_segment_end_() {
                                  match.speaker_id, match.similarity,
                                  match.is_new ? "NEW " : "",
                                  match.name.empty() ? "(unnamed)" : match.name.c_str(),
-                                 speech_samples, wlecapa_enc_.last_lat_total_ms());
+                                 speech_samples, lat_total_ms);
                         if (on_speaker_) on_speaker_(match);
                         // Timeline: SAAS full end-of-segment event (highest authority).
                         // Skip when dual encoder active — dual_db_ FULL path already pushed.

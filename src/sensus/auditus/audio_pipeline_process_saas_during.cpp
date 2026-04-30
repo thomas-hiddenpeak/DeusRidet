@@ -12,6 +12,7 @@
  *   Sensus auditus — SAAS mid-segment identity arm.
  */
 #include "audio_pipeline.h"
+#include "separatio_orator_probe.h"
 #include "../../communis/log.h"
 #include "../../communis/tempus.h"
 
@@ -110,7 +111,19 @@ void AudioPipeline::process_saas_during_speech_(const int16_t* pcm_buf, int n_sa
                     std::vector<float> pcm_f32(early_samples);
                     for (int i = 0; i < early_samples; i++)
                         pcm_f32[i] = speech_pcm_buf_[i] / 32768.0f;
-                    auto emb = wlecapa_enc_.extract(pcm_f32.data(), early_samples);
+                    std::vector<float> emb;
+                    float lat_cnn_ms = 0.0f;
+                    float lat_encoder_ms = 0.0f;
+                    float lat_ecapa_ms = 0.0f;
+                    float lat_total_ms = 0.0f;
+                    {
+                        std::lock_guard<std::mutex> lock(auditus_wlecapa_extract_mutex());
+                        emb = wlecapa_enc_.extract(pcm_f32.data(), early_samples);
+                        lat_cnn_ms = wlecapa_enc_.last_lat_cnn_ms();
+                        lat_encoder_ms = wlecapa_enc_.last_lat_encoder_ms();
+                        lat_ecapa_ms = wlecapa_enc_.last_lat_ecapa_ms();
+                        lat_total_ms = wlecapa_enc_.last_lat_total_ms();
+                    }
                     if (!emb.empty()) {
                         // Store as reference for intra-segment speaker change detection.
                         seg_ref_emb_ = emb;
@@ -122,10 +135,10 @@ void AudioPipeline::process_saas_during_speech_(const int16_t* pcm_buf, int n_sa
                         SpeakerMatch match = wlecapa_db_.identify(emb, thresh, /*auto_register=*/false);
                         stats_.wlecapa_active = true;
                         stats_.wlecapa_is_early = true;
-                        stats_.wlecapa_lat_cnn_ms     = wlecapa_enc_.last_lat_cnn_ms();
-                        stats_.wlecapa_lat_encoder_ms = wlecapa_enc_.last_lat_encoder_ms();
-                        stats_.wlecapa_lat_ecapa_ms   = wlecapa_enc_.last_lat_ecapa_ms();
-                        stats_.wlecapa_lat_total_ms   = wlecapa_enc_.last_lat_total_ms();
+                        stats_.wlecapa_lat_cnn_ms     = lat_cnn_ms;
+                        stats_.wlecapa_lat_encoder_ms = lat_encoder_ms;
+                        stats_.wlecapa_lat_ecapa_ms   = lat_ecapa_ms;
+                        stats_.wlecapa_lat_total_ms   = lat_total_ms;
                         if (match.speaker_id >= 0) {
                             // Matched an existing speaker — light up immediately.
                             stats_.wlecapa_id = match.speaker_id;
@@ -149,7 +162,7 @@ void AudioPipeline::process_saas_during_speech_(const int16_t* pcm_buf, int n_sa
                                      match.speaker_id, match.similarity,
                                      match.name.empty() ? "(unnamed)" : match.name.c_str(),
                                      early_samples / 16000.0f,
-                                     wlecapa_enc_.last_lat_total_ms(),
+                                     lat_total_ms,
                                      use_dual_encoder_ ? " [skip timeline: dual mode]" : "");
                             if (on_speaker_) on_speaker_(match);
                             // Timeline: SAAS early extraction event.
@@ -174,7 +187,7 @@ void AudioPipeline::process_saas_during_speech_(const int16_t* pcm_buf, int n_sa
                             stats_.wlecapa_name[sizeof(stats_.wlecapa_name) - 1] = '\0';
                             LOG_INFO("AudioPipe", "WL-ECAPA(early): no match (best_sim=%.3f, %.2fs, %.1fms) — awaiting full segment",
                                      match.similarity, early_samples / 16000.0f,
-                                     wlecapa_enc_.last_lat_total_ms());
+                                     lat_total_ms);
                         }
                     }
                 }
@@ -199,7 +212,11 @@ void AudioPipeline::process_saas_during_speech_(const int16_t* pcm_buf, int n_sa
                             std::vector<float> pcm_f32(len);
                             for (int i = 0; i < len; i++)
                                 pcm_f32[i] = speech_pcm_buf_[start + i] / 32768.0f;
-                            auto emb = wlecapa_enc_.extract(pcm_f32.data(), len);
+                            std::vector<float> emb;
+                            {
+                                std::lock_guard<std::mutex> lock(auditus_wlecapa_extract_mutex());
+                                emb = wlecapa_enc_.extract(pcm_f32.data(), len);
+                            }
                             if (!emb.empty() && emb.size() == seg_ref_emb_.size()) {
                                 // Cosine similarity between reference and current window.
                                 float dot = 0, na = 0, nb = 0;
@@ -228,7 +245,11 @@ void AudioPipeline::process_saas_during_speech_(const int16_t* pcm_buf, int n_sa
                                         std::vector<float> pre_f32(pre_samples);
                                         for (int i = 0; i < pre_samples; i++)
                                             pre_f32[i] = speech_pcm_buf_[i] / 32768.0f;
-                                        auto pre_emb = wlecapa_enc_.extract(pre_f32.data(), pre_samples);
+                                        std::vector<float> pre_emb;
+                                        {
+                                            std::lock_guard<std::mutex> lock(auditus_wlecapa_extract_mutex());
+                                            pre_emb = wlecapa_enc_.extract(pre_f32.data(), pre_samples);
+                                        }
                                         if (!pre_emb.empty()) {
                                             float wt = wlecapa_threshold_.load(std::memory_order_relaxed);
                                             SpeakerMatch m = wlecapa_db_.identify(pre_emb, wt);

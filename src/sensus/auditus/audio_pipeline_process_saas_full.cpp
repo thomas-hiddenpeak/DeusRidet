@@ -17,6 +17,7 @@
  *   Sensus auditus — SAAS end-of-segment identity arm.
  */
 #include "audio_pipeline.h"
+#include "separatio_orator_probe.h"
 #include "../../communis/log.h"
 #include "../../communis/tempus.h"
 
@@ -118,6 +119,7 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                                     std::vector<float> pcm_f32(speech_samples);
                                     for (int si = 0; si < speech_samples; si++)
                                         pcm_f32[si] = speech_pcm_buf_[si] / 32768.0f;
+                                    std::lock_guard<std::mutex> lock(auditus_wlecapa_extract_mutex());
                                     wl_emb = wlecapa_enc_.extract(pcm_f32.data(), speech_samples);
                                 }
                                 if (!wl_emb.empty()) {
