@@ -342,6 +342,7 @@ def summarize(args: argparse.Namespace) -> int:
     ledger_blockers: Counter[str] = Counter()
     ledger_missing = 0
     ledger_canary_candidates = 0
+    ledger_canary_would_apply = 0
     ledger_authority_violations = 0
     for event in fusion:
         arbitrium = event.get("arbitrium", {})
@@ -357,6 +358,7 @@ def summarize(args: argparse.Namespace) -> int:
             blocker = str(ledger.get("canary_blocker", "<missing>") or "<missing>")
             ledger_blockers[blocker] += 1
             ledger_canary_candidates += int(bool(ledger.get("canary_candidate")))
+            ledger_canary_would_apply += int(bool(ledger.get("canary_would_apply")))
             if ledger.get("authority") != "shadow" or not bool(ledger.get("shadow_only")):
                 ledger_authority_violations += 1
     for index, event in enumerate(fusion, 1):
@@ -448,6 +450,7 @@ def summarize(args: argparse.Namespace) -> int:
         "arbitrium_contradictions": arbitrium_contradictions,
         "ledger_missing": ledger_missing,
         "ledger_canary_candidates": ledger_canary_candidates,
+        "ledger_canary_would_apply": ledger_canary_would_apply,
         "ledger_blockers": dict(sorted(ledger_blockers.items())),
         "ledger_authority_violations": ledger_authority_violations,
     }
@@ -489,6 +492,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- arbitrium contradictions: {summary['arbitrium_contradictions']}",
         f"- ledger: missing={summary['ledger_missing']} "
         f"canary_candidates={summary['ledger_canary_candidates']} "
+        f"canary_would_apply={summary['ledger_canary_would_apply']} "
         f"authority_violations={summary['ledger_authority_violations']} "
         f"blockers={summary['ledger_blockers']}",
         "",
@@ -510,6 +514,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         ledger = row.get("ledger", {})
         lines.append(
             f"- ledger: canary={ledger.get('canary_candidate', False)} "
+            f"would_apply={ledger.get('canary_would_apply', False)} "
             f"blocker={ledger.get('canary_blocker', '?')} "
             f"stable_ids={ledger.get('stable_speaker_ids', [])}"
         )

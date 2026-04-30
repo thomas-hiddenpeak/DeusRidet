@@ -82,6 +82,7 @@ std::string fusion_evidence_ledger_json(const asr::ASRResult& src1_result,
                                         const ShadowSpeakerEvidence& src1_evidence,
                                         const asr::ASRResult& src2_result,
                                         const ShadowSpeakerEvidence& src2_evidence,
-                                        int timeline_speaker_id);
+                                        int timeline_speaker_id,
+                                        bool canary_enabled = false);
 
 } // namespace deusridet

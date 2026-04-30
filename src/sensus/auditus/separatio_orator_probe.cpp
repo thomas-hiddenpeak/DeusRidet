@@ -359,24 +359,28 @@ std::string fusion_evidence_ledger_json(const asr::ASRResult& src1_result,
                                         const ShadowSpeakerEvidence& src1_evidence,
                                         const asr::ASRResult& src2_result,
                                         const ShadowSpeakerEvidence& src2_evidence,
-                                        int timeline_speaker_id) {
+                                        int timeline_speaker_id,
+                                        bool canary_enabled) {
     FusionArbitriumDecision decision = decide_fusion_arbitrium(
         src1_result, src1_evidence, src2_result, src2_evidence,
         timeline_speaker_id);
     bool canary_candidate = decision.direct_candidate &&
         !decision.contradiction && decision.candidate_speaker >= 0;
+    bool canary_would_apply = canary_enabled && canary_candidate;
     int db_speakers = std::max(src1_evidence.db_speakers, src2_evidence.db_speakers);
     int unstable_accepted = decision.accepted_sources - decision.stable_sources;
     char head[1280];
     snprintf(head, sizeof(head),
         R"({"schema":"auditus_fusion_shadow_ledger.v1","authority":"shadow",)"
-        R"("shadow_only":true,"canary_candidate":%s,"canary_blocker":"%s",)"
+        R"("shadow_only":true,"canary_enabled":%s,"canary_candidate":%s,)"
+        R"("canary_would_apply":%s,"canary_blocker":"%s",)"
         R"("timeline_present":%s,"timeline_speaker_id":%d,"db_speakers":%d,)"
         R"("accepted_text_sources":%d,"stable_text_sources":%d,)"
         R"("unstable_accepted_sources":%d,"candidate_speaker_id":%d,)"
         R"("split_candidate":%s,"contradiction":%s,)"
         R"("action":"%s","reason":"%s","stable_speaker_ids":)",
-        bool_json(canary_candidate), canary_blocker(decision),
+        bool_json(canary_enabled), bool_json(canary_candidate),
+        bool_json(canary_would_apply), canary_blocker(decision),
         bool_json(timeline_speaker_id >= 0), timeline_speaker_id, db_speakers,
         decision.accepted_sources, decision.stable_sources, unstable_accepted,
         decision.candidate_speaker,
