@@ -88,22 +88,33 @@ GPTQ 核函数是全新工作——两个参考项目都不支持 GPTQ。
 
 ## 内存预算（64 GB Orin）
 
-**三个模型（LLM + ASR + TTS）始终常驻内存**。按需换入模型权重不可
-接受——它引入与连续意识不兼容的延迟。
+**所有生产模型都按常驻内存预算**。按需换入模型权重不可接受——它
+引入与连续意识不兼容的延迟。benchmark-only gate 可以在某次运行中
+关闭某个模型，但不能把它从生产预算里删除。
 
-| 组件 | 估计 |
-|------|------|
-| LLM 权重 | ~30.2 GB |
-| ASR 权重 | ~4.7 GB |
-| TTS 模型 + tokenizer | ~5.5 GB |
-| 说话人编码器 (CAM++) | ~0.1 GB |
-| **权重总计** | **~40.5 GB** |
-| OS + CUDA 运行时开销 | ~3.5 GB |
-| **KV Cache + 激活可用** | **~20 GB** |
+| 组件 | 估计 | 常驻性 |
+|------|------|--------|
+| LLM 权重 | ~30.2 GB | 生产常驻 |
+| ASR 权重 | ~4.7 GB | 生产常驻；benchmark 可 env-gate |
+| TTS 模型 + tokenizer | ~5.5 GB | 生产常驻 |
+| 说话人编码器 (CAM++ + WavLM-ECAPA) | ~6.5 GB | dual speaker 开启时常驻 |
+| VAD / enhancement sidecars (Silero, pyannote, FRCRN) | ~0.1 GB | 常驻 |
+| MossFormer2 separator | ~0.2 GB | lazy-loaded；非启动常驻 |
+| **常驻权重总计，不含 lazy separator** | **~47.0 GB** | |
+| OS + CUDA 运行时开销 | ~3.5 GB | |
+| **KV Cache + 激活可用** | **~13-14 GB** | |
 
-> **关键约束**：~20 GB 必须覆盖 KV Cache（paged 块）、SSM 递归态、
-> Conv 态、激活暂存空间、长期记忆索引（HNSW 顶层 ~200 MB，图热集
-> ~100 MB），以及 ASR/TTS 推理的所有中间缓冲。每次分配都必须有账。
+> **关键约束**：旧的 ~20 GB headroom 只适用于 CAM++-only speaker stack。
+> 当前 dual speaker 路径默认配置 WavLM-ECAPA，生产 headroom 会降到约
+> 13-14 GB。这部分必须覆盖 KV Cache（paged 块）、SSM 递归态、Conv 态、
+> 激活暂存空间、长期记忆索引（HNSW 顶层 ~200 MB，图热集 ~100 MB）、
+> ASR/TTS 中间缓冲，以及任何 shadow probe。每次分配都必须有账。
+
+检查磁盘占用时，只计算被选中的模型路径，不要把整个
+`~/models/dev/llm` 目录当成运行时常驻：该目录可能包含多个互斥的 LLM
+候选和 engine artifacts。在 Tegra 上，`cudaMemGetInfo` 只能作为 telemetry；
+预算决策使用 `/proc/meminfo` 的 `MemAvailable`、进程 `VmRSS` 和
+`NvMapMemUsed`。
 
 ## 实现面
 

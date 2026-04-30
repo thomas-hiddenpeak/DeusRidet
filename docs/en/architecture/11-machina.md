@@ -92,25 +92,36 @@ Path: `~/models/dev/tts/Qwen/Qwen3-TTS-Tokenizer-12Hz`.
 
 ## Memory Budget (64 GB Orin)
 
-**All three models (LLM + ASR + TTS) are memory-resident at all times.**
-Swapping model weights on demand is not acceptable — it introduces latency
-incompatible with continuous consciousness.
+**All production models are budgeted as memory-resident.** Swapping model
+weights on demand is not acceptable — it introduces latency incompatible with
+continuous consciousness. Benchmark-only gates may disable a model for a run,
+but they do not remove it from the production budget.
 
-| Component | Estimate |
-|-----------|----------|
-| LLM weights | ~30.2 GB |
-| ASR weights | ~4.7 GB |
-| TTS model + tokenizer | ~5.5 GB |
-| Speaker encoder (CAM++) | ~0.1 GB |
-| **Total weights** | **~40.5 GB** |
-| OS + CUDA runtime overhead | ~3.5 GB |
-| **Available for KV Cache + activations** | **~20 GB** |
+| Component | Estimate | Residency |
+|-----------|----------|-----------|
+| LLM weights | ~30.2 GB | production resident |
+| ASR weights | ~4.7 GB | production resident; benchmark env-gated |
+| TTS model + tokenizer | ~5.5 GB | production resident |
+| Speaker encoders (CAM++ + WavLM-ECAPA) | ~6.5 GB | resident when dual speaker mode is enabled |
+| VAD / enhancement sidecars (Silero, pyannote, FRCRN) | ~0.1 GB | resident |
+| MossFormer2 separator | ~0.2 GB | lazy-loaded; not startup resident |
+| **Resident weights, excluding lazy separator** | **~47.0 GB** | |
+| OS + CUDA runtime overhead | ~3.5 GB | |
+| **Available for KV Cache + activations** | **~13-14 GB** | |
 
-> **Critical constraint**: ~20 GB must cover KV Cache (paged blocks), SSM
-> recurrent states, Conv states, activation scratch space, long-term
-> memory indices (HNSW top layer ~200 MB, graph hot set ~100 MB), and all
-> intermediate buffers for ASR/TTS inference. Every allocation must be
-> accounted for.
+> **Critical constraint**: the older ~20 GB headroom only applies to a
+> CAM++-only speaker stack. The current dual speaker path configures
+> WavLM-ECAPA by default, reducing production headroom to roughly 13-14 GB.
+> That remainder must cover KV Cache (paged blocks), SSM recurrent states,
+> Conv states, activation scratch space, long-term memory indices (HNSW top
+> layer ~200 MB, graph hot set ~100 MB), ASR/TTS intermediates, and any shadow
+> probes. Every allocation must be accounted for.
+
+When checking disk usage, count the selected model path, not the whole
+`~/models/dev/llm` directory: that directory may contain multiple alternative
+LLMs and engine artifacts that are not simultaneous residency. On Tegra,
+`cudaMemGetInfo` is telemetry only; use `/proc/meminfo` `MemAvailable`, process
+`VmRSS`, and `NvMapMemUsed` for budget decisions.
 
 ## Implementation Surface
 

@@ -27,6 +27,27 @@ perceives, thinks, dreams, and speaks on its own terms, on a single Orin.
    a change adds a name, a file, or an abstraction, it must also remove
    ambiguity elsewhere. Tech-dynamics (the pull toward "shortest path")
    is the primary enemy.
+5. **Keep the Orin memory budget explicit.** Resident model weights,
+   duplicate merged weights, encoder peers, scratch arenas, KV Cache, SSM
+   state, and long-term memory indices all share the same 64 GB unified
+   DRAM. Before adding or enabling any large allocation, state whether it is
+   always-resident, env-gated, lazy, or offline-only, then update the
+   bilingual Machina memory budget if residency changes.
+
+## Model Residency Budget Guardrail
+
+The source of truth is `docs/{en,zh}/architecture/11-machina.md`, but verify
+the live runtime shape before changing it. The top-level `~/models/dev/llm`
+directory may contain multiple alternative LLMs and engine artifacts; do not
+treat that directory total as simultaneous residency. Count the selected model
+path plus every enabled audio/speaker model.
+
+Current Auditus caveat: `awaken` configures WavLM-ECAPA by default, while ASR
+is `DEUSRIDET_TEST_WS_ENABLE_ASR=1` gated and MossFormer2 remains lazy-loaded.
+So the old CAM++-only speaker line is not enough for runtime headroom analysis.
+On Tegra, `cudaMemGetInfo` is telemetry only; use `/proc/meminfo`
+`MemAvailable`, process `VmRSS`, and `NvMapMemUsed` when making budget
+decisions.
 
 ## Directive Map
 
