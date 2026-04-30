@@ -6,6 +6,10 @@ To add a new entry, create `devlog/YYYY-MM-DD.md` and prepend it here.
 
 ## DEVLOG
 
+- [2026-04-30](devlog/2026-04-30.md) — Step 18n-18w: Auditus separated-source identity fusion selector, runtime fusion shadow ASR/speaker evidence, arbitrium + ledger telemetry, deterministic enrollment replay, and Mel rolling compaction; r2 run1/run2 reproduced 4/4 births, 10 stable hits, 0 wrong, 0 authority violations
+- [2026-04-29](devlog/2026-04-29.md) — Step 18l-18m: upstream ClearerVoice + 3D-Speaker + FunASR smoke and top30 Auditus upstream-vs-C++ probe; production py313 CUDA torch preserved
+- [2026-04-28](devlog/2026-04-28.md) — Step 18g-18k: Auditus separated-source ASR + speaker-ID validation against GT timeline; raw_o16000 kept as production primary and failure-attributed by identity monitor
+- [2026-04-27](devlog/2026-04-27.md) — Step 18: Auditus homogeneity audit, ASR split shadow metadata, real-clip MossFormer2 separation, FRCRN A/B, and fixed-window separator adaptation
 - [2026-04-26](devlog/2026-04-26.md) — Step 17b-A: RetroFullRing Live Amend (speaker_amend frames; 3× 1x replays, decided_macro 0.924 / 0.930 / 0.949; no whole-speaker collapse)
 - [2026-04-24](devlog/2026-04-24.md) — Step 11 Closed: Function-level Decomposition (A3 spectral_cluster, A2 SpeakerTracker::check, A1 AudioPipeline::process_loop 1574 → 353); Step 13: R1 residual clean-up (spectral_cluster_stages 636 → 3×≤235; audio_pipeline.h 511 → 489) — R1 fully clean
 - [2026-04-23](devlog/2026-04-23.md) — Step 10 Complete: Actus Charter Restoration (5 atomic commits; `cmd_` prefix dropped, bench/profile → tools/, engine probes → tests/integration/, `test-ws` → `awaken`)

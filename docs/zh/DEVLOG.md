@@ -6,6 +6,10 @@
 
 ## 开发日志
 
+- [2026-04-30](devlog/2026-04-30.md) — Step 18n-18w：Auditus 分离源 identity fusion selector、runtime fusion shadow ASR/speaker evidence、arbitrium + ledger telemetry、deterministic enrollment replay，以及 Mel rolling compaction；r2 run1/run2 复现 4/4 个 birth、10 个 stable hit、0 wrong、0 authority violation
+- [2026-04-29](devlog/2026-04-29.md) — Step 18l-18m：在隔离 py313_audio_labs 中完成上游 ClearerVoice + 3D-Speaker + FunASR smoke，并跑通 top30 Auditus 上游-vs-C++ 探针；生产 py313 CUDA torch 保持不变
+- [2026-04-28](devlog/2026-04-28.md) — Step 18g-18k：Auditus 分离源 ASR + speaker-ID 对 GT 时间线验证；identity monitor 保持 raw_o16000 为生产主状态并完成失败归因
+- [2026-04-27](devlog/2026-04-27.md) — Step 18：Auditus 同质性审计、ASR split shadow metadata、真实 clip MossFormer2 分离、FRCRN A/B，以及固定窗口 separator 适配
 - [2026-04-26](devlog/2026-04-26.md) — Step 17b-A：RetroFullRing 实时修正（speaker_amend 帧；3 次 1x 回放，decided_macro 0.924 / 0.930 / 0.949；无说话人整建制坍缩）
 - [2026-04-24](devlog/2026-04-24.md) — 第 11 步收官：函数级分解（A3 spectral_cluster、A2 SpeakerTracker::check、A1 AudioPipeline::process_loop 1574 → 353）；第 13 步：R1 残余清账（spectral_cluster_stages 636 → 3×≤235；audio_pipeline.h 511 → 489）—— R1 全线合规
 - [2026-04-23](devlog/2026-04-23.md) — 第 10 步收官：Actus 宪章复位（5 个原子提交；去除 `cmd_` 前缀，bench/profile 迁往 tools/，引擎探针迁往 tests/integration/，`test-ws` → `awaken`）
