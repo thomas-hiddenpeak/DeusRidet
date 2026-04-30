@@ -238,6 +238,28 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
         // Confirmed: pending slot matches current query — same unknown speaker twice.
         float pending_sim = best_pending_sim;
 
+        int newborn_idx = id_to_idx(best.speaker_id);
+        if (newborn_idx >= 0 && best.similarity >= reg_thresh) {
+            auto& spk = speakers_[newborn_idx];
+            float margin = (second_best_id >= 0) ? best.similarity - second_best_sim : 1.0f;
+            if (spk.exemplar_count == 1 && spk.match_count <= 2 &&
+                spk.exemplar_count < max_exemplars_ && margin >= min_margin_) {
+                gpu_add_exemplar(newborn_idx);
+                spk.match_count++;
+                pending_slots_[matched_slot].active = false;
+                has_pending_ = false;
+                for (int s = 0; s < kMaxPending; s++)
+                    if (pending_slots_[s].active) { has_pending_ = true; break; }
+                LOG_INFO(label_.c_str(),
+                         "Absorbed pending registration into newborn speaker #%d: "
+                         "best=%.3f pending_sim=%.3f slot=%d margin=%.3f",
+                         spk.external_id, best.similarity, pending_sim, matched_slot, margin);
+                best.exemplar_count = spk.exemplar_count;
+                best.is_new = false;
+                return best;
+            }
+        }
+
         // Margin guard at REGISTRATION time: check if this pending embedding is
         // too close to two existing speakers (would create a confusing duplicate).
         if (!speakers_.empty() && second_best_id >= 0) {
