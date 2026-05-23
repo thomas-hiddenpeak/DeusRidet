@@ -101,6 +101,9 @@ int select_k_by_eigengap(
 
     float max_gap_score = 0;
     for (int k = 0; k + 1 < actual_max; ++k) {
+        // Skip trivial first eigengap: λ[0] is the connected-component eigenvalue
+        // and dominates the score, forcing K=1 in degenerate cases.
+        if (k == 0) continue;
         float gap = eigvals[k] - eigvals[k + 1];
         if (eigvals[k] < 0.01f) continue;
         float rel_gap = gap / (eigvals[0] + 1e-12f);

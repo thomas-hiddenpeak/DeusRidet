@@ -254,6 +254,11 @@ set_target_properties(profile_prefill PROPERTIES
     INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}"
     LINK_FLAGS "-Wl,--disable-new-dtags"
 )
+
+# Orator reclusterer end-to-end eval (Phase 1 — streaming spectral re-cluster).
+add_executable(orator_reclusterer_eval tools/orator_reclusterer_eval.cpp)
+target_include_directories(orator_reclusterer_eval PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(orator_reclusterer_eval PRIVATE orator communis)
 # ============================================================================
 add_executable(test_overlap_separator tests/test_overlap_separator.cpp)
 target_include_directories(test_overlap_separator PRIVATE ${CMAKE_SOURCE_DIR})
