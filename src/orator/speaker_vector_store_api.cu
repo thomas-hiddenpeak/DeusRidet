@@ -243,6 +243,7 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
             auto& spk = speakers_[newborn_idx];
             float margin = (second_best_id >= 0) ? best.similarity - second_best_sim : 1.0f;
             if (spk.exemplar_count == 1 && spk.match_count <= 2 &&
+                pending_slots_[matched_slot].miss_seq <= spk.birth_miss_seq &&
                 spk.exemplar_count < max_exemplars_ && margin >= min_margin_) {
                 gpu_add_exemplar(newborn_idx);
                 spk.match_count++;
@@ -306,6 +307,7 @@ SpeakerMatch SpeakerVectorStore::identify(const std::vector<float>& embedding,
         meta.external_id    = next_id_++;
         meta.exemplar_count = 1;
         meta.match_count    = 2;
+        meta.birth_miss_seq = pending_slots_[matched_slot].miss_seq;
         speakers_.push_back(std::move(meta));
         id_to_idx_[speakers_.back().external_id] = new_idx;
 
@@ -475,6 +477,43 @@ int SpeakerVectorStore::register_speaker(const std::string& name,
     upload_offsets();
 
     return speakers_.back().external_id;
+}
+
+int SpeakerVectorStore::register_speaker_with_id(int id,
+                                                  const std::vector<float>& embedding) {
+    if ((int)embedding.size() != dim_) return -1;
+    if (id < 0) return -1;
+
+    std::lock_guard<std::mutex> lk(mu_);
+
+    // Reject if id already in use.
+    if (id_to_idx_.find(id) != id_to_idx_.end()) return -1;
+
+    int new_idx = (int)speakers_.size();
+    SpeakerMeta meta;
+    meta.external_id    = id;
+    meta.name           = "";
+    meta.exemplar_count = 1;
+    meta.match_count    = 1;
+    speakers_.push_back(std::move(meta));
+    id_to_idx_[id] = new_idx;
+    if (id >= next_id_) next_id_ = id + 1;
+
+    // Upload embedding and L2-normalize on GPU.
+    ensure_capacity(n_total_ + 1);
+    upload_query(embedding.data());
+    cudaMemcpyAsync(d_embeddings_ + n_total_ * dim_,
+                    d_query_, dim_ * sizeof(float),
+                    cudaMemcpyDeviceToDevice, stream_);
+    int d_f4 = dim_ / 4;
+    float4* row = reinterpret_cast<float4*>(d_embeddings_ + n_total_ * dim_);
+    l2_normalize_kernel<<<1, 32, 0, stream_>>>(row, d_f4);
+
+    n_total_++;
+    offsets_.push_back(n_total_);
+    upload_offsets();
+
+    return id;
 }
 
 void SpeakerVectorStore::set_name(int id, const std::string& name) {

@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -47,6 +48,55 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                         auto emb = speaker_enc_.extract(seg_fbank_buf_.data(), fbank_frames);
                         if (!emb.empty()) {
                             bool auto_reg = true;
+
+                            // Step 19c — VAD-internal multi-speaker probe.
+                            // Slides a 1.5 s / 0.5 s CAM++ window over
+                            // seg_fbank_buf_ and finds the minimum adjacent
+                            // window cosine. Empirical AUC 0.819 vs GT
+                            // single/multi label on 47 long VADs (devlog
+                            // 2026-05-22). When ON and min_cos drops below
+                            // speaker_multi_gate_threshold, the identify
+                            // path switches to peek_best (no exemplar
+                            // admission, no auto-register) and the retro
+                            // ring cache + speaker timeline updates are
+                            // skipped — so a mixed-speaker VAD can never
+                            // pollute cluster centroids.
+                            bool multi_speaker_suspect = false;
+                            float multi_gate_min_cos = 1.0f;
+                            int   multi_gate_n_windows = 0;
+                            if (cfg_.speaker_multi_gate_enable &&
+                                fbank_frames >= cfg_.speaker_multi_gate_min_fbank) {
+                                const int win_f = 150;  // 1.5 s
+                                const int hop_f = 50;   // 0.5 s
+                                std::vector<std::vector<float>> wembs;
+                                for (int ws = 0; ws + win_f <= fbank_frames; ws += hop_f) {
+                                    auto we = speaker_enc_.extract(
+                                        seg_fbank_buf_.data() + (size_t)ws * 80, win_f);
+                                    if ((int)we.size() != 192) continue;
+                                    float n2 = 0.0f;
+                                    for (float v : we) n2 += v * v;
+                                    float inv = 1.0f / std::sqrt(n2 + 1e-12f);
+                                    for (float& v : we) v *= inv;
+                                    wembs.emplace_back(std::move(we));
+                                }
+                                multi_gate_n_windows = (int)wembs.size();
+                                for (size_t i = 1; i < wembs.size(); ++i) {
+                                    float dot = 0.0f;
+                                    for (int d = 0; d < 192; ++d)
+                                        dot += wembs[i - 1][d] * wembs[i][d];
+                                    if (dot < multi_gate_min_cos) multi_gate_min_cos = dot;
+                                }
+                                if (multi_gate_n_windows >= 2 &&
+                                    multi_gate_min_cos < cfg_.speaker_multi_gate_threshold) {
+                                    multi_speaker_suspect = true;
+                                    LOG_INFO("AudioPipe",
+                                             "MULTI-GATE flagged: min_cos=%.3f < %.2f windows=%d fbank=%d",
+                                             multi_gate_min_cos,
+                                             cfg_.speaker_multi_gate_threshold,
+                                             multi_gate_n_windows, fbank_frames);
+                                    auto_reg = false;
+                                }
+                            }
 
                             // Late registration cap — after N FULL identifications
                             // every legitimate speaker should already be registered.
@@ -131,16 +181,24 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                                     for (float v : dual) n2 += v * v;
                                     float inv = 1.0f / sqrtf(n2 + 1e-12f);
                                     for (float& v : dual) v *= inv;
-                                    match = dual_db_.identify(dual, match_thresh,
-                                                              auto_reg, reg_thresh);
+                                    if (multi_speaker_suspect) {
+                                        match = dual_db_.peek_best(dual);
+                                    } else {
+                                        match = dual_db_.identify(dual, match_thresh,
+                                                                  auto_reg, reg_thresh);
+                                    }
                                 } else {
                                     // WL-ECAPA extraction failed (segment too short).
                                     // Skip — don't fallback to different ID space.
                                     LOG_INFO("AudioPipe", "CAM++ FULL: WL-ECAPA failed, skip dual identify");
                                 }
                             } else {
-                                match = campp_db_.identify(emb, match_thresh,
-                                                           auto_reg, reg_thresh);
+                                if (multi_speaker_suspect) {
+                                    match = campp_db_.peek_best(emb);
+                                } else {
+                                    match = campp_db_.identify(emb, match_thresh,
+                                                               auto_reg, reg_thresh);
+                                }
                             }
 
                             // v24: Recency validation — if threshold was lowered and matched
@@ -212,6 +270,36 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
 
                             campp_full_count_++;
 
+                            // Step 24: CAM++ shadow store. In dual-encoder mode,
+                            // mirror this admission into campp_db_ using the same
+                            // external_id so the SI-skip-wl path (samples<16000,
+                            // WL empty) can fall back to campp_db_.peek_best(si_emb)
+                            // and emit a directly-usable label. Without this mirror
+                            // 76% of the 108 no_segment GTs on the 1800s fixture
+                            // never get labeled. Only fires when the FULL path
+                            // produced a confirmed speaker_id (post-abstain).
+                            if (use_dual_encoder_ && match.speaker_id >= 0 &&
+                                cfg_.speaker_campp_shadow_enable) {
+                                if (match.is_new) {
+                                    int sid = campp_db_.register_speaker_with_id(
+                                        match.speaker_id, emb);
+                                    if (sid < 0) {
+                                        // Already registered (raced or rebuilt) →
+                                        // fall through to add_exemplar.
+                                        campp_db_.add_exemplar(match.speaker_id, emb);
+                                    }
+                                } else {
+                                    // Existing dual_db_ speaker → add a 192-D
+                                    // CAM++ exemplar to the shadow. add_exemplar
+                                    // is a no-op (returns false) when the id has
+                                    // not yet been mirrored — first SI-skip
+                                    // events will simply miss until a FULL with
+                                    // is_new=true registers the speaker, which
+                                    // matches dual_db_'s own coldstart timing.
+                                    campp_db_.add_exemplar(match.speaker_id, emb);
+                                }
+                            }
+
                             strncpy(stats_.speaker_name, match.name.c_str(),
                                     sizeof(stats_.speaker_name) - 1);
                             stats_.speaker_name[sizeof(stats_.speaker_name) - 1] = '\0';
@@ -249,7 +337,11 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                             // not amended on the wire. 17b will broadcast a
                             // speaker_amend frame and update the replay
                             // scorer.
-                            {
+                            // Step 19c: skip retro-ring caching for
+                            // multi-speaker-suspect segments — their
+                            // embedding is a fusion of multiple voices and
+                            // would propagate wrong amend candidates.
+                            if (!multi_speaker_suspect) {
                                 RetroFullSlot slot;
                                 slot.audio_end_samples = audio_t1_processed_;
                                 slot.decided_id  = match.speaker_id;
@@ -380,7 +472,10 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                             }
 
                             // Update recency tracking + run-length.
-                            if (match.speaker_id >= 0) {
+                            // Step 19c: skip recency update on multi-speaker
+                            // suspect — a mixed-VAD's best peek match is
+                            // not a reliable "previous speaker" anchor.
+                            if (match.speaker_id >= 0 && !multi_speaker_suspect) {
                                 if (match.speaker_id == prev_full_speaker_id_) {
                                     speaker_run_length_++;
                                 } else {
@@ -408,6 +503,208 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                             }
                         }
                 }
+
+                // === Step 19b: SHORT-IDENTIFY-ONLY rescue ====================
+                // Empirical (devlog 2026-05-22): 54.5% of all-GT segments are
+                // isolated speech with VAD duration 0.5–1.5 s, which falls
+                // below kMinFbankFrames (150 = 1.5 s) and so never produces
+                // a runtime decision. When speaker_short_identify_enable is
+                // ON and fbank_frames falls in the band
+                // [speaker_min_fbank_frames_identify, kMinFbankFrames), we
+                // still run the encoder but use SpeakerVectorStore::peek_best
+                // — read-only cosine search against existing clusters, NO
+                // register, NO EMA, NO pending, NO exemplar admission. This
+                // can ONLY produce matches against speakers the FULL path
+                // has already learned, so it cannot pollute centroids
+                // (avoiding the Step 4b regression).
+                const int  kMinFbankFramesIdent = cfg_.speaker_min_fbank_frames_identify;
+                bool short_identify_broadcast = false;
+                if (cfg_.speaker_short_identify_enable &&
+                    speaker_enc_.initialized() &&
+                    enable_speaker_.load(std::memory_order_relaxed) &&
+                    fbank_frames < kMinFbankFrames &&
+                    fbank_frames >= kMinFbankFramesIdent) {
+                    float si_thresh = cfg_.speaker_short_identify_threshold;
+                    float si_margin = cfg_.speaker_short_identify_margin;
+                    auto si_emb = speaker_enc_.extract(seg_fbank_buf_.data(), fbank_frames);
+                    if (!si_emb.empty()) {
+                        SpeakerMatch peek;
+                        peek.speaker_id = -1;
+                        peek.similarity = 0.0f;
+                        bool peek_ok = false;
+
+                        if (use_dual_encoder_) {
+                            // Dual-encoder mode populates only dual_db_. We
+                            // must produce a 384-D fused vector or abstain;
+                            // falling back to campp_db_ would be a different
+                            // ID namespace.
+                            // Step 19d note: zero-padding short PCM to 1 s so
+                            // WL-ECAPA can run is tempting but produces an
+                            // uninformative embedding (silence dominates the
+                            // stat pool), which pulls peek_best toward the
+                            // most-trained centroid. That cascades through
+                            // INHERIT-BROADCAST and collapses macro accuracy.
+                            // We hard-require ≥1 s of real speech instead.
+                            //
+                            // Step 23 — tile-padding for sub-1 s speech.
+                            // Zero-padding fails because silence dominates
+                            // the ECAPA stat pool. **Tile-padding** (loop
+                            // the actual speech samples up to 1 s) preserves
+                            // the mean/variance/energy stats while filling
+                            // the required temporal context. Diagnostic on
+                            // the 1800 s fixture (Step 22 sweep log) showed
+                            // 223 "WL-ECAPA empty (samples<16000)" skips —
+                            // the largest single source of lost short-band
+                            // VADs. Tile-padding lets these VADs participate
+                            // in SI peek_best (still read-only — no admit,
+                            // no EMA, no exemplar). Floor at
+                            // speaker_si_wl_tile_min_samples (default 8000 =
+                            // 0.5 s of real speech) to avoid extreme
+                            // duplication factors.
+                            int speech_samples = (int)speech_pcm_buf_.size();
+                            const int kTileTarget    = 16000;
+                            // Step 23 r1/r2: kTileMinSource=8000 (factor up
+                            // to 2×) recovered ~30-50 SI events of the 223
+                            // skipped but doubled run-to-run cov σ from
+                            // 0.013 to 0.022, washing out the signal. ECAPA
+                            // stat pool is sensitive to the periodicity
+                            // artefact of low-factor repetition. Tighten to
+                            // ≥12000 source (max 1.33× repetition) to keep
+                            // the tile-pad path strictly low-distortion.
+                            const int kTileMinSource = 12000;  // 0.75 s
+                            bool tile_pad_enable = cfg_.speaker_si_wl_tile_pad_enable;
+                            if (const char* env = std::getenv("DEUSRIDET_SI_WL_TILE_PAD")) {
+                                tile_pad_enable = (env[0] == '1' || env[0] == 't' || env[0] == 'T');
+                            }
+                            std::vector<float> wl_emb;
+                            if (speech_samples >= kTileTarget) {
+                                std::vector<float> pcm_f32(speech_samples);
+                                for (int si = 0; si < speech_samples; si++)
+                                    pcm_f32[si] = speech_pcm_buf_[si] / 32768.0f;
+                                std::lock_guard<std::mutex> lock(auditus_wlecapa_extract_mutex());
+                                wl_emb = wlecapa_enc_.extract(pcm_f32.data(), speech_samples);
+                            } else if (tile_pad_enable &&
+                                       speech_samples >= kTileMinSource) {
+                                // Tile-pad: repeat the speech to reach 1 s.
+                                std::vector<float> pcm_f32(kTileTarget);
+                                for (int si = 0; si < kTileTarget; si++)
+                                    pcm_f32[si] = speech_pcm_buf_[si % speech_samples] / 32768.0f;
+                                std::lock_guard<std::mutex> lock(auditus_wlecapa_extract_mutex());
+                                wl_emb = wlecapa_enc_.extract(pcm_f32.data(), kTileTarget);
+                                LOG_INFO("AudioPipe",
+                                         "SHORT-IDENTIFY tile-pad: src=%d -> %d (factor=%.2f)",
+                                         speech_samples, kTileTarget,
+                                         (float)kTileTarget / (float)speech_samples);
+                            }
+                            if (!wl_emb.empty()) {
+                                std::vector<float> dual(384);
+                                std::copy(si_emb.begin(), si_emb.end(), dual.begin());
+                                std::copy(wl_emb.begin(), wl_emb.end(), dual.begin() + 192);
+                                float n2 = 0.0f;
+                                for (float v : dual) n2 += v * v;
+                                float inv = 1.0f / sqrtf(n2 + 1e-12f);
+                                for (float& v : dual) v *= inv;
+                                peek = dual_db_.peek_best(dual);
+                                peek_ok = true;
+                            } else if (cfg_.speaker_campp_shadow_enable &&
+                                       campp_db_.count() > 0) {
+                                // Step 24: CAM++ shadow store fallback. WL-ECAPA
+                                // unavailable for samples<16000 — but campp_db_
+                                // has been mirrored from every FULL admission
+                                // under the SAME external_id, so a CAM++-only
+                                // peek_best returns a directly-usable label.
+                                peek = campp_db_.peek_best(si_emb);
+                                peek_ok = true;
+                                LOG_INFO("AudioPipe",
+                                         "SHORT-IDENTIFY campp-shadow: samples=%d id=%d sim=%.3f 2nd=#%d(%.3f)",
+                                         speech_samples, peek.speaker_id, peek.similarity,
+                                         peek.second_best_id, peek.second_best_sim);
+                            } else {
+                                LOG_INFO("AudioPipe",
+                                         "SHORT-IDENTIFY skip: WL-ECAPA empty (samples=%d < 16000)",
+                                         speech_samples);
+                            }
+                        } else {
+                            peek = campp_db_.peek_best(si_emb);
+                            peek_ok = true;
+                        }
+
+                        if (peek_ok && peek.speaker_id >= 0 && peek.similarity >= si_thresh) {
+                            // Margin gate — defend against absorb-into-dominant.
+                            float margin = peek.similarity - peek.second_best_sim;
+                            if (si_margin > 0.0f && peek.second_best_id >= 0 && margin < si_margin) {
+                                LOG_INFO("AudioPipe",
+                                         "SHORT-IDENTIFY abstain (margin): id=%d sim=%.3f vs id=%d sim=%.3f margin=%.3f < %.3f",
+                                         peek.speaker_id, peek.similarity,
+                                         peek.second_best_id, peek.second_best_sim,
+                                         margin, si_margin);
+                            } else {
+                            SpeakerMatch match_si{};
+                            match_si.speaker_id     = peek.speaker_id;
+                            match_si.similarity     = peek.similarity;
+                            match_si.is_new         = false;
+                            match_si.name           = peek.name;
+                            match_si.exemplar_count = 0;
+                            match_si.hits_above     = 0;
+                            short_identify_broadcast = true;
+                            LOG_INFO("AudioPipe",
+                                     "SHORT-IDENTIFY match: id=%d sim=%.3f %s (fbank=%d in [%d,%d) thresh=%.3f margin=%.3f)",
+                                     peek.speaker_id, peek.similarity,
+                                     peek.name.empty() ? "(unnamed)" : peek.name.c_str(),
+                                     fbank_frames, kMinFbankFramesIdent, kMinFbankFrames,
+                                     si_thresh, margin);
+                            if (on_speaker_) on_speaker_(match_si);
+
+                            // Step 19d note: do NOT update
+                            // prev_seg_speaker_id_ from a SHORT-IDENTIFY
+                            // hit. SI is a low-confidence label that
+                            // applies only to its own segment. Allowing
+                            // it to seed the INHERIT-BROADCAST chain
+                            // turns one wrong match into a cascade of
+                            // wrong labels (observed: 12 SI matches →
+                            // ~150 inherited mislabels, dec_macro
+                            // 0.95 → 0.27). Each subsequent short
+                            // segment must earn its own SI hit or
+                            // inherit from a real FULL identify.
+                            float si_now = (float)audio_t1_processed_ / 16000.0f;
+                            // Step 21 — SHORT-IDENTIFY → prev_full refresh.
+                            // Config-driven (speaker_si_refresh_prev_full_threshold,
+                            // default 0.60); env DEUSRIDET_SI_REFRESH_PREVFULL_THR
+                            // overrides for sweeps. 0.0 = disabled (= Step 20
+                            // behaviour). When ON, a strong SI hit refreshes
+                            // prev_full so the inherit-recency window (4 s,
+                            // Step 20) restarts under the matched identity.
+                            // Step 21 sweep result on tests/test.mp3
+                            // (600 s, replay 1x, 198 GT segs):
+                            //   thr=0.55 → cov=0.591 dec_macro=0.894
+                            //   thr=0.60 → cov=0.611 dec_macro=0.903  (chosen)
+                            // vs Step 20 baseline cov=0.571 dec_macro=0.921.
+                            // The margin gate (≥0.05) already filters
+                            // absorb-into-dominant on the SI side.
+                            float si_refresh_thr = cfg_.speaker_si_refresh_prev_full_threshold;
+                            if (const char* env = std::getenv("DEUSRIDET_SI_REFRESH_PREVFULL_THR")) {
+                                if (*env) si_refresh_thr = (float)std::atof(env);
+                            }
+                            if (si_refresh_thr > 0.0f &&
+                                peek.similarity >= si_refresh_thr) {
+                                prev_full_speaker_id_   = peek.speaker_id;
+                                prev_full_speaker_name_ = peek.name;
+                                prev_full_time_         = si_now;
+                                LOG_INFO("AudioPipe",
+                                         "SI refresh prev_full: id=%d sim=%.3f thr=%.3f",
+                                         peek.speaker_id, peek.similarity,
+                                         si_refresh_thr);
+                            }
+                            }
+                        } else if (peek_ok) {
+                            LOG_INFO("AudioPipe",
+                                     "SHORT-IDENTIFY abstain: best id=%d sim=%.3f thresh=%.3f (fbank=%d)",
+                                     peek.speaker_id, peek.similarity, si_thresh, fbank_frames);
+                        }
+                    }
+                }
+                // === end Step 19b ============================================
+
                 // Step 4c: short-segment INHERIT-BROADCAST.
                 // prev_seg_speaker_id_ is reset to -1 whenever the previous
                 // segend took this same short-skip path (no FULL → no
@@ -434,7 +731,15 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                 } else if (prev_full_speaker_id_ >= 0) {
                     float now_sec = (float)audio_t1_processed_ / 16000.0f;
                     float age     = now_sec - prev_full_time_;
-                    if (age <= 2.0f) {
+                    // Step 20a: extended prev_full recency 2.0 → 4.0 s.
+                    // Diagnostic on /tmp/replay_step19d_si040m05_final
+                    // showed 84/137 unpaired VADs are within 4 s of the
+                    // nearest FULL event; 47/137 within 2 s. 3.0 s landed
+                    // cov +9.6 pts (0.439→0.535) with dec_macro −1.4 pts.
+                    // Widening to 4.0 s should pick up the remaining
+                    // [3,4)s slice (~30 more saveable inherits at
+                    // slightly increased stale-label risk).
+                    if (age <= 4.0f) {
                         inh_id   = prev_full_speaker_id_;
                         inh_name = prev_full_speaker_name_;
                         inh_sim  = 0.0f;
@@ -444,6 +749,7 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                 if (!(speaker_enc_.initialized() &&
                       enable_speaker_.load(std::memory_order_relaxed) &&
                       fbank_frames >= kMinFbankFrames) &&
+                    !short_identify_broadcast &&
                     cfg_.speaker_short_inherit_enable &&
                     enable_speaker_.load(std::memory_order_relaxed) &&
                     inh_id >= 0) {

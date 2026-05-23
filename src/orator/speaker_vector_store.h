@@ -44,6 +44,7 @@ struct SpeakerMeta {
     std::string name;        // user-assigned name (empty = unnamed)
     int  exemplar_count = 0; // number of stored exemplars (1–max_exemplars)
     int  match_count    = 0; // lifetime match count
+    int  birth_miss_seq = 0; // pending sequence that created this speaker
 };
 
 class SpeakerVectorStore {
@@ -84,6 +85,16 @@ public:
     // Register a named speaker with a known embedding.
     int register_speaker(const std::string& name,
                          const std::vector<float>& embedding);
+
+    // Register a speaker with a CALLER-SPECIFIED external_id (Step 24
+    // CAM++ shadow store: mirrors dual_db_ admissions into campp_db_
+    // using the same external_id so SI-skip fallback peek_best returns
+    // a directly-usable label without cross-namespace mapping).
+    // Returns the id on success, -1 if id already exists or dim mismatch.
+    // Bumps internal next_id_ above id so subsequent register_speaker()
+    // calls do not collide.
+    int register_speaker_with_id(int id,
+                                 const std::vector<float>& embedding);
 
     // Rename a speaker by external ID.
     void set_name(int id, const std::string& name);

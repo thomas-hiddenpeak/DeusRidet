@@ -92,6 +92,121 @@ struct AudioPipelineConfig {
     // legitimate speakers never cross the register threshold. See
     // docs/{en,zh}/devlog/ for the full negative result.
     int   speaker_min_fbank_frames   = 150;
+    // Step 19b — short-segment IDENTIFY-ONLY rescue.
+    //
+    // Empirical (devlog 2026-05-22, r3 600s): 86/139 isolated GT segments
+    // (54.5% of all-GT) end with VAD durations clustered at 0.5–1.5 s,
+    // which falls below speaker_min_fbank_frames (150 = 1.5 s) and so
+    // never produces a runtime cluster decision. Sub-segment diarization
+    // was empirically a low-leverage path (~11% upper bound).
+    //
+    // When this flag is ON and a segment is too short for FULL but at
+    // or above speaker_min_fbank_frames_identify (~50 frames = 500 ms),
+    // the encoder still runs and the embedding is scored against the
+    // existing speaker store via SpeakerVectorStore::peek_best — i.e.
+    // read-only cosine search, NO register, NO EMA, NO pending. If the
+    // best cluster sim >= speaker_threshold the identity is broadcast
+    // as a normal speaker event. Otherwise the path falls through to
+    // the SAAS_INHERIT broadcast as before. This avoids the Step 4b
+    // regression (centroid pollution by noisy short-seg embeddings)
+    // because the speaker library is never written.
+    bool  speaker_short_identify_enable      = false;
+    int   speaker_min_fbank_frames_identify  = 50;
+    // Step 19b — SHORT-IDENTIFY similarity floor. Default 0.65 (vs the
+    // standard speaker_threshold=0.50) because the r1 experiment showed
+    // that scoring noisy short-segment embeddings at the default
+    // threshold catastrophically over-attributes to the dominant
+    // speaker (coverage 26%→87% but decided_macro 0.86→0.31). A
+    // strictly tighter floor restores macro while keeping the coverage
+    // lift on segments whose short embedding genuinely resembles a
+    // known cluster.
+    float speaker_short_identify_threshold   = 0.65f;
+    // Minimum (top1 - top2) margin required for a SHORT-IDENTIFY match
+    // to be accepted. Defends against the absorb-into-dominant failure
+    // mode: even a 0.66 match must be at least M points above the next
+    // best cluster. 0.0 disables the margin gate.
+    float speaker_short_identify_margin      = 0.05f;
+    // Step 19c — VAD-internal multi-speaker probe gate (library
+    // protection). When ON, the FULL extraction first runs a sliding
+    // CAM++ cosine probe over seg_fbank_buf_ (1.5 s window, 0.5 s hop).
+    // If the minimum adjacent-window cosine falls below
+    // speaker_multi_gate_threshold, this VAD is treated as
+    // multi-speaker and the identify path switches to peek_best —
+    // best-effort label, NO exemplar admission, NO auto-register, NO
+    // EMA. Probe is skipped on VADs shorter than ~2.5 s (need ≥2
+    // windows). Empirical AUC 0.819 vs single/multi GT-label on
+    // /tmp/cam_change_points_r3.jsonl (47 probed VADs, devlog
+    // 2026-05-22, tools/eval_changepoint_binary.py). At threshold 0.58
+    // precision=1.000 / recall=0.375; at 0.60 precision=0.800 /
+    // recall=0.500.
+    bool  speaker_multi_gate_enable          = false;
+    float speaker_multi_gate_threshold       = 0.58f;
+    int   speaker_multi_gate_min_fbank       = 250;  // ~2.5 s
+    // Step 21 — SHORT-IDENTIFY → prev_full recency refresh. When a SHORT-
+    // IDENTIFY match clears this similarity floor (and the existing
+    // margin gate), the matched identity refreshes prev_full_time_ so
+    // that subsequent short backchannels within the inherit-recency
+    // window (4 s, Step 20) can broadcast under it. 0.0 disables the
+    // refresh (= pre-Step-21 behaviour: SI labels apply only to their
+    // own segment, never seed INHERIT-BROADCAST).
+    //
+    // Default 0.60 (SHIPPED Step 22). Step 21's first sweep on the
+    // 600 s fixture was inconclusive because run-to-run noise (~0.055
+    // on coverage) exceeded the proposed effect. Re-evaluation on the
+    // 1800 s slice of tests/test.mp3 (571 GT segs, replay 1x) tightened
+    // the noise floor to ~0.02 on coverage and exposed a clean,
+    // reproducible 4σ effect:
+    //   baseline (thr=0.0)  run1 cov=0.538/dec_macro=0.790
+    //                       run2 cov=0.559/dec_macro=0.822
+    //   thr=0.60            run1 cov=0.627/dec_macro=0.783
+    //                       run2 cov=0.631/dec_macro=0.785
+    //   Δcov = +0.081 (~4σ), Δmacro = +0.034, Δdec_macro = -0.022.
+    // The coverage gain dominates the small precision cost; overall
+    // macro improves. Env DEUSRIDET_SI_REFRESH_PREVFULL_THR overrides
+    // for further sweeps (set to 0.0 to disable).
+    float speaker_si_refresh_prev_full_threshold = 0.60f;
+    // Step 23 — SHORT-IDENTIFY WL-ECAPA tile-padding for sub-1 s speech.
+    // EXPERIMENTAL. Shipped default OFF after 1800 s ablation.
+    //
+    // WL-ECAPA requires ≥1 s (16000 samples) of PCM. The 1800 s
+    // reference fixture shows 223 SI band events (fbank ∈ [50,150))
+    // skipped because speech_pcm_buf_ < 16000 — the largest single
+    // source of lost short-band identifications. Zero-padding fails
+    // (silence dilutes ECAPA stat pool, dec_macro 0.95→0.27).
+    // Tile-padding (looping actual speech up to 16000) preserves
+    // mean/variance/energy stats while filling temporal context.
+    //
+    // 1800 s ablation result (Step 23, thr=0.60):
+    //   • baseline pooled 3-run: cov=0.620 σ=0.013, macro=0.46
+    //   • tile-pad 8k floor (factor ≤2×) 2-run: cov=0.628 σ=0.022, macro=0.481
+    //   • tile-pad 12k floor (factor ≤1.33×) 1-run: cov=0.613, macro=0.459
+    // The 8k floor doubles run-to-run σ (periodicity artefact in the
+    // ECAPA stat pool); the 12k floor reduces SI recovery to ~25 of
+    // 223 skips and washes out vs baseline. No floor yielded a
+    // signal exceeding noise. The proper fix for the 223 skips is a
+    // short-segment encoder (3D-Speaker ERes2Net-base / ECAPA-small),
+    // deferred to a separate RFC. The knob is kept default-OFF as
+    // scaffolding for that future work; env DEUSRIDET_SI_WL_TILE_PAD
+    // overrides for sweeps.
+    bool speaker_si_wl_tile_pad_enable = false;
+
+    // Step 24: CAM++ shadow store for SI-skip-wl fallback.
+    // When dual-encoder mode is active and a SI-band segment has
+    // samples<16000 (WL-ECAPA hard floor), the current code logs
+    // "SI-skip-wl" and emits no event. On the 1800 s reference fixture
+    // this accounts for 76% (82/108) of all no_segment GTs.
+    // With this flag enabled, every confirmed FULL admission mirrors
+    // the 192-D CAM++ vector into campp_db_ under the SAME
+    // external_id as dual_db_, building a parallel shadow library.
+    // The SI-skip-wl branch then queries campp_db_.peek_best(si_emb)
+    // and emits a short-identify event when the standard SI
+    // threshold/margin gates pass. ID space is unified with dual_db_,
+    // so downstream consumers need no remapping.
+    // Risk: campp_db_ exemplar admission has no shadow-side gates
+    // (admit_margin, hit_ratio, etc) — it accumulates one exemplar
+    // per FULL admission, may bloat relative to dual_db_. Acceptable
+    // for the 1800 s fixture; revisit if production-scale grows.
+    bool speaker_campp_shadow_enable = true;
     // Short-segment inheritance broadcast: when a speech segment ends
     // with fewer than speaker_min_fbank_frames fbank frames, the FULL
     // CAM++ extraction is skipped (short audio produces noisy

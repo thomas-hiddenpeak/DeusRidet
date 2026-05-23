@@ -284,6 +284,11 @@ add_executable(cam_extract_embeddings tools/cam_extract_embeddings.cpp)
 target_include_directories(cam_extract_embeddings PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(cam_extract_embeddings PRIVATE sensus machina communis orator CUDA::cudart CUDA::cublas cudnn)
 
+# Tool: Step 19a sub-segment change-point probe (sliding-window CAM++)
+add_executable(cam_change_point_probe tools/cam_change_point_probe.cpp)
+target_include_directories(cam_change_point_probe PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(cam_change_point_probe PRIVATE sensus machina communis orator CUDA::cudart CUDA::cublas cudnn)
+
 # Tool: extract WavLM+ECAPA embeddings in parallel layout (Step 2c)
 add_executable(wl_extract_embeddings tools/wl_extract_embeddings.cpp)
 target_include_directories(wl_extract_embeddings PRIVATE ${CMAKE_SOURCE_DIR})
