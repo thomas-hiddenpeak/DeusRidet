@@ -208,6 +208,86 @@ int OratorReclusterer::run_pass(double now_sec) {
         it->second.last_seen_sec  = now_sec;
     }
 
+    // Merge near-duplicate global centroids. K_pred>K_gt is usually caused by
+    // one true speaker being split across two persistent globals. We collapse
+    // any pair with cos sim ≥ global_merge_threshold, keeping the one with
+    // larger support, weighted-averaging the centroids, and remapping both
+    // the just-built local_to_global[] and every previously-committed slot
+    // in the buffer so subsequent ticks see a consistent identity space.
+    if (cfg_.global_merge_threshold > 0.0f && globals_.size() >= 2) {
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            std::vector<int> ids;
+            ids.reserve(globals_.size());
+            for (auto& kv : globals_) ids.push_back(kv.first);
+            for (size_t a = 0; a < ids.size() && !changed; ++a) {
+                for (size_t b = a + 1; b < ids.size(); ++b) {
+                    auto ita = globals_.find(ids[a]);
+                    auto itb = globals_.find(ids[b]);
+                    if (ita == globals_.end() || itb == globals_.end()) continue;
+                    const float sim = cosine(ita->second.centroid, itb->second.centroid);
+                    if (sim < cfg_.global_merge_threshold) continue;
+                    // Support-disparity gate. Only merge if one of the two
+                    // is clearly smaller than the other; this prevents two
+                    // equally-large but topic-mixed clusters from collapsing.
+                    const int sa = std::max(1, ita->second.support_count);
+                    const int sb = std::max(1, itb->second.support_count);
+                    const int s_min = std::min(sa, sb);
+                    const int s_max = std::max(sa, sb);
+                    if (cfg_.global_merge_support_ratio > 0.0f &&
+                        static_cast<float>(s_min) > cfg_.global_merge_support_ratio * static_cast<float>(s_max)) {
+                        continue;
+                    }
+                    int keep_id = ids[a], drop_id = ids[b];
+                    if (itb->second.support_count > ita->second.support_count) {
+                        keep_id = ids[b]; drop_id = ids[a];
+                    }
+                    GlobalSpeaker& keep = globals_[keep_id];
+                    GlobalSpeaker& drop = globals_[drop_id];
+                    const float wa = static_cast<float>(std::max(1, keep.support_count));
+                    const float wb = static_cast<float>(std::max(1, drop.support_count));
+                    const float tot = wa + wb;
+                    for (size_t i = 0; i < keep.centroid.size(); ++i) {
+                        keep.centroid[i] = (wa * keep.centroid[i] + wb * drop.centroid[i]) / tot;
+                    }
+                    l2_normalise(keep.centroid);
+                    keep.support_count += drop.support_count;
+                    keep.last_seen_sec  = std::max(keep.last_seen_sec, drop.last_seen_sec);
+                    globals_.erase(drop_id);
+                    // Remap current local->global.
+                    for (int k = 0; k < K; ++k) {
+                        if (local_to_global[k] == drop_id) local_to_global[k] = keep_id;
+                    }
+                    // Remap previously committed labels in the buffer so the
+                    // baseline comparison below doesn't fire spurious events.
+                    for (Slot& s : buffer_) {
+                        if (s.ever_committed && s.committed_speaker_id == drop_id) {
+                            s.committed_speaker_id = keep_id;
+                        }
+                    }
+                    // Retroactively relabel every historical segment that
+                    // was committed to the dropped global — including those
+                    // already evicted from the window. Emits RelabelEvents
+                    // so downstream consumers (eval, WebUI) can patch their
+                    // local mappings.
+                    for (auto& kv : committed_history_) {
+                        if (kv.second != drop_id) continue;
+                        RelabelEvent ev;
+                        ev.segment_id     = kv.first;
+                        ev.old_speaker_id = drop_id;
+                        ev.new_speaker_id = keep_id;
+                        ev.confidence     = sim;
+                        pending_.push_back(ev);
+                        kv.second = keep_id;
+                    }
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+
     // Commit new labels back to the buffer and emit RelabelEvents wherever
     // the global id differs from what was last committed.
     int n_events = 0;
@@ -235,6 +315,7 @@ int OratorReclusterer::run_pass(double now_sec) {
         }
         slot.committed_speaker_id = new_id;
         slot.ever_committed       = true;
+        committed_history_[slot.seg.segment_id] = new_id;
     }
 
     return n_events;

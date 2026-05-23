@@ -17,6 +17,7 @@
 #include <cstring>
 #include <map>
 #include <set>
+#include <numeric>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -179,9 +180,12 @@ int main(int argc, char** argv) {
     double interval_sec = 30.0;
     int    min_k = 2, max_k = 6;
     float  link_threshold = 0.55f;
+    float  centroid_ema   = 0.20f;
+    float  merge_threshold = -1.0f;   // disabled by default; -1 means no merge
     int    min_segments = 12;
     int    max_segments = 300;
     bool   force_final = true;     // run a final force_run after stream ends
+    bool   diag = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -194,9 +198,12 @@ int main(int argc, char** argv) {
         else if (a == "--min-k")    nexti(min_k);
         else if (a == "--max-k")    nexti(max_k);
         else if (a == "--thr")      { double v = 0.55; next(v); link_threshold = float(v); }
+        else if (a == "--ema")      { double v = 0.20; next(v); centroid_ema   = float(v); }
+        else if (a == "--merge-thr"){ double v = 0.85; next(v); merge_threshold= float(v); }
         else if (a == "--min-segs") nexti(min_segments);
         else if (a == "--max-segs") nexti(max_segments);
         else if (a == "--no-final-force") force_final = false;
+        else if (a == "--diag") diag = true;
         else {
             std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
             return 2;
@@ -224,8 +231,9 @@ int main(int argc, char** argv) {
     cfg.min_k           = min_k;
     cfg.max_k           = max_k;
     cfg.link_threshold  = link_threshold;
-    cfg.centroid_ema    = 0.20f;
+    cfg.centroid_ema    = centroid_ema;
     cfg.global_id_base  = 1000;
+    cfg.global_merge_threshold = merge_threshold;
 
     dr::OratorReclusterer rec(cfg);
 
@@ -303,12 +311,53 @@ int main(int argc, char** argv) {
                  "[eval] macro_f1=%.4f  K_pred=%d  K_mapped=%d/%d  n_scored=%zu\n",
                  M.macro_f1, M.K_pred, M.K_used, fx.n_speakers, pred_v.size());
 
+    if (diag) {
+        // Per-predicted-global histogram over GT classes.
+        std::map<int, std::vector<int>> hist; // pred_id -> [count per gt]
+        for (size_t i = 0; i < pred_v.size(); ++i) {
+            auto& h = hist[pred_v[i]];
+            if (h.empty()) h.assign(fx.n_speakers, 0);
+            if (gt_v[i] >= 0 && gt_v[i] < fx.n_speakers) h[gt_v[i]] += 1;
+        }
+        std::fprintf(stderr, "[diag] per-pred-global GT distribution (pred_id -> [gt0,gt1,...]):\n");
+        for (const auto& kv : hist) {
+            std::fprintf(stderr, "[diag]   pred=%d  total=%d  hist=[", kv.first,
+                         std::accumulate(kv.second.begin(), kv.second.end(), 0));
+            for (size_t j = 0; j < kv.second.size(); ++j) {
+                std::fprintf(stderr, "%s%d", j ? "," : "", kv.second[j]);
+            }
+            int mapped = -1;
+            auto it = M.mapping.find(kv.first);
+            if (it != M.mapping.end()) mapped = it->second;
+            std::fprintf(stderr, "]  mapped_to_gt=%d\n", mapped);
+        }
+        // Pairwise centroid cosine sims among current globals.
+        const auto& gs = rec.globals();
+        std::vector<std::pair<int, const dr::GlobalSpeaker*>> v;
+        for (const auto& kv : gs) v.emplace_back(kv.first, &kv.second);
+        std::sort(v.begin(), v.end(), [](const auto& a, const auto& b){ return a.first < b.first; });
+        std::fprintf(stderr, "[diag] pairwise centroid cosine sims:\n");
+        for (size_t i = 0; i < v.size(); ++i) {
+            for (size_t j = i + 1; j < v.size(); ++j) {
+                const auto& a = v[i].second->centroid;
+                const auto& b = v[j].second->centroid;
+                double s = 0.0;
+                for (size_t k = 0; k < a.size() && k < b.size(); ++k) s += double(a[k]) * double(b[k]);
+                std::fprintf(stderr, "[diag]   cos(%d, %d) = %.4f  (supports %d / %d)\n",
+                             v[i].first, v[j].first, s,
+                             v[i].second->support_count, v[j].second->support_count);
+            }
+        }
+    }
+
     std::printf("{\"macro_f1\":%.4f,\"K_pred\":%d,\"K_mapped\":%d,\"K_gt\":%d,"
                 "\"n_scored\":%zu,\"n_uncommitted\":%d,\"n_events\":%d,"
                 "\"end_sec\":%.1f,\"window_sec\":%.1f,\"interval_sec\":%.1f,"
-                "\"min_k\":%d,\"max_k\":%d,\"link_threshold\":%.3f}\n",
+                "\"min_k\":%d,\"max_k\":%d,\"link_threshold\":%.3f,"
+                "\"ema\":%.3f,\"merge_thr\":%.3f}\n",
                 M.macro_f1, M.K_pred, M.K_used, fx.n_speakers,
                 pred_v.size(), n_uncommitted, n_events_total,
-                end_sec, window_sec, interval_sec, min_k, max_k, link_threshold);
+                end_sec, window_sec, interval_sec, min_k, max_k, link_threshold,
+                centroid_ema, merge_threshold);
     return 0;
 }

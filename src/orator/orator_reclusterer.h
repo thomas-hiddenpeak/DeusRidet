@@ -65,6 +65,8 @@ struct OratorReclustererConfig {
     float  link_threshold  = 0.55f;   // cosine sim required to reuse an existing global id
     float  centroid_ema    = 0.20f;   // running-mean rate for global centroid update
     int    global_id_base  = 1000;    // first id assigned by the reclusterer (avoid collision with online ids)
+    float  global_merge_threshold = -1.0f;  // cos sim above which two globals are merged into one (≤0 to disable)
+    float  global_merge_support_ratio = 0.5f; // only merge if min_support <= ratio * max_support (protects mixed clusters)
 };
 
 // Internal book-keeping for a persistent speaker identity discovered by the
@@ -120,6 +122,7 @@ private:
     OratorReclustererConfig                cfg_;
     std::deque<Slot>                       buffer_;
     std::unordered_map<int, GlobalSpeaker> globals_;
+    std::unordered_map<uint64_t, int>      committed_history_; // segment_id -> last committed id (kept beyond the window so merges can retroactively relabel)
     std::vector<RelabelEvent>              pending_;
 
     int    next_global_id_ = 0;
