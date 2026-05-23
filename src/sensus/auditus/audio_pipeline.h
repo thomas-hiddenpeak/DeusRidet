@@ -207,6 +207,19 @@ struct AudioPipelineConfig {
     // per FULL admission, may bloat relative to dual_db_. Acceptable
     // for the 1800 s fixture; revisit if production-scale grows.
     bool speaker_campp_shadow_enable = true;
+
+    // Step 24-b: separate gates for the CAM++ shadow path. The SI
+    // threshold/margin (default 0.40/0.05) were tuned for the
+    // **dual 384-D** encoder. Reusing them for the **single 192-D**
+    // CAM++ shadow lets in too many weak matches (Step 24 r1+r2:
+    // 222 shadow events, median sim 0.443, mean 0.440 — barely above
+    // the gate; resulting shadow decisions ~45% accurate vs ~78%
+    // for full-pool, dragging dec_macro 0.780 -> 0.754). The shadow
+    // path now applies its own (tighter) threshold and margin to
+    // ensure recovered decisions are at least as trustworthy as the
+    // dual-encoder baseline. Disabled if <= 0.
+    float speaker_campp_shadow_threshold = 0.48f;
+    float speaker_campp_shadow_margin    = 0.10f;
     // Short-segment inheritance broadcast: when a speech segment ends
     // with fewer than speaker_min_fbank_frames fbank frames, the FULL
     // CAM++ extraction is skipped (short audio produces noisy

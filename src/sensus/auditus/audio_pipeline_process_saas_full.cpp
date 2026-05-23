@@ -532,6 +532,10 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                         peek.speaker_id = -1;
                         peek.similarity = 0.0f;
                         bool peek_ok = false;
+                        // Step 24-b: SI-skip-wl shadow fallback uses
+                        // its own (tighter) gates — CAM++ single-encoder
+                        // discrimination is weaker than dual 384-D.
+                        bool peek_from_shadow = false;
 
                         if (use_dual_encoder_) {
                             // Dual-encoder mode populates only dual_db_. We
@@ -615,6 +619,7 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                                 // peek_best returns a directly-usable label.
                                 peek = campp_db_.peek_best(si_emb);
                                 peek_ok = true;
+                                peek_from_shadow = true;
                                 LOG_INFO("AudioPipe",
                                          "SHORT-IDENTIFY campp-shadow: samples=%d id=%d sim=%.3f 2nd=#%d(%.3f)",
                                          speech_samples, peek.speaker_id, peek.similarity,
@@ -630,14 +635,29 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                         }
 
                         if (peek_ok && peek.speaker_id >= 0 && peek.similarity >= si_thresh) {
+                            // Step 24-b: apply tighter gates for shadow path.
+                            float eff_thresh = si_thresh;
+                            float eff_margin = si_margin;
+                            if (peek_from_shadow) {
+                                if (cfg_.speaker_campp_shadow_threshold > 0.0f)
+                                    eff_thresh = cfg_.speaker_campp_shadow_threshold;
+                                if (cfg_.speaker_campp_shadow_margin > 0.0f)
+                                    eff_margin = cfg_.speaker_campp_shadow_margin;
+                            }
+                            if (peek.similarity < eff_thresh) {
+                                LOG_INFO("AudioPipe",
+                                         "SHORT-IDENTIFY abstain (shadow-thresh): id=%d sim=%.3f < %.3f",
+                                         peek.speaker_id, peek.similarity, eff_thresh);
+                            } else {
                             // Margin gate — defend against absorb-into-dominant.
                             float margin = peek.similarity - peek.second_best_sim;
-                            if (si_margin > 0.0f && peek.second_best_id >= 0 && margin < si_margin) {
+                            if (eff_margin > 0.0f && peek.second_best_id >= 0 && margin < eff_margin) {
                                 LOG_INFO("AudioPipe",
-                                         "SHORT-IDENTIFY abstain (margin): id=%d sim=%.3f vs id=%d sim=%.3f margin=%.3f < %.3f",
+                                         "SHORT-IDENTIFY abstain (margin%s): id=%d sim=%.3f vs id=%d sim=%.3f margin=%.3f < %.3f",
+                                         peek_from_shadow ? "-shadow" : "",
                                          peek.speaker_id, peek.similarity,
                                          peek.second_best_id, peek.second_best_sim,
-                                         margin, si_margin);
+                                         margin, eff_margin);
                             } else {
                             SpeakerMatch match_si{};
                             match_si.speaker_id     = peek.speaker_id;
@@ -694,6 +714,7 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                                          "SI refresh prev_full: id=%d sim=%.3f thr=%.3f",
                                          peek.speaker_id, peek.similarity,
                                          si_refresh_thr);
+                            }
                             }
                             }
                         } else if (peek_ok) {
