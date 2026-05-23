@@ -519,6 +519,13 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                 // (avoiding the Step 4b regression).
                 const int  kMinFbankFramesIdent = cfg_.speaker_min_fbank_frames_identify;
                 bool short_identify_broadcast = false;
+                // Step 25a: capture SI peek (best id/sim) into outer scope
+                // so the INHERIT-BROADCAST block can veto on a confidently-
+                // different opinion. Stays at -1/0.0 when SI didn't run or
+                // produced no candidate.
+                int         si_peek_id  = -1;
+                float       si_peek_sim = 0.0f;
+                std::string si_peek_name;
                 if (cfg_.speaker_short_identify_enable &&
                     speaker_enc_.initialized() &&
                     enable_speaker_.load(std::memory_order_relaxed) &&
@@ -610,6 +617,9 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                                 for (float& v : dual) v *= inv;
                                 peek = dual_db_.peek_best(dual);
                                 peek_ok = true;
+                                si_peek_id   = peek.speaker_id;
+                                si_peek_sim  = peek.similarity;
+                                si_peek_name = peek.name;
                             } else if (cfg_.speaker_campp_shadow_enable &&
                                        campp_db_.count() > 0) {
                                 // Step 24: CAM++ shadow store fallback. WL-ECAPA
@@ -620,6 +630,9 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                                 peek = campp_db_.peek_best(si_emb);
                                 peek_ok = true;
                                 peek_from_shadow = true;
+                                si_peek_id   = peek.speaker_id;
+                                si_peek_sim  = peek.similarity;
+                                si_peek_name = peek.name;
                                 LOG_INFO("AudioPipe",
                                          "SHORT-IDENTIFY campp-shadow: samples=%d id=%d sim=%.3f 2nd=#%d(%.3f)",
                                          speech_samples, peek.speaker_id, peek.similarity,
@@ -632,6 +645,9 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                         } else {
                             peek = campp_db_.peek_best(si_emb);
                             peek_ok = true;
+                            si_peek_id   = peek.speaker_id;
+                            si_peek_sim  = peek.similarity;
+                            si_peek_name = peek.name;
                         }
 
                         if (peek_ok && peek.speaker_id >= 0 && peek.similarity >= si_thresh) {
@@ -774,6 +790,46 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                     cfg_.speaker_short_inherit_enable &&
                     enable_speaker_.load(std::memory_order_relaxed) &&
                     inh_id >= 0) {
+                    // Step 25a: SI-peek veto on inherit-broadcast.
+                    // When SI ran but abstained, if peek had a CONFIDENT
+                    // DIFFERENT opinion from inh_id, suppress the inherit
+                    // broadcast (emit no_segment instead of a likely-wrong
+                    // inherited label). See audio_pipeline.h for rationale.
+                    //
+                    // Step 25b: when peek-rescue is enabled (default on),
+                    // instead of dropping the broadcast, SUBSTITUTE peek's
+                    // identity — converting wrong inherits into correct
+                    // decisions (lifts both macro and dec_macro).
+                    bool peek_disagrees =
+                        (cfg_.speaker_inherit_peek_veto_enable &&
+                         cfg_.speaker_inherit_peek_veto_threshold > 0.0f &&
+                         si_peek_id >= 0 &&
+                         si_peek_id != inh_id &&
+                         si_peek_sim >= cfg_.speaker_inherit_peek_veto_threshold);
+                    if (peek_disagrees && cfg_.speaker_inherit_peek_rescue_enable) {
+                        // Rescue: replace inherit identity with peek's.
+                        LOG_INFO("AudioPipe",
+                                 "INHERIT rescued by SI peek: peek_id=%d sim=%.3f >= %.3f replaces inh_id=%d (%s, src=%s)",
+                                 si_peek_id, si_peek_sim,
+                                 cfg_.speaker_inherit_peek_veto_threshold,
+                                 inh_id,
+                                 inh_name.empty() ? "(unnamed)" : inh_name.c_str(),
+                                 inh_src);
+                        inh_id   = si_peek_id;
+                        inh_name = si_peek_name;
+                        inh_sim  = si_peek_sim;
+                        inh_src  = "peek-rescue";
+                        peek_disagrees = false;  // fall through to broadcast
+                    }
+                    if (peek_disagrees) {
+                        LOG_INFO("AudioPipe",
+                                 "INHERIT vetoed by SI peek: peek_id=%d sim=%.3f >= %.3f differs from inh_id=%d (%s, src=%s)",
+                                 si_peek_id, si_peek_sim,
+                                 cfg_.speaker_inherit_peek_veto_threshold,
+                                 inh_id,
+                                 inh_name.empty() ? "(unnamed)" : inh_name.c_str(),
+                                 inh_src);
+                    } else {
                     // Short-segment inheritance broadcast.
                     //
                     // This segment is too short for CAM++ FULL to produce a
@@ -805,6 +861,7 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                              fbank_frames, kMinFbankFrames,
                              inh_src);
                     if (on_speaker_) on_speaker_(inh);
+                    } // end Step 25a veto else-branch
                 }
 }
 

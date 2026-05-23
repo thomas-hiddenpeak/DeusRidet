@@ -238,6 +238,9 @@ int awaken(const std::string& webui_dir,
             audio_cfg.speaker_campp_shadow_enable      =        aud_cfg.get_int   ("speaker_campp_shadow_enable",      audio_cfg.speaker_campp_shadow_enable ? 1 : 0) != 0;
             audio_cfg.speaker_campp_shadow_threshold   = (float)aud_cfg.get_double("speaker_campp_shadow_threshold",   audio_cfg.speaker_campp_shadow_threshold);
             audio_cfg.speaker_campp_shadow_margin      = (float)aud_cfg.get_double("speaker_campp_shadow_margin",      audio_cfg.speaker_campp_shadow_margin);
+            audio_cfg.speaker_inherit_peek_veto_enable    =        aud_cfg.get_int   ("speaker_inherit_peek_veto_enable",    audio_cfg.speaker_inherit_peek_veto_enable ? 1 : 0) != 0;
+            audio_cfg.speaker_inherit_peek_veto_threshold = (float)aud_cfg.get_double("speaker_inherit_peek_veto_threshold", audio_cfg.speaker_inherit_peek_veto_threshold);
+            audio_cfg.speaker_inherit_peek_rescue_enable  =        aud_cfg.get_int   ("speaker_inherit_peek_rescue_enable",  audio_cfg.speaker_inherit_peek_rescue_enable ? 1 : 0) != 0;
             printf("[awaken] Auditus diarization knobs loaded from configs/auditus.conf:\n"
                    "           match=%.3f reg=%.3f disc=[count=%d,boost=%.3f,reg_relax=%.3f] recency=[win=%.1fs,bonus=%.3f] margin=%.3f max_autoreg=%d min_fbank=%d short_inherit=%s short_identify=%s min_fbank_ident=%d si_thresh=%.3f si_margin=%.3f\n",
                    audio_cfg.speaker_threshold, audio_cfg.speaker_register_threshold,
@@ -261,6 +264,10 @@ int awaken(const std::string& webui_dir,
             printf("[awaken]   campp_shadow_gate: thr=%.3f margin=%.3f\n",
                    audio_cfg.speaker_campp_shadow_threshold,
                    audio_cfg.speaker_campp_shadow_margin);
+            printf("[awaken]   inherit_peek_veto: %s thr=%.3f rescue=%s\n",
+                   audio_cfg.speaker_inherit_peek_veto_enable ? "ON" : "off",
+                   audio_cfg.speaker_inherit_peek_veto_threshold,
+                   audio_cfg.speaker_inherit_peek_rescue_enable ? "ON" : "off");
         } else {
             printf("[awaken] configs/auditus.conf not found — using compiled defaults\n");
         }

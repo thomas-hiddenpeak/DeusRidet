@@ -220,6 +220,50 @@ struct AudioPipelineConfig {
     // dual-encoder baseline. Disabled if <= 0.
     float speaker_campp_shadow_threshold = 0.48f;
     float speaker_campp_shadow_margin    = 0.10f;
+
+    // Step 25a: SI-peek-veto on INHERIT-BROADCAST. When SHORT-IDENTIFY
+    // abstained but its peek had a confident DIFFERENT opinion from the
+    // prev_seg/prev_full inherit identity, suppress the inherit-broadcast
+    // (emit no_segment) rather than emit a likely-wrong label. Diagnostic
+    // on Step 24-b run r2 (382 decided, dec_macro=0.788) showed inherit
+    // broadcasts contribute 83% of all wrong decisions, while the SI peek
+    // — even when below the SI fire threshold — often has the correct
+    // opinion. This gate converts those wrongs to no_segment, lifting
+    // dec_macro at modest coverage cost. Default veto threshold 0.45 is
+    // conservative (only veto when peek's confidence comfortably exceeds
+    // a "noise" baseline). Disabled if <= 0.
+    // DEFAULT OFF after Step 25 negative result: a 3-run replay on the
+    // 1800 s fixture with veto on (rescue off) gave macro = (0.494 +
+    // 0.483 + 0.467)/3 = 0.481, vs 24-b shipped baseline 0.487 — within
+    // σ on every metric. Veto fired only ~8 times per run, too rarely to
+    // move macro meaningfully (it converts wrong-inherit to no_segment,
+    // which scores 0 in macro just like the wrong label did, so only
+    // dec_macro is touched). Knob retained for opt-in experimentation.
+    bool  speaker_inherit_peek_veto_enable    = false;
+    float speaker_inherit_peek_veto_threshold = 0.45f;
+
+    // Step 25b: SI-peek-RESCUE on INHERIT-BROADCAST. When the veto would
+    // fire (peek confidently disagrees with inherit), instead of dropping
+    // the broadcast and emitting no_segment, **substitute peek's identity**
+    // as the broadcast label. Rationale: Step 25a r1+r2 (1800 s mean
+    // cov=0.648 macro=0.488 dec_macro=0.793) showed only ~8 vetoes per
+    // run — turning a wrong inherit into no_segment lifts dec_macro by
+    // ~0.005 but leaves macro flat (the abstained segment scores 0 in
+    // macro just like the wrong label did). Substituting peek's answer
+    // converts those same wrongs into CORRECT decisions, lifting BOTH
+    // macro AND dec_macro. The peek's similarity is already confident
+    // (>= veto threshold) and the SI gate also fired off the same peek,
+    // so the substituted identity is trustworthy. Requires
+    // speaker_inherit_peek_veto_enable=1 (rescue is a strictly-stronger
+    // form of veto). DEFAULT OFF: Step 25b r1+r2 on the 1800 s fixture
+    // showed high run-to-run variance (cov 0.553 vs 0.657, dec_macro 0.848
+    // vs 0.780 between the two runs with the same knobs) and a macro
+    // regression on the 2-run mean (0.472 vs 0.488 for Step 25a). Mean
+    // dec_macro gain (+0.021) does not justify the macro drop and
+    // variance growth. Code retained as an opt-in knob for future
+    // diagnostics; not enabled by default.
+    bool speaker_inherit_peek_rescue_enable = false;
+
     // Short-segment inheritance broadcast: when a speech segment ends
     // with fewer than speaker_min_fbank_frames fbank frames, the FULL
     // CAM++ extraction is skipped (short audio produces noisy
