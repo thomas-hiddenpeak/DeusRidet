@@ -20,7 +20,8 @@ ClusterResult spectral_cluster(
     const std::vector<std::vector<float>>& embeddings,
     const std::vector<float>& timestamps_sec,
     int dim,
-    const SpectralClusterConfig& cfg)
+    const SpectralClusterConfig& cfg,
+    const std::vector<float>& weights)
 {
     using namespace spectral_detail;
 
@@ -61,8 +62,13 @@ ClusterResult spectral_cluster(
     const int optimal_k = select_k_by_eigengap(eigvals, actual_max, cfg.min_k, cfg.max_k, cfg.k_selection_mode);
 
     // Step 6 — K-means++ on spectral features with multi-restart.
+    // Phase 9 — when cfg.length_weighted_enable and a weights vector of
+    // matching length was provided, weight the centroid updates by it.
+    const bool use_weights =
+        cfg.length_weighted_enable && (int)weights.size() == N;
     auto labels = kmeans_pp_spectral(
-        eigvecs, N, optimal_k, cfg.kmeans_restarts, cfg.kmeans_iters);
+        eigvecs, N, optimal_k, cfg.kmeans_restarts, cfg.kmeans_iters,
+        use_weights ? weights : std::vector<float>{});
 
     // Step 6b (Phase 8) — purity post-filter: split contaminated clusters
     // in ORIGINAL embedding space. No-op when cfg.purity_split_enable=false.

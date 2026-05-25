@@ -152,8 +152,10 @@ std::vector<int> kmeans_pp_spectral(
     int N,
     int optimal_k,
     int kmeans_restarts,
-    int kmeans_iters)
+    int kmeans_iters,
+    const std::vector<float>& weights)
 {
+    const bool use_w = (int)weights.size() == N;
     // 6a: extract spectral features (N × optimal_k), L2-normalize rows
     std::vector<float> features(N * optimal_k);
     for (int i = 0; i < N; ++i) {
@@ -221,17 +223,18 @@ std::vector<int> kmeans_pp_spectral(
                 cur_labels[i] = best_c;
             }
 
-            // update centroids
+            // update centroids (length-weighted when use_w; uniform otherwise)
             for (int c = 0; c < optimal_k; ++c)
                 std::fill(centroids[c].begin(), centroids[c].end(), 0.0f);
-            std::vector<int> cnt(optimal_k, 0);
+            std::vector<float> cnt(optimal_k, 0.0f);
             for (int i = 0; i < N; ++i) {
-                cnt[cur_labels[i]]++;
+                const float w = use_w ? weights[i] : 1.0f;
+                cnt[cur_labels[i]] += w;
                 for (int j = 0; j < optimal_k; ++j)
-                    centroids[cur_labels[i]][j] += features[i * optimal_k + j];
+                    centroids[cur_labels[i]][j] += w * features[i * optimal_k + j];
             }
             for (int c = 0; c < optimal_k; ++c)
-                if (cnt[c] > 0)
+                if (cnt[c] > 0.0f)
                     for (int j = 0; j < optimal_k; ++j)
                         centroids[c][j] /= cnt[c];
 

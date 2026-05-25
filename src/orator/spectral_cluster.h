@@ -58,6 +58,12 @@ struct SpectralClusterConfig {
     float purity_accept_max_subsim     = 0.85f;
     int   purity_split_kmeans_iters    = 25;
     int   purity_split_kmeans_restarts = 4;
+
+    // Phase 9 — length-weighted K-means centroid update.
+    // When ON and `weights` is supplied to spectral_cluster(), each
+    // point contributes w_i to its assigned centroid (instead of 1).
+    // No-op when OFF or when weights is empty.
+    bool  length_weighted_enable       = false;
 };
 
 struct ClusterResult {
@@ -84,6 +90,7 @@ ClusterResult spectral_cluster(
     const std::vector<std::vector<float>>& embeddings,
     const std::vector<float>& timestamps_sec,
     int dim,
-    const SpectralClusterConfig& cfg = {});
+    const SpectralClusterConfig& cfg = {},
+    const std::vector<float>& weights = {});
 
 } // namespace deusridet

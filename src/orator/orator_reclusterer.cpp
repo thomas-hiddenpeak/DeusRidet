@@ -113,9 +113,16 @@ int OratorReclusterer::run_pass(double now_sec) {
     X.reserve(N);
     std::vector<float> ts;
     ts.reserve(N);
+    std::vector<float> weights;     // Phase 9 — per-segment durations (s).
+    weights.reserve(N);
     for (const Slot& s : buffer_) {
         X.push_back(s.seg.embedding);
         ts.push_back(static_cast<float>(s.seg.t_center_sec));
+        const float dur = static_cast<float>(
+            s.seg.t_end_sec - s.seg.t_start_sec);
+        // Clamp to a small floor so a degenerate zero-length segment
+        // does not vanish from the centroid sum.
+        weights.push_back(dur > 0.05f ? dur : 0.05f);
     }
 
     SpectralClusterConfig sc;
@@ -148,7 +155,10 @@ int OratorReclusterer::run_pass(double now_sec) {
     sc.purity_split_kmeans_iters    = cfg_.purity_split_kmeans_iters;
     sc.purity_split_kmeans_restarts = cfg_.purity_split_kmeans_restarts;
 
-    ClusterResult cr = spectral_cluster(X, ts, dim, sc);
+    // Phase 9 — length-weighted K-means pass-through.
+    sc.length_weighted_enable = cfg_.length_weighted_enable;
+
+    ClusterResult cr = spectral_cluster(X, ts, dim, sc, weights);
     if (cr.K <= 0 || static_cast<int>(cr.labels.size()) != N) return 0;
 
     // Build local centroids in original space — spectral_cluster already

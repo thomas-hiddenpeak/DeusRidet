@@ -79,6 +79,11 @@ struct OratorReclustererConfig {
     float  purity_accept_max_subsim     = 0.85f;
     int    purity_split_kmeans_iters    = 25;
     int    purity_split_kmeans_restarts = 4;
+
+    // Phase 9 — length-weighted K-means centroid update (forwarded to
+    // SpectralClusterConfig). When ON, each segment contributes
+    // (t_end - t_start) to its assigned centroid in step 6.
+    bool   length_weighted_enable       = false;
 };
 
 // Internal book-keeping for a persistent speaker identity discovered by the

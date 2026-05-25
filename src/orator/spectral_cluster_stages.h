@@ -84,13 +84,17 @@ int select_k_by_eigengap(
     int mode = 0);
 
 // Step 6: K-means++ on spectral features; multi-restart keeps the lowest-
-// inertia labelling.
+// inertia labelling. If `weights` is non-empty (length N), centroid
+// updates are length-weighted: centroid_c = sum_{i in c} w_i * x_i /
+// sum_{i in c} w_i. Assignment is unchanged (squared-Euclidean to
+// nearest centroid).
 std::vector<int> kmeans_pp_spectral(
     const std::vector<std::vector<float>>& eigvecs,
     int N,
     int optimal_k,
     int kmeans_restarts,
-    int kmeans_iters);
+    int kmeans_iters,
+    const std::vector<float>& weights = {});
 
 // Step 6b (Phase 8): per-cluster purity post-filter. For every cluster
 // whose member count ≥ min_cluster_size and whose mean intra-cluster
