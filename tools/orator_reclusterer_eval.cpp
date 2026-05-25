@@ -176,7 +176,7 @@ MacroResult macro_f1(const std::vector<int>& pred, const std::vector<int>& gt,
 int main(int argc, char** argv) {
     std::string fixture_path = "/home/rm01/DeusRidet/tests/fixtures/fused_v1.bin";
     double end_sec   = 1800.0;     // s1800 by default
-    double window_sec = 600.0;
+    double window_sec = 180.0;
     double interval_sec = 30.0;
     int    min_k = 2, max_k = 6;
     float  link_threshold = 0.55f;

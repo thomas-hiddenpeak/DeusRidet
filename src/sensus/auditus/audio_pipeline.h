@@ -292,7 +292,7 @@ struct AudioPipelineConfig {
     // Env override: DEUSRIDET_RECLUSTERER_ENABLE=1.
     // Default OFF so production replay is byte-identical until opt-in.
     bool  speaker_reclusterer_enable        = false;
-    float speaker_reclusterer_window_sec    = 600.0f;
+    float speaker_reclusterer_window_sec    = 180.0f;
     float speaker_reclusterer_interval_sec  = 30.0f;
     float speaker_reclusterer_link_threshold = 0.55f;
     float speaker_reclusterer_centroid_ema  = 0.20f;

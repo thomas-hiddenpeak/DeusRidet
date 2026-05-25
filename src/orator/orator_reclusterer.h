@@ -56,7 +56,7 @@ struct RelabelEvent {
 
 struct OratorReclustererConfig {
     int    embedding_dim   = 384;     // fused CAM++ || WL-ECAPA
-    double window_sec      = 600.0;   // W — rolling buffer length in seconds
+    double window_sec      = 180.0;   // W — rolling buffer length in seconds (Phase 6: smaller windows reduce K-means contamination; empirically peaks at 180s)
     double interval_sec    = 30.0;    // S — how often tick() runs the spectral pass
     int    min_segments    = 12;      // do not run unless at least this many segs in window
     int    max_segments    = 300;     // hard cap to keep spectral O(N^3) cheap
