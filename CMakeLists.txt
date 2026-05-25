@@ -299,6 +299,11 @@ add_executable(wl_extract_embeddings tools/wl_extract_embeddings.cpp)
 target_include_directories(wl_extract_embeddings PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(wl_extract_embeddings PRIVATE orator sensus machina communis CUDA::cudart CUDA::cublas cudnn)
 
+# Tool: Phase 12 — patch overlap segments with MossFormer2 dominant source
+add_executable(build_overlap_patched_pcm tools/build_overlap_patched_pcm.cpp)
+target_include_directories(build_overlap_patched_pcm PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(build_overlap_patched_pcm PRIVATE sensus machina communis CUDA::cudart CUDA::cublas cudnn)
+
 # ============================================================================
 # Integration tests (Step 10d — formerly cmd_test_* under src/actus/)
 # Each one was an Actus verb only because the Step 5 split landed every
