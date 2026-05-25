@@ -192,6 +192,10 @@ int main(int argc, char** argv) {
     double purity_max_subsim = 0.85;
     bool   lenw = false;           // Phase 9 — length-weighted K-means
     int    max_globals = -1;       // Phase 10 — hard cap on global speakers (-1 disables)
+    std::string dump_pred_path;    // Phase 13 — write per-seg (gt,pred) JSONL
+    double smooth_short_dur = 0.0; // Phase 13 — short-seg temporal smoothing dur threshold (s); 0=off
+    int    smooth_neighbors = 8;   // Phase 13 — # of past+future neighbors to consult
+    int    smooth_min_votes = 2;   // Phase 13 — minimum reliable-neighbor vote count to override
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -216,6 +220,10 @@ int main(int argc, char** argv) {
         else if (a == "--purity-max-subsim") next(purity_max_subsim);
         else if (a == "--lenw") lenw = true;
         else if (a == "--max-globals") nexti(max_globals);
+        else if (a == "--dump-pred" && i + 1 < argc) dump_pred_path = argv[++i];
+        else if (a == "--smooth-short")     next(smooth_short_dur);
+        else if (a == "--smooth-neighbors") nexti(smooth_neighbors);
+        else if (a == "--smooth-min-votes") nexti(smooth_min_votes);
         else {
             std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
             return 2;
@@ -304,6 +312,61 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "[eval] streamed %d segs, %d relabel events, %d globals\n",
                  n_recs_used, n_events_total, rec.global_speaker_count());
 
+    // Phase 13 — temporal smoothing for short segments.
+    // If a seg with dur < smooth_short_dur has a majority of reliable neighbors
+    // (dur >= smooth_short_dur) labelled X, override its label to X.
+    int n_smoothed = 0;
+    if (smooth_short_dur > 0.0 && n_recs_used > 0) {
+        const int N = static_cast<int>(fx.recs.size());
+        std::vector<int> new_labels(N, -2); // -2 = no change; -1 = unlabeled
+        for (int i = 0; i < N; ++i) {
+            const FixtureRecord& r = fx.recs[i];
+            if (!gt_by_segid.count(static_cast<uint64_t>(i + 1))) continue;
+            const double dur = r.t_end - r.t_start;
+            if (dur >= smooth_short_dur) continue;
+            const uint64_t sid_i = static_cast<uint64_t>(i + 1);
+            auto pit = final_pred.find(sid_i);
+            if (pit == final_pred.end()) continue;
+            const int cur = pit->second;
+            // Count reliable neighbor labels.
+            std::map<int, int> votes;
+            const int lo = std::max(0, i - smooth_neighbors);
+            const int hi = std::min(N - 1, i + smooth_neighbors);
+            int reliable = 0;
+            for (int j = lo; j <= hi; ++j) {
+                if (j == i) continue;
+                const FixtureRecord& rj = fx.recs[j];
+                const double dj = rj.t_end - rj.t_start;
+                if (dj < smooth_short_dur) continue;
+                const uint64_t sid_j = static_cast<uint64_t>(j + 1);
+                auto pj = final_pred.find(sid_j);
+                if (pj == final_pred.end()) continue;
+                votes[pj->second] += 1;
+                reliable += 1;
+            }
+            if (reliable == 0) continue;
+            // Find top vote.
+            int top_label = -1, top_count = 0;
+            for (const auto& kv : votes) {
+                if (kv.second > top_count) { top_count = kv.second; top_label = kv.first; }
+            }
+            if (top_label == cur) continue;
+            if (top_count < smooth_min_votes) continue;
+            if (top_count * 2 <= reliable) continue; // need strict majority
+            new_labels[i] = top_label;
+        }
+        // Apply changes after the scan.
+        for (int i = 0; i < N; ++i) {
+            if (new_labels[i] == -2) continue;
+            const uint64_t sid = static_cast<uint64_t>(i + 1);
+            final_pred[sid] = new_labels[i];
+            ++n_smoothed;
+        }
+        std::fprintf(stderr, "[smooth-short] dur<%.2f, K=%d, min_votes=%d: %d labels overridden\n",
+                     smooth_short_dur, smooth_neighbors, smooth_min_votes, n_smoothed);
+    }
+
+
     // Build dense pred + gt vectors for the segments that received a label.
     std::vector<int> pred_v, gt_v;
     pred_v.reserve(n_recs_used);
@@ -328,6 +391,37 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "[eval] macro_f1=%.4f  K_pred=%d  K_mapped=%d/%d  n_scored=%zu\n",
                  M.macro_f1, M.K_pred, M.K_used, fx.n_speakers, pred_v.size());
+
+    if (!dump_pred_path.empty()) {
+        std::FILE* fp = std::fopen(dump_pred_path.c_str(), "w");
+        if (!fp) {
+            std::fprintf(stderr, "[dump-pred] cannot open: %s\n", dump_pred_path.c_str());
+        } else {
+            int n_written = 0;
+            for (size_t i = 0; i < fx.recs.size(); ++i) {
+                const uint64_t sid = static_cast<uint64_t>(i + 1);
+                if (!gt_by_segid.count(sid)) continue;
+                const FixtureRecord& r = fx.recs[i];
+                auto it = final_pred.find(sid);
+                const int pred = (it == final_pred.end()) ? -1 : it->second;
+                int mapped_gt = -1;
+                if (pred >= 0) {
+                    auto mit = M.mapping.find(pred);
+                    if (mit != M.mapping.end()) mapped_gt = mit->second;
+                }
+                const int gt = gt_by_segid[sid];
+                const int correct = (mapped_gt == gt) ? 1 : 0;
+                std::fprintf(fp,
+                    "{\"idx\":%zu,\"sid\":%llu,\"t_start\":%.3f,\"t_end\":%.3f,"
+                    "\"t_center\":%.3f,\"gt\":%d,\"pred\":%d,\"mapped_gt\":%d,\"correct\":%d}\n",
+                    i, (unsigned long long)sid, r.t_start, r.t_end, r.t_center,
+                    gt, pred, mapped_gt, correct);
+                ++n_written;
+            }
+            std::fclose(fp);
+            std::fprintf(stderr, "[dump-pred] wrote %d rows -> %s\n", n_written, dump_pred_path.c_str());
+        }
+    }
 
     if (diag) {
         // Per-predicted-global histogram over GT classes.
