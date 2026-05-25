@@ -26,6 +26,7 @@
 #include "../../orator/wavlm_ecapa_encoder.h"
 #include "../../orator/speaker_db.h"
 #include "../../orator/speaker_vector_store.h"
+#include "../../orator/orator_reclusterer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -33,6 +34,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -276,6 +278,28 @@ struct AudioPipelineConfig {
     // running the encoder and WITHOUT touching the speaker library
     // (no identify, no register, no EMA, no exemplar addition).
     bool  speaker_short_inherit_enable = true;
+    // Phase 4 — OratorReclusterer runtime wiring.
+    // When enabled, the segment-end FULL path pushes the fused 384D
+    // (CAM++ ⊕ WL-ECAPA) embedding to a rolling-window spectral
+    // reclusterer (src/orator/orator_reclusterer.{h,cpp}). Each tick
+    // produces a globally-consistent speaker assignment over the last
+    // window_sec seconds; whenever the new global id disagrees with
+    // the tentative online id, a RelabelEvent is logged (and, in a
+    // future revision, surfaced as a Nexus `speaker_relabel` WS event
+    // so the WebUI timeline can be patched in place).
+    // Defaults match the values that scored macro=0.7126 on the 60-min
+    // fused fixture (see docs/{en,zh}/devlog/2026-05-23.md, Phase 2).
+    // Env override: DEUSRIDET_RECLUSTERER_ENABLE=1.
+    // Default OFF so production replay is byte-identical until opt-in.
+    bool  speaker_reclusterer_enable        = false;
+    float speaker_reclusterer_window_sec    = 600.0f;
+    float speaker_reclusterer_interval_sec  = 30.0f;
+    float speaker_reclusterer_link_threshold = 0.55f;
+    float speaker_reclusterer_centroid_ema  = 0.20f;
+    int   speaker_reclusterer_min_segments  = 12;
+    int   speaker_reclusterer_max_segments  = 300;
+    int   speaker_reclusterer_min_k         = 2;
+    int   speaker_reclusterer_max_k         = 6;
     // Replay speed for benchmark/testing input. 1.0 = real-time; >1.0 means
     // the upstream driver feeds samples faster than wall time (e.g. speed=2.0
     // pushes two seconds of source audio per wall second). This ONLY affects
@@ -307,6 +331,14 @@ public:
     // gap marker into the timeline instead of silently losing audio.
     using OnDrop = std::function<void(uint64_t t1_from, uint64_t t1_to,
                                       const char* reason, size_t bytes)>;
+    // Phase 4 — OratorReclusterer relabel event. Fired when the rolling-window
+    // re-clusterer disagrees with the online tentative id for a finalized
+    // segment. Consumers (Nexus) should forward this to a
+    // `speaker_relabel` WS event so the WebUI timeline can be patched.
+    using OnSpeakerRelabel = std::function<void(uint64_t segment_id,
+                                                int old_speaker_id,
+                                                int new_speaker_id,
+                                                float confidence)>;
 
     AudioPipeline();
     ~AudioPipeline();
@@ -329,6 +361,7 @@ public:
     void set_on_asr_log(OnAsrLog cb) { on_asr_log_ = std::move(cb); }
     void set_on_asr_partial(OnAsrPartial cb) { on_asr_partial_ = std::move(cb); }
     void set_on_drop(OnDrop cb) { on_drop_ = std::move(cb); }
+    void set_on_speaker_relabel(OnSpeakerRelabel cb) { on_speaker_relabel_ = std::move(cb); }
 
     const AudioPipelineStats& stats() const { return stats_; }
 
@@ -666,6 +699,12 @@ private:
     OnAsrLog   on_asr_log_;
     OnDrop     on_drop_;
     OnAsrPartial on_asr_partial_;
+    // Phase 4 — OratorReclusterer rolling-window re-clustering. Owned by
+    // pipeline; instantiated in start() iff cfg_.speaker_reclusterer_enable
+    // (or env DEUSRIDET_RECLUSTERER_ENABLE=1). Lives next to dual_db_.
+    std::unique_ptr<orator::OratorReclusterer> reclusterer_;
+    uint64_t reclusterer_seg_id_ = 0;
+    OnSpeakerRelabel on_speaker_relabel_;
 };
 
 } // namespace deusridet

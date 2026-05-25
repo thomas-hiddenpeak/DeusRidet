@@ -166,6 +166,45 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
     // No threshold override needed — dual encoder mode uses cfg value directly.
     wlecapa_threshold_.store(cfg_.wavlm_ecapa_threshold, std::memory_order_relaxed);
 
+    // Phase 4 — OratorReclusterer instantiation. Only meaningful when the
+    // dual encoder produced 384D fused embeddings. Gated by config flag or
+    // env DEUSRIDET_RECLUSTERER_ENABLE=1. Default OFF — production replay
+    // is byte-identical until opt-in.
+    {
+        bool enable = cfg_.speaker_reclusterer_enable ||
+                      env_truthy_local("DEUSRIDET_RECLUSTERER_ENABLE");
+        if (enable && use_dual_encoder_) {
+            orator::OratorReclustererConfig rc;
+            rc.embedding_dim   = 384;
+            rc.window_sec      = (double)cfg_.speaker_reclusterer_window_sec;
+            rc.interval_sec    = (double)cfg_.speaker_reclusterer_interval_sec;
+            rc.min_segments    = cfg_.speaker_reclusterer_min_segments;
+            rc.max_segments    = cfg_.speaker_reclusterer_max_segments;
+            rc.min_k           = cfg_.speaker_reclusterer_min_k;
+            rc.max_k           = cfg_.speaker_reclusterer_max_k;
+            rc.link_threshold  = cfg_.speaker_reclusterer_link_threshold;
+            rc.centroid_ema    = cfg_.speaker_reclusterer_centroid_ema;
+            // Env overrides for live tuning without rebuilding configs:
+            rc.interval_sec    = (double)env_float_local("DEUSRIDET_RECLUSTERER_INTERVAL_SEC",
+                                                        (float)rc.interval_sec);
+            rc.link_threshold  = env_float_local("DEUSRIDET_RECLUSTERER_LINK_THRESH",
+                                                 rc.link_threshold);
+            rc.centroid_ema    = env_float_local("DEUSRIDET_RECLUSTERER_EMA",
+                                                 rc.centroid_ema);
+            reclusterer_ = std::make_unique<orator::OratorReclusterer>(rc);
+            LOG_INFO("AudioPipe",
+                     "OratorReclusterer enabled: window=%.1fs interval=%.1fs "
+                     "min/max segs=%d/%d k=[%d,%d] link=%.2f ema=%.2f",
+                     rc.window_sec, rc.interval_sec,
+                     rc.min_segments, rc.max_segments,
+                     rc.min_k, rc.max_k,
+                     (double)rc.link_threshold, (double)rc.centroid_ema);
+        } else if (enable && !use_dual_encoder_) {
+            LOG_WARN("AudioPipe",
+                     "OratorReclusterer requested but dual encoder unavailable — skipped");
+        }
+    }
+
     // Initialize ASR engine (optional — non-fatal, but heavy: ~4.7 GB weights).
     if (!cfg_.asr_model_path.empty()) {
         asr_engine_ = std::make_unique<asr::ASREngine>();

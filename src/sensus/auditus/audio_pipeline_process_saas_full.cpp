@@ -162,6 +162,7 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
 
                             SpeakerMatch match;
                             std::vector<float> wl_emb;  // hoisted for warmup reuse
+                            std::vector<float> dual_emb;  // hoisted for reclusterer push (Phase 4)
                             if (use_dual_encoder_) {
                                 // Dual-encoder: concatenate CAM++ + WL-ECAPA → 384D.
                                 int speech_samples = (int)speech_pcm_buf_.size();
@@ -187,6 +188,7 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                                         match = dual_db_.identify(dual, match_thresh,
                                                                   auto_reg, reg_thresh);
                                     }
+                                    dual_emb = std::move(dual);  // Phase 4: preserve for reclusterer
                                 } else {
                                     // WL-ECAPA extraction failed (segment too short).
                                     // Skip — don't fallback to different ID space.
@@ -312,6 +314,49 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                                      fbank_frames, match.exemplar_count,
                                      recency_active ? "ON" : "off", match_thresh, reg_thresh);
                             if (on_speaker_) on_speaker_(match);
+
+                            // Phase 4 — OratorReclusterer push + tick + drain.
+                            // When enabled, push the finalized fused embedding to
+                            // the rolling-window re-clusterer; periodically the
+                            // tick() pass runs spectral re-clustering over the
+                            // last window_sec seconds and surfaces RelabelEvents
+                            // whenever the global identity differs from the
+                            // online tentative id. The events are logged here
+                            // and forwarded to on_speaker_relabel_ for the Nexus
+                            // layer to publish as a `speaker_relabel` WS event.
+                            if (reclusterer_ && use_dual_encoder_ &&
+                                !dual_emb.empty() && match.speaker_id >= 0) {
+                                orator::ReclusterSegment rseg;
+                                rseg.segment_id = ++reclusterer_seg_id_;
+                                int64_t seg_end_samples   = audio_t1_processed_;
+                                int64_t seg_start_samples = seg_end_samples -
+                                                            (int64_t)speech_pcm_buf_.size();
+                                if (seg_start_samples < 0) seg_start_samples = 0;
+                                rseg.t_start_sec  = (double)seg_start_samples / 16000.0;
+                                rseg.t_end_sec    = (double)seg_end_samples   / 16000.0;
+                                rseg.t_center_sec = 0.5 * (rseg.t_start_sec + rseg.t_end_sec);
+                                rseg.tentative_speaker_id = match.speaker_id;
+                                rseg.embedding = dual_emb;  // already L2-normalised
+                                reclusterer_->push(rseg);
+                                int n_emit = reclusterer_->tick(rseg.t_end_sec);
+                                if (n_emit > 0) {
+                                    std::vector<orator::RelabelEvent> evs;
+                                    reclusterer_->drain_relabels(evs);
+                                    for (const auto& ev : evs) {
+                                        LOG_INFO("AudioPipe",
+                                                 "Reclusterer relabel: seg=%lu old=%d new=%d conf=%.3f",
+                                                 (unsigned long)ev.segment_id,
+                                                 ev.old_speaker_id, ev.new_speaker_id,
+                                                 (double)ev.confidence);
+                                        if (on_speaker_relabel_) {
+                                            on_speaker_relabel_(ev.segment_id,
+                                                                ev.old_speaker_id,
+                                                                ev.new_speaker_id,
+                                                                ev.confidence);
+                                        }
+                                    }
+                                }
+                            }
 
                             // Step 17a — retro-relabel ring & scan.
                             //
