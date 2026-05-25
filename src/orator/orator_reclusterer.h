@@ -84,6 +84,13 @@ struct OratorReclustererConfig {
     // SpectralClusterConfig). When ON, each segment contributes
     // (t_end - t_start) to its assigned centroid in step 6.
     bool   length_weighted_enable       = false;
+
+    // Phase 10 — hard cap on the number of persistent globals. After the
+    // cosine-merge pass, while globals_.size() > max_global_speakers we
+    // collapse the global with the smallest support into its nearest
+    // surviving neighbour (weighted centroid average; buffer + history
+    // remapping; RelabelEvents emitted). −1 disables the cap.
+    int    max_global_speakers          = -1;
 };
 
 // Internal book-keeping for a persistent speaker identity discovered by the

@@ -307,6 +307,74 @@ int OratorReclusterer::run_pass(double now_sec) {
         }
     }
 
+    // Phase 10 — hard K-cap on global speakers. Independent of cosine
+    // similarity: while we have more globals than the configured cap,
+    // collapse the smallest-support global into its nearest surviving
+    // neighbour. Same remapping machinery as the cosine-merge block.
+    if (cfg_.max_global_speakers > 0 &&
+        static_cast<int>(globals_.size()) > cfg_.max_global_speakers) {
+        while (static_cast<int>(globals_.size()) > cfg_.max_global_speakers &&
+               globals_.size() >= 2) {
+            // Smallest-support global.
+            int drop_id = -1;
+            int min_support = 0;
+            for (const auto& kv : globals_) {
+                if (drop_id < 0 || kv.second.support_count < min_support) {
+                    drop_id     = kv.first;
+                    min_support = kv.second.support_count;
+                }
+            }
+            if (drop_id < 0) break;
+            auto drop_it = globals_.find(drop_id);
+            if (drop_it == globals_.end()) break;
+
+            // Nearest survivor by centroid cosine.
+            int keep_id = -1;
+            float best_sim = -2.0f;
+            for (const auto& kv : globals_) {
+                if (kv.first == drop_id) continue;
+                const float sim = cosine(drop_it->second.centroid, kv.second.centroid);
+                if (sim > best_sim) { best_sim = sim; keep_id = kv.first; }
+            }
+            if (keep_id < 0) break;
+
+            GlobalSpeaker& keep = globals_[keep_id];
+            GlobalSpeaker& drop = drop_it->second;
+            const float wa = static_cast<float>(std::max(1, keep.support_count));
+            const float wb = static_cast<float>(std::max(1, drop.support_count));
+            const float tot = wa + wb;
+            for (size_t i = 0; i < keep.centroid.size(); ++i) {
+                keep.centroid[i] = (wa * keep.centroid[i] + wb * drop.centroid[i]) / tot;
+            }
+            l2_normalise(keep.centroid);
+            keep.support_count += drop.support_count;
+            keep.last_seen_sec  = std::max(keep.last_seen_sec, drop.last_seen_sec);
+            globals_.erase(drop_id);
+
+            // Remap current local->global so commit phase sees one identity.
+            for (int k = 0; k < K; ++k) {
+                if (local_to_global[k] == drop_id) local_to_global[k] = keep_id;
+            }
+            // Remap previously committed labels in the live buffer.
+            for (Slot& s : buffer_) {
+                if (s.ever_committed && s.committed_speaker_id == drop_id) {
+                    s.committed_speaker_id = keep_id;
+                }
+            }
+            // Retroactively relabel every committed segment in history.
+            for (auto& kv : committed_history_) {
+                if (kv.second != drop_id) continue;
+                RelabelEvent ev;
+                ev.segment_id     = kv.first;
+                ev.old_speaker_id = drop_id;
+                ev.new_speaker_id = keep_id;
+                ev.confidence     = best_sim;
+                pending_.push_back(ev);
+                kv.second = keep_id;
+            }
+        }
+    }
+
     // Commit new labels back to the buffer and emit RelabelEvents wherever
     // the global id differs from what was last committed.
     int n_events = 0;
