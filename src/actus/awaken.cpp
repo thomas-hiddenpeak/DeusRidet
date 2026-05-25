@@ -172,6 +172,10 @@ int awaken(const std::string& webui_dir,
 
     // One-shot speaker match (Legacy CAM++ path) — migrated to Auditus facade.
     auditus::install_speaker_match_callback(audio, server);
+
+    // OratorReclusterer global-identity correction — emits ws "speaker_relabel"
+    // whenever the rolling-window spectral pass disagrees with the online id.
+    auditus::install_speaker_relabel_callback(audio, server);
     // ── Consciousness stream callbacks — migrated to Conscientia facade ──
     // decode / speech_token / state broadcasts were 83 inline lines; each is
     // now an `install_*` call wiring ConscientiStream → WsServer with byte-

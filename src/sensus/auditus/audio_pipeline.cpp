@@ -167,12 +167,17 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
     wlecapa_threshold_.store(cfg_.wavlm_ecapa_threshold, std::memory_order_relaxed);
 
     // Phase 4 — OratorReclusterer instantiation. Only meaningful when the
-    // dual encoder produced 384D fused embeddings. Gated by config flag or
-    // env DEUSRIDET_RECLUSTERER_ENABLE=1. Default OFF — production replay
-    // is byte-identical until opt-in.
+    // dual encoder produced 384D fused embeddings. Phase 6 (2026-05-25):
+    // baseline crossed "可用" bar with window_sec=180s (macro_f1 0.7025 on
+    // full_60m auto-K); default flipped to ON. Env overrides:
+    //   DEUSRIDET_RECLUSTERER_ENABLE=1  → force on (even if cfg disables)
+    //   DEUSRIDET_RECLUSTERER_ENABLE=0  → force off
     {
-        bool enable = cfg_.speaker_reclusterer_enable ||
-                      env_truthy_local("DEUSRIDET_RECLUSTERER_ENABLE");
+        const char* env_val = std::getenv("DEUSRIDET_RECLUSTERER_ENABLE");
+        bool enable = cfg_.speaker_reclusterer_enable;
+        if (env_val) {
+            enable = env_truthy_local("DEUSRIDET_RECLUSTERER_ENABLE");
+        }
         if (enable && use_dual_encoder_) {
             orator::OratorReclustererConfig rc;
             rc.embedding_dim   = 384;

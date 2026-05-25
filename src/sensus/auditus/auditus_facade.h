@@ -78,6 +78,15 @@ void install_stats_callback(AudioPipeline& audio,
 void install_speaker_match_callback(AudioPipeline& audio,
                                     WsServer& server);
 
+// OratorReclusterer global-identity correction → ws "speaker_relabel"
+// envelope + stdout. Fires whenever the rolling-window spectral
+// re-clusterer decides a previously finalised segment's global speaker id
+// differs from the online tentative id. WebUI consumers should patch the
+// timeline entry for `segment_id` from `old_speaker_id` to
+// `new_speaker_id`.
+void install_speaker_relabel_callback(AudioPipeline& audio,
+                                      WsServer& server);
+
 // ── Callback installers (Step 7c scope) ───────────────────────────────────────
 
 // Binary WS frames (16-bit PCM) → AudioPipeline ingress + periodic ws

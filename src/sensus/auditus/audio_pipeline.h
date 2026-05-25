@@ -287,11 +287,11 @@ struct AudioPipelineConfig {
     // the tentative online id, a RelabelEvent is logged (and, in a
     // future revision, surfaced as a Nexus `speaker_relabel` WS event
     // so the WebUI timeline can be patched in place).
-    // Defaults match the values that scored macro=0.7126 on the 60-min
-    // fused fixture (see docs/{en,zh}/devlog/2026-05-23.md, Phase 2).
-    // Env override: DEUSRIDET_RECLUSTERER_ENABLE=1.
-    // Default OFF so production replay is byte-identical until opt-in.
-    bool  speaker_reclusterer_enable        = false;
+    // Phase 6 (2026-05-25): window_sec lowered to 180s lifted macro_f1
+    // from 0.5476 → 0.7025 on the full 60-min fused fixture (auto-K),
+    // crossing the "可用" bar. Default flipped to ON.
+    // Env override: DEUSRIDET_RECLUSTERER_ENABLE=0 disables; =1 enables.
+    bool  speaker_reclusterer_enable        = true;
     float speaker_reclusterer_window_sec    = 180.0f;
     float speaker_reclusterer_interval_sec  = 30.0f;
     float speaker_reclusterer_link_threshold = 0.55f;

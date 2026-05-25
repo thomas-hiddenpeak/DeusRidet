@@ -354,5 +354,25 @@ void install_speaker_match_callback(AudioPipeline& audio,
     });
 }
 
+void install_speaker_relabel_callback(AudioPipeline& audio,
+                                      WsServer& server) {
+    audio.set_on_speaker_relabel([&server](uint64_t segment_id,
+                                           int old_speaker_id,
+                                           int new_speaker_id,
+                                           float confidence) {
+        char json[256];
+        snprintf(json, sizeof(json),
+            R"({"type":"speaker_relabel","segment_id":%llu,"old_id":%d,"new_id":%d,"confidence":%.3f})",
+            (unsigned long long)segment_id,
+            old_speaker_id, new_speaker_id,
+            (double)confidence);
+        server.broadcast_text(json);
+        printf("[awaken] Speaker relabel: seg=%llu %d -> %d conf=%.3f\n",
+               (unsigned long long)segment_id,
+               old_speaker_id, new_speaker_id,
+               (double)confidence);
+    });
+}
+
 }  // namespace auditus
 }  // namespace deusridet
