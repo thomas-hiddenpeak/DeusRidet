@@ -72,6 +72,14 @@ ws.onText = (msg) => {
             speakerDebug.onDebugData(obj);
             return;
         }
+        if (obj.type === 'speaker_relabel') {
+            // OratorReclusterer global-merge / K-cap event. Patch the
+            // timeline forward-map so already-rendered speaker chips fold
+            // into the surviving identity.
+            timelinePanel.onSpeakerRelabel(obj);
+            log(`Speaker relabel: seg=${obj.segment_id} ${obj.old_id} → ${obj.new_id} (conf=${(obj.confidence ?? 0).toFixed(3)})`);
+            return;
+        }
         if (obj.type === 'asr_transcript') {
             asrPanel.onTranscript(obj);
             asrTranscriptPanel.onTranscript(obj);

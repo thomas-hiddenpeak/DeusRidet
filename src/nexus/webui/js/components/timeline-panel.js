@@ -45,6 +45,15 @@ export class TimelinePanel {
         this.trackerSpans  = [];  // {start, end, trkId, trkName, state, sim}
         this.trackerEvents = [];  // {time, type, oldId, newId, name, sim, state}
         this.maxEntries    = 800;
+        // Forward-map of OratorReclusterer global-merge / K-cap relabels.
+        // Each entry old_id -> new_id is applied transitively when rendering
+        // saas segments so a past speaker that the reclusterer has merged
+        // into another global is shown under the surviving identity. This
+        // is the v1 patcher path (handles every speaker_relabel event whose
+        // semantics is a global merge); per-segment retro relabels are not
+        // disambiguated because the asr_transcript envelope does not yet
+        // carry segment_id.
+        this._relabelMap = new Map();
         // VAD state tracking from pipeline_stats
         this._vadSpeech    = false;
         this._vadStart     = 0;
@@ -171,7 +180,6 @@ export class TimelinePanel {
         const start = obj.stream_start_sec || 0;
         const end   = obj.stream_end_sec || 0;
         if (end <= 0) return;
-
         // ASR segment
         const seg = {
             start, end,
@@ -208,6 +216,55 @@ export class TimelinePanel {
         //  not from asr_transcript snapshots)
 
         this._dirty = true;
+    }
+
+    // OratorReclusterer global-merge / K-cap relabel patcher. Receives a
+    // {type:'speaker_relabel', segment_id, old_id, new_id, confidence}
+    // envelope. v1 semantics: treat old_id -> new_id as a global identity
+    // merge and rewrite every saas segment whose current spkId chains back
+    // to old_id under the forward-map. The map is also consulted at render
+    // time so future asr_transcript messages still carrying the obsolete id
+    // are displayed under the surviving identity.
+    onSpeakerRelabel(obj) {
+        const oldId = obj.old_id;
+        const newId = obj.new_id;
+        if (typeof oldId !== 'number' || typeof newId !== 'number') return;
+        if (oldId < 0 || newId < 0 || oldId === newId) return;
+
+        // Resolve transitively: if newId itself was previously remapped,
+        // follow the chain so the map stays in canonical form.
+        let target = newId;
+        const visited = new Set([oldId]);
+        while (this._relabelMap.has(target) && !visited.has(target)) {
+            visited.add(target);
+            target = this._relabelMap.get(target);
+        }
+        this._relabelMap.set(oldId, target);
+
+        // Rewrite any existing forward-map entry that pointed at oldId so
+        // older merges follow the new survivor.
+        for (const [k, v] of this._relabelMap) {
+            if (v === oldId) this._relabelMap.set(k, target);
+        }
+
+        // Apply to already-buffered saas segments.
+        let n_patched = 0;
+        for (const seg of this.saasSegments) {
+            if (seg.spkId === oldId) { seg.spkId = target; n_patched += 1; }
+        }
+        if (n_patched > 0) this._dirty = true;
+    }
+
+    // Apply the forward-map to a raw speaker id at render time.
+    _resolveSpkId(id) {
+        if (typeof id !== 'number' || id < 0) return id;
+        let cur = id;
+        const visited = new Set();
+        while (this._relabelMap.has(cur) && !visited.has(cur)) {
+            visited.add(cur);
+            cur = this._relabelMap.get(cur);
+        }
+        return cur;
     }
 
     // ─── Rendering ───
@@ -405,7 +462,10 @@ export class TimelinePanel {
             const px2 = Math.min(W, tx(Math.min(seg.end, tEnd)));
             if (px2 - px1 < 1) continue;
 
-            const color = seg.spkId >= 0 ? SPEAKER_COLORS[seg.spkId % SPEAKER_COLORS.length] : UNKNOWN_COLOR;
+            // Apply reclusterer forward-map at render time so late-arriving
+            // speaker_relabel events show on already-buffered segments.
+            const spkId = this._resolveSpkId(seg.spkId);
+            const color = spkId >= 0 ? SPEAKER_COLORS[spkId % SPEAKER_COLORS.length] : UNKNOWN_COLOR;
             c.fillStyle = color;
             c.globalAlpha = 0.7;
             c.fillRect(px1, spkY + 1, px2 - px1, spkH - 2);
@@ -425,8 +485,7 @@ export class TimelinePanel {
                 c.fillStyle = '#fff';
                 c.font = '9px monospace';
                 c.textBaseline = 'middle';
-                const label = seg.spkName || (seg.spkId >= 0 ? `S${seg.spkId}` : '?');
-                c.fillText(label, px1 + 2, spkY + spkH / 2 + 1);
+                const label = seg.spkName || (spkId >= 0 ? `S${spkId}` : '?');                c.fillText(label, px1 + 2, spkY + spkH / 2 + 1);
                 c.restore();
             }
         }
@@ -603,7 +662,8 @@ export class TimelinePanel {
         } else if (lane === 'saas') {
             const seg = this.saasSegments.find(s => s.start <= timeSec && s.end >= timeSec);
             if (seg) {
-                const name = seg.spkName || (seg.spkId >= 0 ? `S${seg.spkId}` : '?');
+                const spkId = this._resolveSpkId(seg.spkId);
+                const name = seg.spkName || (spkId >= 0 ? `S${spkId}` : '?');
                 html = `<strong>SAAS</strong> ${seg.start.toFixed(1)}s – ${seg.end.toFixed(1)}s<br>`
                      + `${this._esc(name)} (sim=${seg.spkSim.toFixed(3)}, conf=${(seg.spkConf * 100).toFixed(0)}%)<br>`
                      + `Source: ${seg.spkSrc}`;
