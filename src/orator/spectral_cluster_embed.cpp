@@ -88,35 +88,61 @@ void laplacian_eigendecomp(
 }
 
 // ===== Step 5: Eigengap K-selection =====
+//
+// mode = 0 (legacy NME + rel_gap): score[k] = gap/(k+1) + 0.3*gap/λ[0].
+//     The 1/(k+1) NME term strongly biases the argmax toward small K and on
+//     384-D fused embeddings collapses every window to K=2 (the dominant
+//     conversational split) even when 4 speakers are clearly present.
+//
+// mode = 1 (eigenvalue ratio): score[k] = λ[k] / λ[k+1].
+//     Parameter-free. K = 1 + argmax_{k≥1} score[k]. Robust on the s1800
+//     fixture: picks K=4 (true value) instead of K=2.
 int select_k_by_eigengap(
     const std::vector<float>& eigvals,
     int actual_max,
     int cfg_min_k,
-    int cfg_max_k)
+    int cfg_max_k,
+    int mode)
 {
     int optimal_k = cfg_min_k;
-    LOG_INFO("SpCluster", "Eigenvalues (top-%d):", actual_max);
+    LOG_INFO("SpCluster", "Eigenvalues (top-%d, mode=%d):", actual_max, mode);
     for (int k = 0; k < actual_max && k < 8; ++k)
         LOG_INFO("SpCluster", "  λ[%d] = %.6f", k, eigvals[k]);
 
-    float max_gap_score = 0;
+    float max_score = 0;
     for (int k = 0; k + 1 < actual_max; ++k) {
         // Skip trivial first eigengap: λ[0] is the connected-component eigenvalue
         // and dominates the score, forcing K=1 in degenerate cases.
         if (k == 0) continue;
-        float gap = eigvals[k] - eigvals[k + 1];
+        const float gap = eigvals[k] - eigvals[k + 1];
         if (eigvals[k] < 0.01f) continue;
-        float rel_gap = gap / (eigvals[0] + 1e-12f);
-        float nme = gap / (k + 1);
-        float score = nme + 0.3f * rel_gap;
-        LOG_INFO("SpCluster", "  gap[%d→%d]: gap=%.6f rel=%.4f nme=%.6f score=%.6f",
-                 k, k + 1, gap, rel_gap, nme, score);
-        if (score > max_gap_score) {
-            max_gap_score = score;
+        float score = 0.0f;
+        if (mode == 1) {
+            // Eigenvalue ratio λ[k]/λ[k+1]. Argmax marks the elbow.
+            // Guard: when λ[k+1] is near zero (degenerate small-N windows or
+            // disconnected affinity graph) the ratio explodes and dominates;
+            // require λ[k+1] ≥ 0.05 to consider this gap a meaningful elbow.
+            if (eigvals[k + 1] < 0.05f) {
+                LOG_INFO("SpCluster", "  ratio[%d→%d]: λ_k+1=%.6f < 0.05 (skip)",
+                         k, k + 1, eigvals[k + 1]);
+                continue;
+            }
+            score = eigvals[k] / eigvals[k + 1];
+            LOG_INFO("SpCluster", "  ratio[%d→%d]: λ_k=%.6f λ_k+1=%.6f score=%.6f",
+                     k, k + 1, eigvals[k], eigvals[k + 1], score);
+        } else {
+            const float rel_gap = gap / (eigvals[0] + 1e-12f);
+            const float nme     = gap / (k + 1);
+            score = nme + 0.3f * rel_gap;
+            LOG_INFO("SpCluster", "  gap[%d→%d]: gap=%.6f rel=%.4f nme=%.6f score=%.6f",
+                     k, k + 1, gap, rel_gap, nme, score);
+        }
+        if (score > max_score) {
+            max_score = score;
             optimal_k = k + 1;
         }
     }
-    LOG_INFO("SpCluster", "Optimal K=%d (max_gap_score=%.6f)", optimal_k, max_gap_score);
+    LOG_INFO("SpCluster", "Optimal K=%d (max_score=%.6f)", optimal_k, max_score);
     return std::max(cfg_min_k, std::min(optimal_k, cfg_max_k));
 }
 

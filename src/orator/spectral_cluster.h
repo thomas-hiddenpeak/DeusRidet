@@ -35,6 +35,10 @@ struct SpectralClusterConfig {
     int   power_iters      = 300;     // power iteration steps
     int   smooth_window    = 1;       // temporal smoothing window
     int   smooth_iters     = 3;       // max smoothing passes
+    // K-selection criterion:
+    //   0 = nme+rel_gap (legacy, biased toward small K)
+    //   1 = eigenvalue-ratio λ[k]/λ[k+1] (parameter-free; argmax over k≥1)
+    int   k_selection_mode = 0;
 };
 
 struct ClusterResult {

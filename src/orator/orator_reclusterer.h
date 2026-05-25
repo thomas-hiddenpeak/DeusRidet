@@ -67,6 +67,7 @@ struct OratorReclustererConfig {
     int    global_id_base  = 1000;    // first id assigned by the reclusterer (avoid collision with online ids)
     float  global_merge_threshold = -1.0f;  // cos sim above which two globals are merged into one (≤0 to disable)
     float  global_merge_support_ratio = 0.5f; // only merge if min_support <= ratio * max_support (protects mixed clusters)
+    int    k_selection_mode = 0;      // 0=nme+rel_gap (legacy); 1=eigenvalue ratio (parameter-free, recommended)
 };
 
 // Internal book-keeping for a persistent speaker identity discovered by the

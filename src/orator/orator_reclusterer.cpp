@@ -138,6 +138,7 @@ int OratorReclusterer::run_pass(double now_sec) {
     sc.power_iters      = 300;
     sc.smooth_window    = 1;
     sc.smooth_iters     = 3;
+    sc.k_selection_mode = cfg_.k_selection_mode;
 
     ClusterResult cr = spectral_cluster(X, ts, dim, sc);
     if (cr.K <= 0 || static_cast<int>(cr.labels.size()) != N) return 0;

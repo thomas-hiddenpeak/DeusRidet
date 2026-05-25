@@ -186,6 +186,7 @@ int main(int argc, char** argv) {
     int    max_segments = 300;
     bool   force_final = true;     // run a final force_run after stream ends
     bool   diag = false;
+    int    k_mode = 0;             // 0=nme (legacy), 1=eigenvalue ratio
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -204,6 +205,7 @@ int main(int argc, char** argv) {
         else if (a == "--max-segs") nexti(max_segments);
         else if (a == "--no-final-force") force_final = false;
         else if (a == "--diag") diag = true;
+        else if (a == "--k-mode") nexti(k_mode);
         else {
             std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
             return 2;
@@ -234,6 +236,7 @@ int main(int argc, char** argv) {
     cfg.centroid_ema    = centroid_ema;
     cfg.global_id_base  = 1000;
     cfg.global_merge_threshold = merge_threshold;
+    cfg.k_selection_mode = k_mode;
 
     dr::OratorReclusterer rec(cfg);
 
@@ -354,10 +357,10 @@ int main(int argc, char** argv) {
                 "\"n_scored\":%zu,\"n_uncommitted\":%d,\"n_events\":%d,"
                 "\"end_sec\":%.1f,\"window_sec\":%.1f,\"interval_sec\":%.1f,"
                 "\"min_k\":%d,\"max_k\":%d,\"link_threshold\":%.3f,"
-                "\"ema\":%.3f,\"merge_thr\":%.3f}\n",
+                "\"ema\":%.3f,\"merge_thr\":%.3f,\"k_mode\":%d}\n",
                 M.macro_f1, M.K_pred, M.K_used, fx.n_speakers,
                 pred_v.size(), n_uncommitted, n_events_total,
                 end_sec, window_sec, interval_sec, min_k, max_k, link_threshold,
-                centroid_ema, merge_threshold);
+                centroid_ema, merge_threshold, k_mode);
     return 0;
 }

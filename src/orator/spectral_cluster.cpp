@@ -58,7 +58,7 @@ ClusterResult spectral_cluster(
     laplacian_eigendecomp(sim, N, actual_max, cfg.power_iters, eigvecs, eigvals);
 
     // Step 5 — eigengap K-selection.
-    const int optimal_k = select_k_by_eigengap(eigvals, actual_max, cfg.min_k, cfg.max_k);
+    const int optimal_k = select_k_by_eigengap(eigvals, actual_max, cfg.min_k, cfg.max_k, cfg.k_selection_mode);
 
     // Step 6 — K-means++ on spectral features with multi-restart.
     auto labels = kmeans_pp_spectral(

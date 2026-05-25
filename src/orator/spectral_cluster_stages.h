@@ -73,12 +73,15 @@ void laplacian_eigendecomp(
     std::vector<std::vector<float>>& eigvecs_out,
     std::vector<float>& eigvals_out);
 
-// Step 5: choose K by the largest gap-score (NME + relative gap).
+// Step 5: choose K. mode=0 picks the largest (nme + rel_gap) score (legacy,
+// biased toward small K). mode=1 picks K = 1 + argmax_{k≥1} λ[k]/λ[k+1]
+// (eigenvalue-ratio, parameter-free).
 int select_k_by_eigengap(
     const std::vector<float>& eigvals,
     int actual_max,
     int cfg_min_k,
-    int cfg_max_k);
+    int cfg_max_k,
+    int mode = 0);
 
 // Step 6: K-means++ on spectral features; multi-restart keeps the lowest-
 // inertia labelling.
