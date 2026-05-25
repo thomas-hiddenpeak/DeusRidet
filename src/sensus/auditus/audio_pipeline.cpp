@@ -196,14 +196,25 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
                                                  rc.link_threshold);
             rc.centroid_ema    = env_float_local("DEUSRIDET_RECLUSTERER_EMA",
                                                  rc.centroid_ema);
+            // Phase 10 — opt-in global K-cap via env (no config-file knob yet
+            // because production does not know K_gt; this lever exists for
+            // controlled evaluation and end-to-end relabel-event smoke tests).
+            {
+                const char* mg = std::getenv("DEUSRIDET_RECLUSTERER_MAX_GLOBALS");
+                if (mg && *mg) {
+                    try { rc.max_global_speakers = std::stoi(mg); }
+                    catch (...) { /* leave at default -1 */ }
+                }
+            }
             reclusterer_ = std::make_unique<orator::OratorReclusterer>(rc);
             LOG_INFO("AudioPipe",
                      "OratorReclusterer enabled: window=%.1fs interval=%.1fs "
-                     "min/max segs=%d/%d k=[%d,%d] link=%.2f ema=%.2f",
+                     "min/max segs=%d/%d k=[%d,%d] link=%.2f ema=%.2f kc=%d",
                      rc.window_sec, rc.interval_sec,
                      rc.min_segments, rc.max_segments,
                      rc.min_k, rc.max_k,
-                     (double)rc.link_threshold, (double)rc.centroid_ema);
+                     (double)rc.link_threshold, (double)rc.centroid_ema,
+                     rc.max_global_speakers);
         } else if (enable && !use_dual_encoder_) {
             LOG_WARN("AudioPipe",
                      "OratorReclusterer requested but dual encoder unavailable — skipped");
