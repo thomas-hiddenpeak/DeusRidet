@@ -64,14 +64,28 @@ ClusterResult spectral_cluster(
     auto labels = kmeans_pp_spectral(
         eigvecs, N, optimal_k, cfg.kmeans_restarts, cfg.kmeans_iters);
 
+    // Step 6b (Phase 8) — purity post-filter: split contaminated clusters
+    // in ORIGINAL embedding space. No-op when cfg.purity_split_enable=false.
+    int active_k = optimal_k;
+    if (cfg.purity_split_enable) {
+        active_k = purity_split_clusters(
+            labels, optimal_k,
+            embeddings, dim,
+            cfg.purity_min_cluster_size,
+            cfg.purity_min_mean_cos,
+            cfg.purity_accept_max_subsim,
+            cfg.purity_split_kmeans_iters,
+            cfg.purity_split_kmeans_restarts);
+    }
+
     // Step 7 — temporal smoothing (majority vote guarded by centroid similarity).
     temporal_smooth(
-        labels, N, optimal_k, pca_emb, pca_dim,
+        labels, N, active_k, pca_emb, pca_dim,
         timestamps_sec, cfg.smooth_window, cfg.smooth_iters);
 
     // Step 8 — centroids in ORIGINAL (pre-PCA) space, L2-normed.
     ClusterResult result;
-    result.K = optimal_k;
+    result.K = active_k;
     result.labels = std::move(labels);
     std::vector<int> ccnt;
     compute_original_centroids(result, embeddings, dim, ccnt);

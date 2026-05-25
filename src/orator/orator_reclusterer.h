@@ -68,6 +68,17 @@ struct OratorReclustererConfig {
     float  global_merge_threshold = -1.0f;  // cos sim above which two globals are merged into one (≤0 to disable)
     float  global_merge_support_ratio = 0.5f; // only merge if min_support <= ratio * max_support (protects mixed clusters)
     int    k_selection_mode = 0;      // 0=nme+rel_gap (legacy); 1=eigenvalue ratio (parameter-free, recommended)
+
+    // Phase 8 — per-cluster purity post-filter forwarded to SpectralClusterConfig.
+    // When ON: clusters whose mean intra-member cosine to their centroid is
+    // below `purity_min_mean_cos` are re-clustered into K=2 in original
+    // embedding space; the split is accepted iff cos(c0,c1) < accept_max_subsim.
+    bool   purity_split_enable          = false;
+    int    purity_min_cluster_size      = 8;
+    float  purity_min_mean_cos          = 0.60f;
+    float  purity_accept_max_subsim     = 0.85f;
+    int    purity_split_kmeans_iters    = 25;
+    int    purity_split_kmeans_restarts = 4;
 };
 
 // Internal book-keeping for a persistent speaker identity discovered by the

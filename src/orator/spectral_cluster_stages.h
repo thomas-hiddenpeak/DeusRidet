@@ -92,6 +92,25 @@ std::vector<int> kmeans_pp_spectral(
     int kmeans_restarts,
     int kmeans_iters);
 
+// Step 6b (Phase 8): per-cluster purity post-filter. For every cluster
+// whose member count ≥ min_cluster_size and whose mean intra-cluster
+// cosine to the L2-normed original-space centroid is below
+// `min_mean_cos`, run a K=2 K-means++ on its members in original
+// embedding space. The split is accepted iff the resulting two
+// sub-centroids satisfy cos(c0,c1) < `accept_max_subsim`. Accepted
+// splits append a new label (current_K, then K+=1) and update `labels`
+// in place. Returns the new K.
+int purity_split_clusters(
+    std::vector<int>& labels,
+    int current_k,
+    const std::vector<std::vector<float>>& embeddings,
+    int dim,
+    int min_cluster_size,
+    float min_mean_cos,
+    float accept_max_subsim,
+    int split_kmeans_iters,
+    int split_kmeans_restarts);
+
 // Step 7: majority-vote smoothing by temporal neighbour, guarded by a
 // centroid-similarity confirmation (in place).
 void temporal_smooth(

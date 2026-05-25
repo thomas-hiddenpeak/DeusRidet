@@ -187,6 +187,9 @@ int main(int argc, char** argv) {
     bool   force_final = true;     // run a final force_run after stream ends
     bool   diag = false;
     int    k_mode = 0;             // 0=nme (legacy), 1=eigenvalue ratio
+    bool   purity = false;         // Phase 8 — purity post-filter
+    double purity_min_cos = 0.60;
+    double purity_max_subsim = 0.85;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -206,6 +209,9 @@ int main(int argc, char** argv) {
         else if (a == "--no-final-force") force_final = false;
         else if (a == "--diag") diag = true;
         else if (a == "--k-mode") nexti(k_mode);
+        else if (a == "--purity") purity = true;
+        else if (a == "--purity-min-cos")    next(purity_min_cos);
+        else if (a == "--purity-max-subsim") next(purity_max_subsim);
         else {
             std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
             return 2;
@@ -237,6 +243,9 @@ int main(int argc, char** argv) {
     cfg.global_id_base  = 1000;
     cfg.global_merge_threshold = merge_threshold;
     cfg.k_selection_mode = k_mode;
+    cfg.purity_split_enable      = purity;
+    cfg.purity_min_mean_cos      = float(purity_min_cos);
+    cfg.purity_accept_max_subsim = float(purity_max_subsim);
 
     dr::OratorReclusterer rec(cfg);
 
@@ -357,10 +366,11 @@ int main(int argc, char** argv) {
                 "\"n_scored\":%zu,\"n_uncommitted\":%d,\"n_events\":%d,"
                 "\"end_sec\":%.1f,\"window_sec\":%.1f,\"interval_sec\":%.1f,"
                 "\"min_k\":%d,\"max_k\":%d,\"link_threshold\":%.3f,"
-                "\"ema\":%.3f,\"merge_thr\":%.3f,\"k_mode\":%d}\n",
+                "\"ema\":%.3f,\"merge_thr\":%.3f,\"k_mode\":%d,"
+                "\"purity\":%d}\n",
                 M.macro_f1, M.K_pred, M.K_used, fx.n_speakers,
                 pred_v.size(), n_uncommitted, n_events_total,
                 end_sec, window_sec, interval_sec, min_k, max_k, link_threshold,
-                centroid_ema, merge_threshold, k_mode);
+                centroid_ema, merge_threshold, k_mode, purity ? 1 : 0);
     return 0;
 }

@@ -254,4 +254,177 @@ std::vector<int> kmeans_pp_spectral(
     return labels;
 }
 
+// ===== Step 6b (Phase 8): per-cluster purity post-filter =====
+// Splits contaminated clusters (low mean intra-cluster cosine) by running
+// a K=2 K-means++ on members in the ORIGINAL embedding space. The split
+// is accepted only when the two sub-centroids are far enough apart.
+//
+// All distance work happens on unit-norm vectors, so squared Euclidean
+// distance and cosine distance differ by a constant factor — we use
+// squared Euclidean for the K-means loop and cosine for the acceptance
+// gate (more interpretable).
+int purity_split_clusters(
+    std::vector<int>& labels,
+    int current_k,
+    const std::vector<std::vector<float>>& embeddings,
+    int dim,
+    int min_cluster_size,
+    float min_mean_cos,
+    float accept_max_subsim,
+    int split_kmeans_iters,
+    int split_kmeans_restarts)
+{
+    const int N = (int)labels.size();
+    if (N <= 0 || current_k <= 0 || dim <= 0) return current_k;
+
+    int K = current_k;
+    int splits_done = 0;
+
+    // Snapshot the original label set so we never recursively split a
+    // cluster we just produced this pass.
+    const int original_k = current_k;
+
+    for (int c = 0; c < original_k; ++c) {
+        // Gather members of cluster c.
+        std::vector<int> members;
+        members.reserve(N);
+        for (int i = 0; i < N; ++i) if (labels[i] == c) members.push_back(i);
+        const int M = (int)members.size();
+        if (M < min_cluster_size) continue;
+
+        // L2-normed centroid in original space.
+        std::vector<float> centroid(dim, 0.0f);
+        for (int idx : members) {
+            const auto& e = embeddings[idx];
+            for (int d = 0; d < dim; ++d) centroid[d] += e[d];
+        }
+        float cnorm = 0.0f;
+        for (int d = 0; d < dim; ++d) cnorm += centroid[d] * centroid[d];
+        cnorm = 1.0f / sqrtf(cnorm + 1e-12f);
+        for (int d = 0; d < dim; ++d) centroid[d] *= cnorm;
+
+        // Mean cosine of members to centroid (members already L2-normed).
+        float sum_cos = 0.0f;
+        for (int idx : members) {
+            const auto& e = embeddings[idx];
+            float s = 0.0f;
+            for (int d = 0; d < dim; ++d) s += e[d] * centroid[d];
+            sum_cos += s;
+        }
+        float mean_cos = sum_cos / (float)M;
+        if (mean_cos >= min_mean_cos) continue;  // cluster is tight; skip.
+
+        // ── K=2 K-means++ on member original embeddings, multi-restart ──
+        std::vector<int> best_sub(M, 0);
+        float best_inertia = 1e30f;
+        std::vector<float> best_c0(dim, 0.0f), best_c1(dim, 0.0f);
+
+        for (int restart = 0; restart < split_kmeans_restarts; ++restart) {
+            // K-means++ init: first centroid = deterministic per-restart pick.
+            int i0 = (restart * 1009) % M;
+            std::vector<float> c0(dim), c1(dim);
+            for (int d = 0; d < dim; ++d) c0[d] = embeddings[members[i0]][d];
+
+            // Second centroid = farthest member from c0 (deterministic).
+            int i1 = i0;
+            float far_d = -1.0f;
+            for (int m = 0; m < M; ++m) {
+                const auto& e = embeddings[members[m]];
+                float d2 = 0.0f;
+                for (int d = 0; d < dim; ++d) {
+                    float diff = e[d] - c0[d];
+                    d2 += diff * diff;
+                }
+                if (d2 > far_d) { far_d = d2; i1 = m; }
+            }
+            for (int d = 0; d < dim; ++d) c1[d] = embeddings[members[i1]][d];
+
+            std::vector<int> sub(M, 0);
+            for (int iter = 0; iter < split_kmeans_iters; ++iter) {
+                int changed = 0;
+                // Assign.
+                for (int m = 0; m < M; ++m) {
+                    const auto& e = embeddings[members[m]];
+                    float d0 = 0.0f, d1 = 0.0f;
+                    for (int d = 0; d < dim; ++d) {
+                        float a = e[d] - c0[d];
+                        float b = e[d] - c1[d];
+                        d0 += a * a;
+                        d1 += b * b;
+                    }
+                    int chosen = (d0 <= d1) ? 0 : 1;
+                    if (chosen != sub[m]) ++changed;
+                    sub[m] = chosen;
+                }
+
+                // Update (L2-normed centroids — embeddings are unit vectors).
+                std::fill(c0.begin(), c0.end(), 0.0f);
+                std::fill(c1.begin(), c1.end(), 0.0f);
+                int n0 = 0, n1 = 0;
+                for (int m = 0; m < M; ++m) {
+                    const auto& e = embeddings[members[m]];
+                    if (sub[m] == 0) {
+                        for (int d = 0; d < dim; ++d) c0[d] += e[d];
+                        ++n0;
+                    } else {
+                        for (int d = 0; d < dim; ++d) c1[d] += e[d];
+                        ++n1;
+                    }
+                }
+                auto renorm = [&](std::vector<float>& v) {
+                    float nrm = 0.0f;
+                    for (int d = 0; d < dim; ++d) nrm += v[d] * v[d];
+                    nrm = 1.0f / sqrtf(nrm + 1e-12f);
+                    for (int d = 0; d < dim; ++d) v[d] *= nrm;
+                };
+                if (n0 > 0) renorm(c0);
+                if (n1 > 0) renorm(c1);
+                if (changed == 0) break;
+            }
+
+            // Inertia (squared-Euclidean to chosen centroid).
+            float inertia = 0.0f;
+            for (int m = 0; m < M; ++m) {
+                const auto& e = embeddings[members[m]];
+                const auto& cc = (sub[m] == 0) ? c0 : c1;
+                for (int d = 0; d < dim; ++d) {
+                    float diff = e[d] - cc[d];
+                    inertia += diff * diff;
+                }
+            }
+            if (inertia < best_inertia) {
+                best_inertia = inertia;
+                best_sub = sub;
+                best_c0 = c0;
+                best_c1 = c1;
+            }
+        }
+
+        // Acceptance gate: sub-centroid cosine must be < accept_max_subsim.
+        float sub_cos = 0.0f;
+        for (int d = 0; d < dim; ++d) sub_cos += best_c0[d] * best_c1[d];
+        if (sub_cos >= accept_max_subsim) continue;  // not actually 2 spks.
+
+        // Guard against degenerate splits (all-on-one-side).
+        int n0 = 0, n1 = 0;
+        for (int s : best_sub) { if (s == 0) ++n0; else ++n1; }
+        if (n0 == 0 || n1 == 0) continue;
+
+        // Commit split: side 0 keeps label c, side 1 becomes new label K.
+        const int new_label = K;
+        for (int m = 0; m < M; ++m) {
+            if (best_sub[m] == 1) labels[members[m]] = new_label;
+        }
+        ++K;
+        ++splits_done;
+    }
+
+    if (splits_done > 0) {
+        LOG_INFO("SpCluster",
+                 "purity_split: %d cluster(s) split; K: %d -> %d",
+                 splits_done, current_k, K);
+    }
+    return K;
+}
+
 } // namespace deusridet::spectral_detail

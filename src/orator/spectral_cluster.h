@@ -39,6 +39,25 @@ struct SpectralClusterConfig {
     //   0 = nme+rel_gap (legacy, biased toward small K)
     //   1 = eigenvalue-ratio λ[k]/λ[k+1] (parameter-free; argmax over k≥1)
     int   k_selection_mode = 0;
+
+    // Phase 8 — per-cluster purity post-filter.
+    // After K-means (Step 6), each cluster c with at least
+    // `purity_min_cluster_size` members has its members' cosine to the
+    // L2-normed cluster centroid (in ORIGINAL embedding space) measured.
+    // A cluster is considered contaminated when
+    //   mean(member·centroid) < purity_min_mean_cos
+    // We then run a K=2 K-means++ on the cluster's original-space
+    // embeddings; the split is accepted only when the resulting two
+    // sub-centroids have cosine < `purity_accept_max_subsim` (i.e. they
+    // are far enough apart to really be two speakers).
+    // Default OFF so existing eval baseline (s1800=0.7935 /
+    // full_60m=0.7025 with W=180) is byte-identical until opt-in.
+    bool  purity_split_enable          = false;
+    int   purity_min_cluster_size      = 8;
+    float purity_min_mean_cos          = 0.60f;
+    float purity_accept_max_subsim     = 0.85f;
+    int   purity_split_kmeans_iters    = 25;
+    int   purity_split_kmeans_restarts = 4;
 };
 
 struct ClusterResult {

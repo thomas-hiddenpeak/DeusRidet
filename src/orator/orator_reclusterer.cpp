@@ -140,6 +140,14 @@ int OratorReclusterer::run_pass(double now_sec) {
     sc.smooth_iters     = 3;
     sc.k_selection_mode = cfg_.k_selection_mode;
 
+    // Phase 8 — purity post-filter pass-through.
+    sc.purity_split_enable          = cfg_.purity_split_enable;
+    sc.purity_min_cluster_size      = cfg_.purity_min_cluster_size;
+    sc.purity_min_mean_cos          = cfg_.purity_min_mean_cos;
+    sc.purity_accept_max_subsim     = cfg_.purity_accept_max_subsim;
+    sc.purity_split_kmeans_iters    = cfg_.purity_split_kmeans_iters;
+    sc.purity_split_kmeans_restarts = cfg_.purity_split_kmeans_restarts;
+
     ClusterResult cr = spectral_cluster(X, ts, dim, sc);
     if (cr.K <= 0 || static_cast<int>(cr.labels.size()) != N) return 0;
 
