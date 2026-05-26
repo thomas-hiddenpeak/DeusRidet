@@ -32,6 +32,64 @@ Tech-dynamics (the pull toward "shortest path") is the primary enemy.
 When in doubt, prefer the solution that honors philosophy over the one
 that honors convenience.
 
+## Accuracy Is the Sole Metric (Constitutional, 2026-05-26)
+
+For every behavioural decision in DeusRidet — speaker identification,
+diarisation, ASR, dialogue understanding, persona coherence, dream
+consolidation, tool selection — **the user-facing accuracy on the
+canonical live fixture (tests/test.mp3 + tests/fixtures/test_ground_truth.json
+through the full `awaken` pipeline) is the only metric that decides
+whether a change is an improvement.**
+
+**Definition of accuracy.** For each task, accuracy is the fraction of
+GT-annotated units (utterances, speaker turns, named entities, intents)
+that the live system labels with the ground-truth value, under the
+best one-to-one mapping between predicted ids and GT identities. The
+unit and the mapping rule are stated explicitly in the devlog entry
+that reports the number. No other framing is admissible as the primary
+verdict.
+
+**Banned as primary metrics** (they may exist in scripts and internal
+logs, never as the basis of a ship/no-ship or default-flip decision):
+
+- macro-F1, micro-F1, weighted-F1, NMI, ARI, DER, JER, WER on any
+  non-canonical slice or fixture.
+- K_pred / K_pred_final, abstain%, top-id-share, id_distribution,
+  cluster purity, eigengap, NME, fuzzy string match, edit distance.
+- Cosine similarity, intra-cluster distance, "macro on s1800",
+  "macro on fused.bin", and anything else that bypasses the live
+  audio pipeline.
+- Latency, throughput, peak VmRSS — these are real physical
+  quantities, but they only constrain *whether* a change is viable;
+  they cannot certify a change as an improvement. Accuracy decides
+  improvement; physical quantities decide feasibility.
+
+**Mandatory format for any change that claims to improve a
+behavioural subsystem.** The commit message and devlog entry must
+both contain a line of the form:
+
+```
+accuracy(tests/test.mp3, <task>): <before>% → <after>%   (Δ = ±X.X pp)
+```
+
+If no such line is present, the change is not an improvement; it is
+either a refactor, a feasibility fix, or unverified.
+
+**What this rule rules out.** Optimising a metric that is not on this
+list because "it is easier to measure", "it correlates with accuracy
+on a fixture", or "the paper used it". Every recent example of
+negative optimisation in this repository — most starkly the
+reclusterer default-flip from OFF to ON, justified by macro_f1
+0.5476 → 0.7025 on a fused fixture while live accuracy went from
+~25% to 0% — is a direct violation of this rule applied in reverse.
+The rule is written so the next instance is caught at the commit
+message, not three weeks later.
+
+**The instruction-file hierarchy.** When any other instruction file
+(workflow, benchmarks, cpp, cuda, webui, docs) appears to conflict
+with this rule, this rule wins. The other files describe *how* to
+work; this rule describes *what counts as work*.
+
 ## Compute Belongs on the GPU
 
 The Orin has ~192 GB/s of GPU memory bandwidth and thousands of CUDA

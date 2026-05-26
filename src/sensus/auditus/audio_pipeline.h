@@ -287,11 +287,23 @@ struct AudioPipelineConfig {
     // the tentative online id, a RelabelEvent is logged (and, in a
     // future revision, surfaced as a Nexus `speaker_relabel` WS event
     // so the WebUI timeline can be patched in place).
-    // Phase 6 (2026-05-25): window_sec lowered to 180s lifted macro_f1
-    // from 0.5476 → 0.7025 on the full 60-min fused fixture (auto-K),
-    // crossing the "可用" bar. Default flipped to ON.
-    // Env override: DEUSRIDET_RECLUSTERER_ENABLE=0 disables; =1 enables.
-    bool  speaker_reclusterer_enable        = true;
+    // 2026-05-26 — DEFAULT FLIPPED BACK TO OFF.
+    //
+    // The previous flip to ON was justified by a fixture-based macro_f1
+    // jump (0.5476 → 0.7025 on the fused 60-min fixture). On the live
+    // pipeline against tests/test.mp3 + ground_truth.json, however,
+    // every reclusterer config (LINK_THRESH ∈ {0.55, 0.60, 0.65, 0.70,
+    // 0.75}) collapses all 4 GT speakers into a single global id —
+    // 4-way speaker-attribution accuracy = 0%. With the reclusterer
+    // OFF, the same audio yields 25.4% best-mapping accuracy and the
+    // 4 speakers occupy 4 distinct raw ids. The reclusterer is
+    // therefore strictly destructive on multi-speaker meeting audio
+    // until its run_pass collapse mechanism is found and fixed.
+    // See docs/{en,zh}/devlog/2026-05-27.md "Layer 2c" for the live
+    // numbers and the constitutional rule that mandated this revert
+    // (accuracy on tests/test.mp3 is the sole metric).
+    // Env override: DEUSRIDET_RECLUSTERER_ENABLE=1 re-enables.
+    bool  speaker_reclusterer_enable        = false;
     float speaker_reclusterer_window_sec    = 180.0f;
     float speaker_reclusterer_interval_sec  = 30.0f;
     float speaker_reclusterer_link_threshold = 0.55f;

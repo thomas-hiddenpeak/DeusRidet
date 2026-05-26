@@ -74,6 +74,25 @@ perceives, thinks, dreams, and speaks on its own terms, on a single Orin.
    not the system, and MUST NOT influence defaults or ship calls.
    Historical fixture-only verdicts are `⚠️ unverified` until
    re-tested under this rule.
+9. **Accuracy is the sole metric (Constitutional, 2026-05-26).**
+   The only number that decides whether a change to a behavioural
+   subsystem is an improvement is the live-system accuracy on
+   `tests/test.mp3` measured against
+   `tests/fixtures/test_ground_truth.json` under best one-to-one
+   mapping between predicted ids and GT identities. Every commit
+   that claims an improvement MUST contain a line of the form
+   `accuracy(tests/test.mp3, <task>): <before>% → <after>% (Δ = ±X.X pp)`.
+   No commit message that lacks this line is allowed to ship a
+   default-value flip or a "phase positive" verdict. Banned as
+   primary metrics: macro-F1, micro-F1, NMI, ARI, DER, JER, WER on
+   non-canonical slices; K_pred, abstain%, top-share, eigengap, NME;
+   cosine similarities, intra-cluster distances; any "macro on
+   sNNNN" or "macro on fused.bin" framing. Latency / memory /
+   throughput remain real, but they only gate **feasibility**, never
+   improvement. The reclusterer default-flip of 2026-05-25 (macro_f1
+   0.5476→0.7025 on a fused fixture, live accuracy 25%→0%) is the
+   case study this rule was written against. Full text in
+   [philosophy.instructions.md](instructions/philosophy.instructions.md).
 
 ## Model Residency Budget Guardrail
 
