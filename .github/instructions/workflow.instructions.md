@@ -21,6 +21,41 @@ runs, or at minimum has no syntax errors).
 
 No exceptions. Every invocation, not just the first one.
 
+## Semantic Evaluation, Not Scripted Scoring
+
+Whenever the question being asked is "is the system behaving correctly?" —
+diarization quality, speaker attribution, ASR meaning preservation,
+persona coherence, dialogue understanding, dream consolidation outcome,
+or any other judgement that hinges on **meaning** — the evaluation must
+be performed by the agent reading the artefacts directly, not by a
+script computing a similarity number.
+
+Rules:
+
+1. **Scripts are mechanical only.** Capture, deterministic patching
+   (e.g. applying a forward-map from `speaker_relabel` events with the
+   same logic as the WebUI), time-window alignment, and rendering a
+   human-readable report are allowed. **Computing macro-F1, fuzzy
+   string matching, edit-distance scoring, or any "auto-judged
+   correctness number" is forbidden in this phase.**
+2. **The agent reads the full output.** A pairing report of the form
+   `[t_start–t_end] pred=<id> GT=<name> "<utterance text>"` is read
+   top-to-bottom by the agent, and conclusions are organised as
+   *pattern → evidence → suspected cause → candidate intervention*.
+3. **Why this matters.** String/cluster-ID matching cannot capture
+   semantic correctness — a 2-second interjection mis-assigned to the
+   dominant speaker may score "almost correct" by F1 yet completely
+   destroy meaning; a perfectly clustered run on one slice may be a
+   local optimum that does not generalise. Local optima do not
+   transfer; only patterns visible to a reader generalise to the
+   production loop.
+4. **Numeric scores are only acceptable** when (a) the metric is a
+   true ground-truth physical quantity (latency in ms, peak VmRSS in
+   MB, tokens/s, kernel µs) or (b) the metric is bit-equality against
+   a deterministic baseline (e.g. GPU vs CPU spectral clustering
+   producing identical labels on a fixed seed). Anything resembling
+   "quality score" goes through the agent's eyes.
+
 ## Post-Change Verification (mandatory after every build-affecting change)
 
 1. Build: `cd build && make -j$(nproc)`

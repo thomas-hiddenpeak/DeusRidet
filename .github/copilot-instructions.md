@@ -50,6 +50,18 @@ perceives, thinks, dreams, and speaks on its own terms, on a single Orin.
    message or as a code comment. Local optima found by CPU prototypes
    do not transfer to the GPU production path; do not waste cycles
    tuning a CPU implementation that is destined to be replaced.
+7. **Semantic correctness goes through the agent's eyes, not a
+   similarity score.** For any judgement that hinges on meaning
+   (diarization, speaker attribution, ASR fidelity, persona coherence,
+   dream consolidation, dialogue understanding), scripts may only
+   capture, deterministically patch, time-align, and render
+   human-readable reports. Macro-F1, fuzzy string matching, edit
+   distance and any "auto-judged correctness number" are forbidden in
+   that phase — the agent reads the full output and reports
+   *pattern → evidence → suspected cause → candidate intervention*.
+   Numeric scores are reserved for true physical quantities (latency,
+   memory, throughput) and deterministic bit-equality checks. Full
+   rules in [workflow.instructions.md](instructions/workflow.instructions.md).
 
 ## Model Residency Budget Guardrail
 
