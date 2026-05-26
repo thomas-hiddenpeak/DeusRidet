@@ -44,13 +44,24 @@ std::vector<std::vector<float>> pca_reduce(
 
 // Step 1 (+ optional 1b temporal mixing): cosine similarity matrix.
 // Returns a symmetric N×N matrix stored row-major.
+//
+// Phase 14 — when `affinity_weighted` is true and `weights` has length N,
+// each off-diagonal sim[i,j] is scaled by
+//     sqrt( min(1, w_i / affinity_dur_ref) * min(1, w_j / affinity_dur_ref) )
+// so that short segments (durations below the reference) contribute
+// proportionally less to the affinity graph. Symmetry is preserved.
+// When `affinity_weighted` is false or `weights` is empty, behaviour is
+// byte-identical to the pre-Phase-14 path.
 std::vector<float> build_similarity(
     const std::vector<std::vector<float>>& pca_emb,
     int pca_dim,
     int N,
     const std::vector<float>& timestamps_sec,
     float temporal_alpha,
-    float temporal_tau);
+    float temporal_tau,
+    const std::vector<float>& weights = {},
+    bool  affinity_weighted = false,
+    float affinity_dur_ref = 1.5f);
 
 // Step 2: keep only the top-p neighbours per row (in place).
 void p_prune(std::vector<float>& sim, int N, float p_prune_ratio);

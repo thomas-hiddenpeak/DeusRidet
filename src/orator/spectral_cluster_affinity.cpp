@@ -130,7 +130,10 @@ std::vector<float> build_similarity(
     int N,
     const std::vector<float>& timestamps_sec,
     float temporal_alpha,
-    float temporal_tau)
+    float temporal_tau,
+    const std::vector<float>& weights,
+    bool  affinity_weighted,
+    float affinity_dur_ref)
 {
     std::vector<float> sim(N * N, 0.0f);
     for (int i = 0; i < N; ++i) {
@@ -155,6 +158,33 @@ std::vector<float> build_similarity(
                 float combined = (1.0f - alpha) * sim[i * N + j] + alpha * t_prox;
                 sim[i * N + j] = combined;
                 sim[j * N + i] = combined;
+            }
+        }
+    }
+
+    // Phase 14 — reliability-weighted affinity.
+    // Apply AFTER temporal mixing so that the temporal-prox component is
+    // also discounted for short segments (those are the noisy ones).
+    // Diagonal is left at 1.0f — self-affinity is not a noise source.
+    const bool use_reliability =
+        affinity_weighted &&
+        (int)weights.size() == N &&
+        affinity_dur_ref > 0.0f;
+    if (use_reliability) {
+        const float inv_ref = 1.0f / affinity_dur_ref;
+        std::vector<float> w(N);
+        for (int i = 0; i < N; ++i) {
+            float wi = weights[i] * inv_ref;
+            if (wi > 1.0f) wi = 1.0f;
+            if (wi < 0.0f) wi = 0.0f;
+            w[i] = wi;
+        }
+        for (int i = 0; i < N; ++i) {
+            for (int j = i + 1; j < N; ++j) {
+                float scale = sqrtf(w[i] * w[j]);
+                float v = sim[i * N + j] * scale;
+                sim[i * N + j] = v;
+                sim[j * N + i] = v;
             }
         }
     }

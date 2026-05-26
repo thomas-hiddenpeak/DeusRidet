@@ -64,6 +64,22 @@ struct SpectralClusterConfig {
     // point contributes w_i to its assigned centroid (instead of 1).
     // No-op when OFF or when weights is empty.
     bool  length_weighted_enable       = false;
+
+    // Phase 14 — reliability-weighted affinity matrix.
+    // When ON and `weights` (per-segment durations, in seconds) is
+    // supplied, each off-diagonal sim[i,j] is scaled by
+    //     sqrt( min(1, w_i / affinity_dur_ref) *
+    //           min(1, w_j / affinity_dur_ref) )
+    // so that short (< affinity_dur_ref) segments contribute proportionally
+    // less to the affinity graph that drives the eigendecomposition and
+    // ultimately the K-means assignment. The Phase-13 audit showed that
+    // dur < 1.0 s segments dominate the error mass (~2× enrichment) yet
+    // their cosine to a clean centroid is the noisiest signal in the
+    // pipeline. This knob attacks the problem inside the affinity matrix
+    // rather than as a coarse post-pass.
+    // Default OFF so existing eval baseline is byte-identical until opt-in.
+    bool  affinity_weighted_enable     = false;
+    float affinity_dur_ref             = 1.5f;
 };
 
 struct ClusterResult {

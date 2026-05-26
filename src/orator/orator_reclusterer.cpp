@@ -158,6 +158,10 @@ int OratorReclusterer::run_pass(double now_sec) {
     // Phase 9 — length-weighted K-means pass-through.
     sc.length_weighted_enable = cfg_.length_weighted_enable;
 
+    // Phase 14 — reliability-weighted affinity pass-through.
+    sc.affinity_weighted_enable = cfg_.affinity_weighted_enable;
+    sc.affinity_dur_ref         = cfg_.affinity_dur_ref;
+
     ClusterResult cr = spectral_cluster(X, ts, dim, sc, weights);
     if (cr.K <= 0 || static_cast<int>(cr.labels.size()) != N) return 0;
 

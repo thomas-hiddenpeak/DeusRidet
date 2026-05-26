@@ -43,9 +43,18 @@ ClusterResult spectral_cluster(
     auto pca_emb = pca_reduce(embeddings, dim, pca_dim, cfg.power_iters);
 
     // Step 1 (+ 1b) — cosine similarity + optional temporal mixing.
+    // Phase 14 — when cfg.affinity_weighted_enable and a weights vector of
+    // matching length was provided, off-diagonal sims are scaled by
+    // sqrt(min(1, w_i/ref) * min(1, w_j/ref)) so that short segments
+    // contribute less to the affinity graph.
+    const bool use_aff_weights =
+        cfg.affinity_weighted_enable && (int)weights.size() == N;
     auto sim = build_similarity(
         pca_emb, pca_dim, N,
-        timestamps_sec, cfg.temporal_alpha, cfg.temporal_tau);
+        timestamps_sec, cfg.temporal_alpha, cfg.temporal_tau,
+        use_aff_weights ? weights : std::vector<float>{},
+        cfg.affinity_weighted_enable,
+        cfg.affinity_dur_ref);
 
     // Step 2 — p-pruning (keep top-p neighbours per row).
     p_prune(sim, N, cfg.p_prune_ratio);

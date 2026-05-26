@@ -192,6 +192,8 @@ int main(int argc, char** argv) {
     double purity_max_subsim = 0.85;
     bool   lenw = false;           // Phase 9 — length-weighted K-means
     int    max_globals = -1;       // Phase 10 — hard cap on global speakers (-1 disables)
+    bool   aff_weighted = false;   // Phase 14 — reliability-weighted affinity
+    double aff_dur_ref  = 1.5;     // Phase 14 — duration reference (s)
     std::string dump_pred_path;    // Phase 13 — write per-seg (gt,pred) JSONL
     double smooth_short_dur = 0.0; // Phase 13 — short-seg temporal smoothing dur threshold (s); 0=off
     int    smooth_neighbors = 8;   // Phase 13 — # of past+future neighbors to consult
@@ -220,6 +222,8 @@ int main(int argc, char** argv) {
         else if (a == "--purity-max-subsim") next(purity_max_subsim);
         else if (a == "--lenw") lenw = true;
         else if (a == "--max-globals") nexti(max_globals);
+        else if (a == "--aff-weighted") aff_weighted = true;
+        else if (a == "--aff-dur-ref") next(aff_dur_ref);
         else if (a == "--dump-pred" && i + 1 < argc) dump_pred_path = argv[++i];
         else if (a == "--smooth-short")     next(smooth_short_dur);
         else if (a == "--smooth-neighbors") nexti(smooth_neighbors);
@@ -260,6 +264,8 @@ int main(int argc, char** argv) {
     cfg.purity_accept_max_subsim = float(purity_max_subsim);
     cfg.length_weighted_enable   = lenw;
     cfg.max_global_speakers      = max_globals;
+    cfg.affinity_weighted_enable = aff_weighted;
+    cfg.affinity_dur_ref         = float(aff_dur_ref);
 
     dr::OratorReclusterer rec(cfg);
 

@@ -85,6 +85,15 @@ struct OratorReclustererConfig {
     // (t_end - t_start) to its assigned centroid in step 6.
     bool   length_weighted_enable       = false;
 
+    // Phase 14 — reliability-weighted affinity matrix (forwarded to
+    // SpectralClusterConfig). When ON, each off-diagonal sim[i,j] is
+    // scaled by sqrt(min(1, dur_i/ref) * min(1, dur_j/ref)) so that short
+    // segments contribute less to the eigendecomposition and K-means
+    // assignment. The Phase-13 audit identified dur < 1.0 s segments as
+    // the dominant error axis; this knob attacks them inside the graph.
+    bool   affinity_weighted_enable     = false;
+    float  affinity_dur_ref             = 1.5f;
+
     // Phase 10 — hard cap on the number of persistent globals. After the
     // cosine-merge pass, while globals_.size() > max_global_speakers we
     // collapse the global with the smallest support into its nearest
