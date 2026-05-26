@@ -33,6 +33,23 @@ perceives, thinks, dreams, and speaks on its own terms, on a single Orin.
    DRAM. Before adding or enabling any large allocation, state whether it is
    always-resident, env-gated, lazy, or offline-only, then update the
    bilingual Machina memory budget if residency changes.
+6. **GPU-first compute, CPU for orchestration only.** Any "main
+   computation" — tensor ops, batched array math, anything that scales
+   with N (segments, tokens, frames, embedding rows) or with N×D / N×N —
+   **must** run on GPU (cuBLAS / cuDNN / custom CUDA kernel). CPU is for
+   task scheduling, control flow, tiny host-side reductions (e.g.
+   sorting the top-8 eigenvalues, seeding a K-means++ farthest-point
+   init for determinism), and operations that genuinely cannot execute
+   on GPU (file I/O, external SDK calls, integer bookkeeping, problems
+   with N ≤ 32). Before writing a `for (auto& x : large_array)` or a
+   nested N² loop in `.cpp`, stop and ask: should this be a `.cu`
+   kernel? The default answer is **yes**. The only acceptable reasons
+   to keep it on CPU are (a) one-shot with tiny N, (b) a truly
+   non-parallelisable dependency chain, or (c) an external library with
+   no GPU entry point — and the reason must be stated in the commit
+   message or as a code comment. Local optima found by CPU prototypes
+   do not transfer to the GPU production path; do not waste cycles
+   tuning a CPU implementation that is destined to be replaced.
 
 ## Model Residency Budget Guardrail
 

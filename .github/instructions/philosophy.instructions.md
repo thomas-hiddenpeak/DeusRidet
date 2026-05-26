@@ -32,6 +32,42 @@ Tech-dynamics (the pull toward "shortest path") is the primary enemy.
 When in doubt, prefer the solution that honors philosophy over the one
 that honors convenience.
 
+## Compute Belongs on the GPU
+
+The Orin has ~192 GB/s of GPU memory bandwidth and thousands of CUDA
+cores; the eight Cortex-A78AE cores exist to schedule work, parse
+configs, and walk the occasional pointer. Whenever a piece of code
+touches a tensor, a batched array, an N×D embedding matrix, an N×N
+affinity, or any loop whose iteration count scales with the data, it
+**belongs on the GPU** — cuBLAS, cuDNN, or a hand-written kernel. The
+CPU is reserved for orchestration: choosing which kernel to launch,
+sequencing streams, reading files, talking to external libraries that
+have no GPU entry point, and host-side reductions that are genuinely
+tiny (N ≤ 32) or genuinely serial (e.g. a deterministic K-means++
+farthest-point seed used to bootstrap a GPU loop).
+
+Two failure modes follow directly from violating this:
+
+1. **The "it works on the CPU prototype" trap.** A CPU implementation
+   that hits a fixture target tells you nothing about how the same
+   algorithm will behave once it runs at production scale on the GPU,
+   with different floating-point accumulation order, different launch
+   batching, and different cache behaviour. Local optima found while
+   tuning a CPU draft do not transfer — they have to be re-found on
+   the GPU. Time spent tuning a CPU path destined for replacement is
+   pure waste.
+2. **The slow death by `for` loop.** A nested N² loop in a `.cpp` file
+   is the most innocuous-looking way to lose an order of magnitude of
+   throughput. Before writing one, stop and ask: should this be a
+   `.cu` kernel? The default answer is **yes**. If the answer is "no",
+   the reason must be stated in the commit message or as an inline
+   comment.
+
+When a job genuinely cannot run on the GPU, name the reason out loud:
+(a) one-shot operation with tiny N, (b) inherently serial dependency
+chain, or (c) external library with no GPU entry point. Anything else
+is technical debt waiting to be paid.
+
 ## Never Blame Hardware or Model
 
 When something doesn't work:
