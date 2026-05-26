@@ -14,11 +14,24 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 namespace deusridet::orator {
 
 namespace {
+
+// Phase 3b.1 — env-gated audit log of every reclusterer pass. When
+// `DEUSRIDET_RECLUSTERER_DEBUG=1` is set, run_pass() dumps the spectral
+// output, the global-vs-cluster cosine matrix, the Hungarian assignment,
+// and every merge action to stderr. Off by default (zero cost when off).
+bool debug_enabled() {
+    static const bool on = []() {
+        const char* v = std::getenv("DEUSRIDET_RECLUSTERER_DEBUG");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    return on;
+}
 
 void l2_normalise(std::vector<float>& v) {
     double s = 0.0;
@@ -170,6 +183,38 @@ int OratorReclusterer::run_pass(double now_sec) {
     const int K = cr.K;
     const auto& local_centroids = cr.centroids;
 
+    if (debug_enabled()) {
+        std::fprintf(stderr,
+            "\n[recluster-audit] === pass @ now=%.3fs  N=%d  K=%d  G=%zu ===\n",
+            now_sec, N, K, globals_.size());
+        // Per-cluster composition: list raw_id, segment_id, duration.
+        std::vector<int> sizes(K, 0);
+        std::vector<double> dur_sum(K, 0.0);
+        for (int i = 0; i < N; ++i) {
+            const int k = cr.labels[i];
+            if (k < 0 || k >= K) continue;
+            sizes[k] += 1;
+            dur_sum[k] += buffer_[i].seg.t_end_sec - buffer_[i].seg.t_start_sec;
+        }
+        for (int k = 0; k < K; ++k) {
+            std::fprintf(stderr,
+                "[recluster-audit]   cluster %d: size=%d dur=%.2fs members=[",
+                k, sizes[k], dur_sum[k]);
+            int printed = 0;
+            for (int i = 0; i < N; ++i) {
+                if (cr.labels[i] != k) continue;
+                if (printed > 0) std::fprintf(stderr, " ");
+                std::fprintf(stderr, "(seg=%llu raw=%d t=%.2f-%.2f)",
+                    static_cast<unsigned long long>(buffer_[i].seg.segment_id),
+                    buffer_[i].seg.tentative_speaker_id,
+                    buffer_[i].seg.t_start_sec,
+                    buffer_[i].seg.t_end_sec);
+                printed += 1;
+            }
+            std::fprintf(stderr, "]\n");
+        }
+    }
+
     // Hungarian match local clusters → existing globals.
     // Collect existing globals into a stable vector.
     std::vector<GlobalSpeaker*> globs;
@@ -191,6 +236,30 @@ int OratorReclusterer::run_pass(double now_sec) {
             }
         }
         auto assign = solve_assignment(cost, K, G);
+        if (debug_enabled()) {
+            std::fprintf(stderr,
+                "[recluster-audit]   cosine matrix (cluster x global):\n");
+            std::fprintf(stderr, "[recluster-audit]            ");
+            for (int g = 0; g < G; ++g) {
+                std::fprintf(stderr, " g%d(id=%d)  ", g, globs[g]->id);
+            }
+            std::fprintf(stderr, "\n");
+            for (int k = 0; k < K; ++k) {
+                std::fprintf(stderr, "[recluster-audit]   k=%d:    ", k);
+                for (int g = 0; g < G; ++g) {
+                    const float sim = 1.0f - static_cast<float>(cost[k * G + g]);
+                    const bool mark = (assign[k] == g);
+                    std::fprintf(stderr, "%s%.4f%s  ",
+                        mark ? "[" : " ",
+                        sim,
+                        mark ? "]" : " ");
+                }
+                std::fprintf(stderr, "\n");
+            }
+            std::fprintf(stderr,
+                "[recluster-audit]   link_threshold=%.3f  centroid_ema=%.3f\n",
+                cfg_.link_threshold, cfg_.centroid_ema);
+        }
         for (int k = 0; k < K; ++k) {
             const int g = assign[k];
             if (g < 0) continue;
@@ -198,8 +267,20 @@ int OratorReclusterer::run_pass(double now_sec) {
             if (sim >= cfg_.link_threshold) {
                 local_to_global[k] = globs[g]->id;
                 match_conf[k]      = sim;
+                if (debug_enabled()) {
+                    std::fprintf(stderr,
+                        "[recluster-audit]   k=%d -> reuse global id=%d sim=%.4f (>=%.3f)\n",
+                        k, globs[g]->id, sim, cfg_.link_threshold);
+                }
+            } else if (debug_enabled()) {
+                std::fprintf(stderr,
+                    "[recluster-audit]   k=%d -> REJECT global id=%d sim=%.4f (<%.3f)  will allocate new id\n",
+                    k, globs[g]->id, sim, cfg_.link_threshold);
             }
         }
+    } else if (debug_enabled()) {
+        std::fprintf(stderr,
+            "[recluster-audit]   no existing globals (first pass) — every cluster gets a fresh id\n");
     }
 
     // Allocate fresh global IDs for unmatched local clusters.
@@ -214,6 +295,10 @@ int OratorReclusterer::run_pass(double now_sec) {
         globals_.emplace(new_id, std::move(gs));
         local_to_global[k] = new_id;
         match_conf[k]      = 1.0f; // self-match
+        if (debug_enabled()) {
+            std::fprintf(stderr,
+                "[recluster-audit]   k=%d -> NEW global id=%d\n", k, new_id);
+        }
     }
 
     // Update global centroids via EMA and bookkeeping.
@@ -278,6 +363,12 @@ int OratorReclusterer::run_pass(double now_sec) {
                     keep.support_count += drop.support_count;
                     keep.last_seen_sec  = std::max(keep.last_seen_sec, drop.last_seen_sec);
                     globals_.erase(drop_id);
+                    if (debug_enabled()) {
+                        std::fprintf(stderr,
+                            "[recluster-audit]   GLOBAL-MERGE drop id=%d -> keep id=%d sim=%.4f (>=%.3f)  support keep_after=%d\n",
+                            drop_id, keep_id, sim, cfg_.global_merge_threshold,
+                            keep.support_count);
+                    }
                     // Remap current local->global.
                     for (int k = 0; k < K; ++k) {
                         if (local_to_global[k] == drop_id) local_to_global[k] = keep_id;
@@ -407,6 +498,17 @@ int OratorReclusterer::run_pass(double now_sec) {
         slot.committed_speaker_id = new_id;
         slot.ever_committed       = true;
         committed_history_[slot.seg.segment_id] = new_id;
+    }
+
+    if (debug_enabled()) {
+        std::fprintf(stderr,
+            "[recluster-audit]   local_to_global=[");
+        for (int k = 0; k < K; ++k) {
+            std::fprintf(stderr, "%s%d->%d", k > 0 ? " " : "",
+                k, local_to_global[k]);
+        }
+        std::fprintf(stderr, "]  globals_now=%zu  relabel_events=%d\n",
+            globals_.size(), n_events);
     }
 
     return n_events;
