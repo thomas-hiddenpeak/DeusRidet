@@ -1,11 +1,23 @@
 /**
  * @file orator_reclusterer_eval.cpp
- * @philosophical_role End-to-end evaluator for `OratorReclusterer` against
- *     the canonical GT-aligned embedding dump (tests/fixtures/fused_v1.bin).
- *     Computes Hungarian-mapped macro F1 and reports the headroom realised
- *     by the streaming spectral re-cluster vs the Python PoC.
- * @serves Speaker-diarisation acceptance gate. Acceptance: macro ≥ 0.65 on
- *     the 1800 s slice (s1800) — equivalent to the PoC's auto-K result.
+ * @philosophical_role Detached evaluator for `OratorReclusterer` against
+ *     a pre-computed GT-aligned embedding dump (tests/fixtures/fused_v1.bin).
+ *     Bypasses VAD, dual_db, and the live identify/match gates.
+ *
+ * @internal_check_only This tool is **internal-check-only** per
+ *     `.github/instructions/benchmarks.instructions.md`. Numbers produced
+ *     here (macro F1, Hungarian-mapped accuracy, K_pred) describe a slice
+ *     of the system, NOT the system. They MUST NOT be used to:
+ *       - set or change any default value;
+ *       - flip any always-on / always-off behaviour;
+ *       - declare a phase positive or negative;
+ *       - claim a quality regression or improvement.
+ *     Permitted uses: GPU-vs-CPU bit-equality regression, kernel micro-
+ *     benchmarks, one-shot algorithmic sanity. For behavioural verdicts,
+ *     use `tools/replay_to_transcript.py` against the live `awaken`
+ *     pipeline streaming `tests/test.mp3`, and read the report directly.
+ *
+ * @serves Internal sanity only.
  */
 #include "src/orator/orator_reclusterer.h"
 

@@ -62,6 +62,18 @@ perceives, thinks, dreams, and speaks on its own terms, on a single Orin.
    Numeric scores are reserved for true physical quantities (latency,
    memory, throughput) and deterministic bit-equality checks. Full
    rules in [workflow.instructions.md](instructions/workflow.instructions.md).
+8. **Live-system-only evidence; no detached/half-system tests.**
+   `tests/test.mp3` + `tests/fixtures/test_ground_truth.json` is the
+   **canonical** behavioural reference — no discount, no
+   substitution. Every default-value change and every phase verdict
+   in sensus / orator / auditus must cite a live `awaken` run against
+   this audio, captured by `tools/replay_to_transcript.py`, read by
+   the agent. Evaluators that bypass the live pipeline (eval-drivers
+   over `fused_*.bin`, kernel micro-benchmarks, GPU/CPU bit-equality
+   checks) are `internal-check-only`: their numbers describe a slice,
+   not the system, and MUST NOT influence defaults or ship calls.
+   Historical fixture-only verdicts are `⚠️ unverified` until
+   re-tested under this rule.
 
 ## Model Residency Budget Guardrail
 

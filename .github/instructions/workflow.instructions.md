@@ -21,6 +21,26 @@ runs, or at minimum has no syntax errors).
 
 No exceptions. Every invocation, not just the first one.
 
+## Live-System-Only Evidence (project-wide rule)
+
+Every ship/no-ship decision, every default-value change, and every
+"phase positive / negative" verdict in sensus / orator / auditus
+MUST be backed by a live run of the full `awaken` pipeline streaming
+`tests/test.mp3` over WS, paired against
+`tests/fixtures/test_ground_truth.json`, and read by the agent
+top-to-bottom.
+
+**Detached or half-system tests** (evaluators that bypass VAD /
+dual_db / gates, or that consume pre-computed embeddings) are
+`internal-check-only`: useful for GPU-vs-CPU bit-equality and kernel
+micro-benchmarks, but their numbers MUST NOT influence defaults or
+ship calls. See `benchmarks.instructions.md` for the full rule.
+
+Historical decisions made against fixture-only evidence must be
+flagged `⚠️ unverified` in DEVLOG and repo memory until re-verified
+under this rule. A fixture-only "positive" result is not a positive
+result.
+
 ## Semantic Evaluation, Not Scripted Scoring
 
 Whenever the question being asked is "is the system behaving correctly?" —

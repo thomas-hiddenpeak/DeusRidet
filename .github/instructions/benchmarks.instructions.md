@@ -9,9 +9,16 @@ applyTo: "tests/**,tools/**"
 This is a **first-class acceptance criterion** for DeusRidet. Goal:
 production-ready quality, not a demo.
 
-- **Baseline audio**: `tests/test.mp3` (3615 s, 4 speakers: 朱杰, 徐子景,
-  石一, 唐云峰).
-- **Ground truth**: `tests/test.txt` (hand-transcribed with timestamps).
+- **Baseline audio (canonical, non-negotiable)**: `tests/test.mp3`
+  (3615 s, 4 speakers: 朱杰, 徐子景, 石一, 唐云峰). This is the
+  **only** acceptable behavioural reference. No discount, no
+  substitution. Every ship/no-ship decision and every default-value
+  change in any sensus / orator / auditus path must cite a live run
+  against this audio.
+- **Ground truth**: `tests/fixtures/test_ground_truth.json` (machine-
+  readable, 556 utterances with `t0_start_sec` / `t0_end_sec` /
+  `speaker` / `text`) — primary; `tests/test.txt` — legacy free-form
+  transcript, kept for cross-reference.
 - **Target**: ≥ **90%** speaker-attribution accuracy across the full recording.
   Short tokens the pipeline marks as unknown (`spk-1` / `?`) are allowed
   and are **not** counted against accuracy — better to abstain than to
@@ -42,6 +49,31 @@ Before every benchmark invocation:
 
 Skipping these steps produces polluted baselines and meaningless measurements.
 This applies to every single invocation, not just the first.
+
+## No Detached / No Half-System Tests (project-wide rule)
+
+Any evaluator that bypasses the live `awaken` pipeline — i.e. that
+reads pre-computed embeddings, skips VAD, skips dual_db, skips the
+identify/match gates, or otherwise observes only a slice of the real
+production path — is **internal-check-only**:
+
+- Allowed uses: GPU-vs-CPU bit-equality regression; kernel
+  micro-benchmarks (latency / throughput); one-shot algorithmic
+  sanity. The number it produces describes that slice only.
+- **Forbidden uses**: setting any default value, flipping any
+  always-on/off behaviour, declaring a phase "positive" or
+  "negative", or claiming a quality regression / improvement.
+- Every such tool must carry an `internal-check-only` banner in its
+  header comment and its DEVLOG entries.
+
+Examples currently in the tree (all `internal-check-only`):
+`tools/orator_reclusterer_eval*`, `tests/fixtures/fused_v1.bin`,
+`tests/fixtures/fused_v2_dominant.bin`, ablation CSVs derived from
+them.
+
+The **only** acceptable source of behavioural evidence is a full
+`awaken` run streaming `tests/test.mp3` over WS, captured by
+`tools/replay_to_transcript.py` and read by the agent.
 
 ## Tests vs Tools Boundary
 
