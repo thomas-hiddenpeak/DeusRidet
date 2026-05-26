@@ -324,8 +324,55 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                             // online tentative id. The events are logged here
                             // and forwarded to on_speaker_relabel_ for the Nexus
                             // layer to publish as a `speaker_relabel` WS event.
-                            if (reclusterer_ && use_dual_encoder_ &&
-                                !dual_emb.empty() && match.speaker_id >= 0) {
+                            //
+                            // Phase 3b.2 audit (env-gated). DEUSRIDET_LIVE_PUSH_DEBUG=1
+                            // enables a per-FULL-extraction stderr line and a
+                            // rolling counter so we can compare the segment
+                            // stream the LIVE pipeline feeds to the reclusterer
+                            // against the GT-aligned fused_v1.bin fixture
+                            // (which is gate-free by construction). Zero cost
+                            // when the env var is unset.
+                            static const bool kLivePushDebug = []{
+                                const char* e = std::getenv("DEUSRIDET_LIVE_PUSH_DEBUG");
+                                return e != nullptr && e[0] != '\0' && e[0] != '0';
+                            }();
+                            // Phase 3b.3 A/B. DEUSRIDET_RECLUSTERER_ACCEPT_ABSTAINED=1
+                            // lifts the `match.speaker_id >= 0` clause from the push
+                            // gate so abstain-paths (identify(-1), recency absorb-guard,
+                            // margin-abstain) still hand their embedding to the
+                            // reclusterer. The 3b.2 audit on tests/test.mp3 s600 showed
+                            // 38 / 72 FULL extractions (53%) were dropped by this
+                            // gate. The reclusterer's whole purpose is to override
+                            // the online linker's judgement; filtering its input
+                            // by the linker's verdict is a structural inversion.
+                            // Abstain segments enter with tentative_speaker_id=-1,
+                            // so emitted RelabelEvents will carry old_id=-1 — the
+                            // WebUI patcher already tolerates unknown old ids.
+                            static const bool kAcceptAbstained = []{
+                                const char* e = std::getenv("DEUSRIDET_RECLUSTERER_ACCEPT_ABSTAINED");
+                                return e != nullptr && e[0] != '\0' && e[0] != '0';
+                            }();
+                            const bool push_gate_ok =
+                                reclusterer_ && use_dual_encoder_ && !dual_emb.empty() &&
+                                (kAcceptAbstained || match.speaker_id >= 0);
+                            if (kLivePushDebug) {
+                                const char* reject_reason = nullptr;
+                                if (!reclusterer_)        reject_reason = "no_recluster";
+                                else if (!use_dual_encoder_) reject_reason = "no_dual_enc";
+                                else if (dual_emb.empty())   reject_reason = "empty_dual_emb";
+                                else if (!push_gate_ok)      reject_reason = "sid_negative";
+                                if (reject_reason) {
+                                    fprintf(stderr,
+                                            "[live-push-audit] REJECT reason=%s sid=%d is_new=%d sim=%.3f fbank=%d t_end=%.3fs\n",
+                                            reject_reason,
+                                            match.speaker_id,
+                                            match.is_new ? 1 : 0,
+                                            (double)match.similarity,
+                                            fbank_frames,
+                                            (double)audio_t1_processed_ / 16000.0);
+                                }
+                            }
+                            if (push_gate_ok) {
                                 orator::ReclusterSegment rseg;
                                 rseg.segment_id = ++reclusterer_seg_id_;
                                 int64_t seg_end_samples   = audio_t1_processed_;
@@ -337,6 +384,19 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
                                 rseg.t_center_sec = 0.5 * (rseg.t_start_sec + rseg.t_end_sec);
                                 rseg.tentative_speaker_id = match.speaker_id;
                                 rseg.embedding = dual_emb;  // already L2-normalised
+                                if (kLivePushDebug) {
+                                    double l2_sq = 0.0;
+                                    for (float v : dual_emb) l2_sq += (double)v * v;
+                                    fprintf(stderr,
+                                            "[live-push-audit] ACCEPT seg=%lu raw=%d t=[%.3f,%.3f] is_new=%d sim=%.3f L2=%.6f dim=%zu\n",
+                                            (unsigned long)reclusterer_seg_id_,
+                                            match.speaker_id,
+                                            rseg.t_start_sec, rseg.t_end_sec,
+                                            match.is_new ? 1 : 0,
+                                            (double)match.similarity,
+                                            std::sqrt(l2_sq),
+                                            dual_emb.size());
+                                }
                                 reclusterer_->push(rseg);
                                 int n_emit = reclusterer_->tick(rseg.t_end_sec);
                                 if (n_emit > 0) {

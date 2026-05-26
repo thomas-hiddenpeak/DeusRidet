@@ -121,11 +121,9 @@ def main():
         print(f"  {k:24s} {v}")
     print(f"\nDistinct online speaker_ids:  {sorted(speakers_seen)}")
     print(f"speaker_relabel events:       {len(relabels)}")
-    for r in relabels[:20]:
+    for r in relabels:
         print(f"  seg={r.get('segment_id')} {r.get('old_id')} -> {r.get('new_id')} "
               f"conf={r.get('confidence', 0):.3f}")
-    if len(relabels) > 20:
-        print(f"  ... and {len(relabels) - 20} more")
 
     # Smoke verdict.
     ok_speaker = counts.get("speaker", 0) > 0
