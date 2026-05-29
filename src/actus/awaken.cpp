@@ -35,6 +35,8 @@
 #include "awaken_consciousness.h"
 #include "orator/wavlm_ecapa_encoder.h"
 #include "orator/diarizen_facade.h"
+#include "orator/diarizen_periodic_worker.h"
+#include "sensus/auditus/transcript_holdback.h"
 #include "conscientia/stream.h"
 #include "conscientia/conscientia_facade.h"
 #include "memoria/cache_manager.h"
@@ -141,6 +143,38 @@ int awaken(const std::string& webui_dir,
     // start). Declared early so the WS text-callback lambda can capture it
     // by reference; remains null until the gate below promotes it.
     std::shared_ptr<orator::DiarizenFacade> diarizen_facade;
+    // Hybrid P2: ASR→Conscientia holdback + periodic recluster worker.
+    // Constructed before install_transcript_callback so the lambda can
+    // capture the holdback pointer; left null when DiariZen is disabled.
+    std::unique_ptr<auditus::TranscriptHoldback> diarizen_holdback;
+    std::unique_ptr<orator::DiarizenPeriodicWorker> diarizen_worker;
+    double diarizen_cap_sec = 0.0;
+    double diarizen_period_sec = 60.0;
+    double diarizen_holdback_sec = 75.0;
+    bool   diarizen_enabled = false;
+    if (const char* en = std::getenv("DEUSRIDET_DIARIZEN_ENABLE")) {
+        if (en[0] == '1') {
+            diarizen_enabled = true;
+            diarizen_cap_sec = 4000.0;
+            if (const char* cap = std::getenv("DEUSRIDET_DIARIZEN_CAP_SEC")) {
+                double v = std::atof(cap);
+                if (v >= 60.0 && v <= 14400.0) diarizen_cap_sec = v;
+            }
+            if (const char* p = std::getenv("DEUSRIDET_DIARIZEN_PERIOD_SEC")) {
+                double v = std::atof(p);
+                if (v >= 5.0 && v <= 3600.0) diarizen_period_sec = v;
+            }
+            if (const char* h = std::getenv("DEUSRIDET_TRANSCRIPT_HOLDBACK_SEC")) {
+                double v = std::atof(h);
+                if (v >= 1.0 && v <= 3600.0) diarizen_holdback_sec = v;
+            }
+            if (cb.loaded) {
+                diarizen_holdback = std::make_unique<auditus::TranscriptHoldback>(
+                    cb.stream, diarizen_holdback_sec,
+                    [&audio]() { return audio.audio_t1_in_sec(); });
+            }
+        }
+    }
 
     // Persistent timeline data logger (JSONL).
     TimelineLogger timeline;
@@ -161,7 +195,8 @@ int awaken(const std::string& webui_dir,
 
     // ASR full transcript — migrated to Auditus facade (wires ws "asr_transcript"
     // envelope + timeline log_asr + optional injection into consciousness stream).
-    auditus::install_transcript_callback(audio, server, timeline, cb.stream, cb.loaded);
+    auditus::install_transcript_callback(audio, server, timeline, cb.stream, cb.loaded,
+                                          diarizen_holdback.get());
 
     // ASR detail log — migrated to Auditus facade.
     auditus::install_asr_log_callback(audio, server, timeline);
@@ -204,7 +239,7 @@ int awaken(const std::string& webui_dir,
     // Text WS frames (runtime-control command router) — migrated to Actus helper.
     server.set_on_text([&](int fd, const std::string& msg) {
         actus::handle_ws_text_command(fd, msg, audio, server, cb.stream, loopback, cb.loaded,
-                                       diarizen_facade.get());
+                                       diarizen_facade.get(), diarizen_worker.get());
     });
 
 
@@ -293,19 +328,28 @@ int awaken(const std::string& webui_dir,
     // DiariZen-v2 Hybrid P1: optional session-level capture for offline
     // reclustering. Off by default; enable with DEUSRIDET_DIARIZEN_ENABLE=1.
     // The facade is constructed here (cheap — Python worker spawns lazily
-    // on first diarize() call).
-    if (const char* en = std::getenv("DEUSRIDET_DIARIZEN_ENABLE")) {
-        if (en[0] == '1') {
-            double cap_sec = 4000.0;
-            if (const char* cap = std::getenv("DEUSRIDET_DIARIZEN_CAP_SEC")) {
-                double v = std::atof(cap);
-                if (v >= 60.0 && v <= 14400.0) cap_sec = v;
-            }
-            audio.diarizen_capture_enable(true, cap_sec);
-            diarizen_facade = std::make_shared<orator::DiarizenFacade>();
-            printf("[awaken] DiariZen-v2 capture ENABLED (cap=%.0fs); "
+    // on first diarize() call). Hybrid P2 also spawns a periodic worker that
+    // re-runs DiariZen every DEUSRIDET_DIARIZEN_PERIOD_SEC seconds and
+    // rewrites the speaker_id of still-pending transcripts before they
+    // reach Conscientia.
+    if (diarizen_enabled) {
+        audio.diarizen_capture_enable(true, diarizen_cap_sec);
+        diarizen_facade = std::make_shared<orator::DiarizenFacade>();
+        if (diarizen_holdback) {
+            diarizen_holdback->start();
+            diarizen_worker = std::make_unique<orator::DiarizenPeriodicWorker>(
+                audio, *diarizen_facade, *diarizen_holdback, server,
+                diarizen_period_sec);
+            diarizen_worker->start();
+            printf("[awaken] DiariZen-v2 Hybrid P2 ENABLED "
+                   "(cap=%.0fs period=%.0fs holdback=%.0fs); "
+                   "WS commands: diarizen_trigger / diarizen_finalize\n",
+                   diarizen_cap_sec, diarizen_period_sec, diarizen_holdback_sec);
+        } else {
+            printf("[awaken] DiariZen-v2 capture ENABLED (cap=%.0fs, P1 fallback "
+                   "\u2014 LLM not loaded so holdback is no-op); "
                    "send WS text `diarizen_finalize` to score session\n",
-                   cap_sec);
+                   diarizen_cap_sec);
         }
     }
 
@@ -338,6 +382,19 @@ int awaken(const std::string& webui_dir,
     int sig = 0;
     sigwait(&mask, &sig);
     printf("\n[awaken] Caught signal %d, shutting down...\n", sig);
+
+    // Hybrid P2: drain the DiariZen periodic worker + holdback before we
+    // tear down Conscientia so any still-pending transcript is injected
+    // with the freshest possible speaker_id.
+    if (diarizen_worker) {
+        printf("[awaken] DiariZen-v2 P2 finalize: triggering one last pass\n");
+        diarizen_worker->finalize();
+        diarizen_worker.reset();
+    }
+    if (diarizen_holdback) {
+        diarizen_holdback->stop();
+        diarizen_holdback.reset();
+    }
 
     // Stop consciousness first (it depends on model/cache)
     if (cb.loaded) {

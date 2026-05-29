@@ -14,6 +14,7 @@
 #include "conscientia/stream.h"
 #include "conscientia/frame.h"
 #include "orator/diarizen_facade.h"
+#include "orator/diarizen_periodic_worker.h"
 
 #include <chrono>
 #include <cstdio>
@@ -32,7 +33,8 @@ void handle_ws_text_command(int fd,
                             ConscientiStream& consciousness,
                             std::atomic<bool>& loopback,
                             bool llm_loaded,
-                            orator::DiarizenFacade* diarizen) {
+                            orator::DiarizenFacade* diarizen,
+                            orator::DiarizenPeriodicWorker* worker) {
     if (msg == "loopback:on") {
         loopback.store(true, std::memory_order_relaxed);
         server.send_text(fd, R"({"type":"loopback","enabled":true})");
@@ -339,12 +341,31 @@ void handle_ws_text_command(int fd,
     } else if (llm_loaded &&
                handle_ws_consciousness_command(fd, msg, server, consciousness)) {
         // Handled by the consciousness peer router (awaken_router_consciousness.cpp).
+    } else if (msg == "diarizen_trigger") {
+        // Hybrid P2 — ask the periodic worker for an extra reclustering
+        // pass right now. Returns immediately; result arrives later as a
+        // `speaker_diarize_partial` broadcast.
+        if (!worker) {
+            server.send_text(fd, R"json({"type":"speaker_diarize_progress","ok":false,"error":"periodic worker disabled (LLM not loaded or DEUSRIDET_DIARIZEN_ENABLE!=1)"})json");
+        } else {
+            worker->trigger_async();
+            server.send_text(fd, R"json({"type":"speaker_diarize_progress","status":"triggered"})json");
+        }
     } else if (msg == "diarizen_finalize") {
-        // DiariZen-v2 Hybrid P1 — end-of-session reclustering.
-        // Diarize is slow (seconds to minutes); run on a detached thread so
-        // the WS text-callback returns immediately. Acknowledge synchronously
-        // with `running`, then broadcast `speaker_diarize_final` on completion.
-        if (!diarizen) {
+        // Hybrid P2 path: if a periodic worker is wired, finalize through
+        // it so the still-pending holdback is drained into Conscientia
+        // with the freshest relabelling. Falls back to the P1 detached
+        // diarize when no worker is present.
+        if (worker) {
+            char ack[160];
+            size_t n = audio.diarizen_capture_samples();
+            snprintf(ack, sizeof(ack),
+                R"({"type":"speaker_diarize_progress","status":"finalizing","samples":%zu,"sec":%.2f})",
+                n, (double)n / 16000.0);
+            server.send_text(fd, ack);
+            auto* worker_ptr = worker;
+            std::thread([worker_ptr]() { worker_ptr->finalize(); }).detach();
+        } else if (!diarizen) {
             server.send_text(fd, R"json({"type":"speaker_diarize_final","ok":false,"error":"diarizen disabled (set DEUSRIDET_DIARIZEN_ENABLE=1)"})json");
         } else {
             const std::string wav_path = "/tmp/diarizen_session.wav";

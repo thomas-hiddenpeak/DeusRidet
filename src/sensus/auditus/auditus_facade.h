@@ -25,6 +25,8 @@ class ConscientiStream;
 
 namespace auditus {
 
+class TranscriptHoldback;
+
 // ── JSON helpers ──────────────────────────────────────────────────────────────
 // Canonical home is communis::json_util; re-exported into auditus:: so that the
 // many existing `auditus::json_escape(...)` call sites stay untouched.
@@ -56,11 +58,16 @@ void install_drop_callback(AudioPipeline& audio,
 // stdout trace + optional injection into the consciousness input stream.
 // `llm_loaded` is a snapshot of whether a language model is available at the
 // moment of install; the transcript→consciousness injection is gated on it.
+// When `holdback` is non-null and llm_loaded is true, the InputItem is
+// enqueued into the TranscriptHoldback instead of injected directly into
+// Conscientia. Lets Hybrid P2's DiariZen periodic worker rewrite the
+// speaker_id before the LLM ever sees the utterance.
 void install_transcript_callback(AudioPipeline& audio,
                                  WsServer& server,
                                  TimelineLogger& timeline,
                                  ConscientiStream& consciousness,
-                                 bool llm_loaded);
+                                 bool llm_loaded,
+                                 auditus::TranscriptHoldback* holdback = nullptr);
 
 // ASR detail log (wrapped as "asr_log") → ws broadcast; fusion shadow logs persist to timeline.
 void install_asr_log_callback(AudioPipeline& audio,

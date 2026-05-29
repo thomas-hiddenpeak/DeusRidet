@@ -546,6 +546,20 @@ public:
     size_t diarizen_dump_wav(const std::string& path) const;
     void diarizen_capture_clear();
 
+    // Hybrid P2 — origin of the capture buffer in stream-time seconds.
+    // The capture buffer's sample index 0 corresponds to this audio_t1
+    // sample count. Adding this offset to a DiariZen segment's start_sec
+    // recovers the absolute stream-time second the segment refers to.
+    // Returns 0.0 when capture has never been enabled.
+    double diarizen_capture_origin_sec() const;
+
+    // Current ingress audio_t1 in seconds (samples / 16000). Useful for
+    // any consumer that needs to reason about "the latest second of audio
+    // the producer has handed us" (e.g. transcript holdback drainer).
+    double audio_t1_in_sec() const {
+        return audio_t1_in_.load(std::memory_order_relaxed) / 16000.0;
+    }
+
 private:
     void process_loop();
     void asr_loop();
@@ -749,6 +763,9 @@ private:
     bool                    diarizen_capture_on_ = false;
     size_t                  diarizen_capture_cap_samples_ = 0;
     std::vector<int16_t>    diarizen_capture_buf_;
+    // P2: audio_t1 in samples at the moment capture was enabled. Buffer
+    // index 0 maps to (origin_samples_ / 16000) stream seconds.
+    uint64_t                diarizen_capture_origin_samples_ = 0;
 };
 
 } // namespace deusridet

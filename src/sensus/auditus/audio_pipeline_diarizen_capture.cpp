@@ -53,9 +53,15 @@ void AudioPipeline::diarizen_capture_enable(bool on, double max_seconds) {
     if (on) {
         diarizen_capture_buf_.reserve(
             std::min<size_t>(diarizen_capture_cap_samples_, 1 << 24));
+        // P2: record the stream-time origin of buffer index 0. Reads the
+        // ingress counter (push_pcm's only writer; uses release/acquire),
+        // which is monotonic and lock-free.
+        diarizen_capture_origin_samples_ =
+            audio_t1_in_.load(std::memory_order_acquire);
     } else {
         diarizen_capture_buf_.clear();
         diarizen_capture_buf_.shrink_to_fit();
+        diarizen_capture_origin_samples_ = 0;
     }
 }
 
@@ -72,6 +78,15 @@ size_t AudioPipeline::diarizen_capture_samples() const {
 void AudioPipeline::diarizen_capture_clear() {
     std::lock_guard<std::mutex> lk(diarizen_capture_mu_);
     diarizen_capture_buf_.clear();
+    // Re-anchor origin to the current ingress, since the buffer is now
+    // empty and the next sample appended will live at index 0 again.
+    diarizen_capture_origin_samples_ =
+        audio_t1_in_.load(std::memory_order_acquire);
+}
+
+double AudioPipeline::diarizen_capture_origin_sec() const {
+    std::lock_guard<std::mutex> lk(diarizen_capture_mu_);
+    return diarizen_capture_origin_samples_ / 16000.0;
 }
 
 size_t AudioPipeline::diarizen_dump_wav(const std::string& path) const {

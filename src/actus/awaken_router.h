@@ -19,7 +19,10 @@ namespace deusridet {
 class AudioPipeline;
 class WsServer;
 class ConscientiStream;
-namespace orator { class DiarizenFacade; }
+namespace orator {
+class DiarizenFacade;
+class DiarizenPeriodicWorker;
+}
 
 namespace actus {
 
@@ -28,7 +31,9 @@ namespace actus {
 // beyond what each command's JSON reply already does. Unknown commands are
 // logged to stdout. `diarizen` may be null when DiariZen-v2 capture is
 // disabled; in that case the `diarizen_finalize` command replies with an
-// error envelope.
+// error envelope. `worker` is the Hybrid P2 periodic worker; null when P2
+// is disabled — in that case `diarizen_trigger` and `diarizen_finalize`
+// (P2 variant) report unavailable.
 void handle_ws_text_command(int fd,
                             const std::string& msg,
                             AudioPipeline& audio,
@@ -36,7 +41,8 @@ void handle_ws_text_command(int fd,
                             ConscientiStream& consciousness,
                             std::atomic<bool>& loopback,
                             bool llm_loaded,
-                            orator::DiarizenFacade* diarizen = nullptr);
+                            orator::DiarizenFacade* diarizen = nullptr,
+                            orator::DiarizenPeriodicWorker* worker = nullptr);
 
 // Peer routing helper (R1 split): handles the four consciousness_* prefixes
 // plus text_input. Returns true if the message matched one of those prefixes

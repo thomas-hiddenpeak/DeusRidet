@@ -15,6 +15,7 @@
 #include "communis/timeline_logger.h"
 #include "conscientia/stream.h"
 #include "conscientia/frame.h"
+#include "sensus/auditus/transcript_holdback.h"
 
 #include <cstdio>
 #include <cstring>
@@ -52,8 +53,9 @@ void install_transcript_callback(AudioPipeline& audio,
                                  WsServer& server,
                                  TimelineLogger& timeline,
                                  ConscientiStream& consciousness,
-                                 bool llm_loaded) {
-    audio.set_on_transcript([&server, &timeline, &consciousness, llm_loaded]
+                                 bool llm_loaded,
+                                 auditus::TranscriptHoldback* holdback) {
+    audio.set_on_transcript([&server, &timeline, &consciousness, llm_loaded, holdback]
                             (const asr::ASRResult& result, float audio_sec,
                              int speaker_id, const std::string& speaker_name,
                              float speaker_sim, float speaker_confidence,
@@ -97,7 +99,15 @@ void install_transcript_callback(AudioPipeline& audio,
             item.speaker_name = speaker_name;
             item.speaker_id = speaker_id;
             item.priority = 0.8f;
-            consciousness.inject_input(std::move(item));
+            if (holdback) {
+                // Hybrid P2: delay injection so DiariZen-v2 can rewrite
+                // speaker_id/name before the LLM tokenises the utterance.
+                holdback->enqueue(std::move(item),
+                                  (double)stream_start_sec,
+                                  (double)stream_end_sec);
+            } else {
+                consciousness.inject_input(std::move(item));
+            }
         }
     });
 }
