@@ -285,6 +285,15 @@ target_include_directories(test_diarizen_cnn_biteq
     PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_diarizen_cnn_biteq
     PRIVATE orator communis machina CUDA::cudart CUDA::cublas cudnn)
+# DiariZen-v2 native CUDA port — P1b Conformer head bit-eq harness. Driven by
+# tools/diarizen_bit_eq_conformer.py against the conformer_out /
+# classifier_logits / classifier_probs taps.
+add_executable(test_diarizen_conformer_biteq
+    tests/test_diarizen_conformer_biteq.cpp)
+target_include_directories(test_diarizen_conformer_biteq
+    PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_diarizen_conformer_biteq
+    PRIVATE orator communis machina CUDA::cudart CUDA::cublas cudnn)
 # ============================================================================
 add_executable(test_overlap_separator tests/test_overlap_separator.cpp)
 target_include_directories(test_overlap_separator PRIVATE ${CMAKE_SOURCE_DIR})

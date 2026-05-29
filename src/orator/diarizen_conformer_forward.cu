@@ -1,0 +1,317 @@
+/**
+ * @file diarizen_conformer_forward.cu
+ * @philosophical_role Forward orchestration peer TU for the DiariZen Conformer
+ *     head (P1b). Holds run_block_ (one Conformer block: macaron-FFN, MHSA,
+ *     depthwise-conv module, macaron-FFN, final LN) and the public debug_*
+ *     taps that drive bit-equality. Split from diarizen_conformer_head.cu to
+ *     respect the 800-line .cu hard limit. Compute belongs on the GPU: cuBLAS
+ *     GEMMs + CUDA kernels only; the CPU sequences the four blocks.
+ * @serves DiarizenConformerHead — produces conformer_out / classifier_logits /
+ *     classifier_probs taps.
+ */
+#include "diarizen_conformer_head.h"
+
+#include "../communis/log.h"
+
+#include <cmath>
+#include <cstdio>
+#include <vector>
+
+#include <cublas_v2.h>
+#include <cuda_fp16.h>
+#include <cuda_runtime.h>
+
+#include "diarizen_wavlm_pruned_kernels.cuh"
+#include "diarizen_conformer_kernels.cuh"
+
+namespace deusridet {
+namespace orator {
+
+namespace {
+constexpr const char* kFLog = "DiariZenConformer";
+}  // namespace
+
+namespace {
+
+// Fetch a tensor by exact name into a fresh fp32 device buffer (caller frees).
+float* fetch_f32(const DiarizenConformerHead& self, const char* name,
+                 std::size_t* out_numel) {
+    const auto* v = self.find(name);
+    if (!v || !v->data) {
+        LOG_ERROR(kFLog, "tensor missing: %s", name);
+        return nullptr;
+    }
+    float* d = nullptr;
+    if (cudaMalloc(&d, v->numel * sizeof(float)) != cudaSuccess) return nullptr;
+    half_to_float_kernel<<<div_ceil_((int)v->numel, kBlock), kBlock>>>(
+        v->data, d, (int)v->numel);
+    if (out_numel) *out_numel = v->numel;
+    return d;
+}
+
+// Convenience: fetch "conformer.conformer_layer.<L>.<suffix>".
+float* layer_f32c(const DiarizenConformerHead& self, int layer,
+                  const char* suffix) {
+    char name[256];
+    std::snprintf(name, sizeof(name), "conformer.conformer_layer.%d.%s", layer,
+                  suffix);
+    return fetch_f32(self, name, nullptr);
+}
+
+// Y[T, M] = X[T, K] @ W^T + bias[M], W is [M, K] row-major.
+void clinear_(cublasHandle_t blas, const float* d_X, const float* d_W,
+              const float* d_bias, float* d_Y, int T, int M, int K) {
+    const float alpha = 1.0f, beta = 0.0f;
+    cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, M, T, K, &alpha, d_W, K, d_X, K,
+                &beta, d_Y, M);
+    if (d_bias)
+        bias_add_rows_kernel<<<div_ceil_(T * M, kBlock), kBlock>>>(d_Y, d_bias,
+                                                                   T, M);
+}
+
+// Macaron FFN: x += 0.5 * w_2(swish(w_1(ln_norm(x)))).
+bool ffn_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
+          const char* prefix, float* d_x, int T) {
+    const int C = DiarizenConformerArch::kFeatDim;
+    const int FF = DiarizenConformerArch::kFfnHidden;
+    char s[128];
+    std::snprintf(s, sizeof(s), "%s.ln_norm.weight", prefix);
+    float* lnw = layer_f32c(self, layer, s);
+    std::snprintf(s, sizeof(s), "%s.ln_norm.bias", prefix);
+    float* lnb = layer_f32c(self, layer, s);
+    std::snprintf(s, sizeof(s), "%s.w_1.weight", prefix);
+    float* w1 = layer_f32c(self, layer, s);
+    std::snprintf(s, sizeof(s), "%s.w_1.bias", prefix);
+    float* b1 = layer_f32c(self, layer, s);
+    std::snprintf(s, sizeof(s), "%s.w_2.weight", prefix);
+    float* w2 = layer_f32c(self, layer, s);
+    std::snprintf(s, sizeof(s), "%s.w_2.bias", prefix);
+    float* b2 = layer_f32c(self, layer, s);
+    if (!lnw || !lnb || !w1 || !b1 || !w2 || !b2) return false;
+
+    float *xn = nullptr, *h1 = nullptr, *h2 = nullptr;
+    cudaMalloc(&xn, (size_t)T * C * sizeof(float));
+    cudaMalloc(&h1, (size_t)T * FF * sizeof(float));
+    cudaMalloc(&h2, (size_t)T * C * sizeof(float));
+    row_layer_norm_to_kernel<<<T, kBlock>>>(d_x, xn, lnw, lnb, T, C);
+    clinear_(blas, xn, w1, b1, h1, T, FF, C);
+    swish_kernel<<<div_ceil_(T * FF, kBlock), kBlock>>>(h1, (long)T * FF);
+    clinear_(blas, h1, w2, b2, h2, T, C, FF);
+    scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, h2, 0.5f,
+                                                            (long)T * C);
+    cudaFree(xn); cudaFree(h1); cudaFree(h2);
+    cudaFree(lnw); cudaFree(lnb); cudaFree(w1); cudaFree(b1);
+    cudaFree(w2); cudaFree(b2);
+    return true;
+}
+
+// MHSA module: x += linearO(MHSA(ln_norm(x))), scale 1/sqrt(d_k).
+bool mha_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
+          float* d_x, int T) {
+    const int C = DiarizenConformerArch::kFeatDim;
+    const int nh = DiarizenConformerArch::kNumHead;
+    const int dk = DiarizenConformerArch::kHeadDim;
+    float* lnw = layer_f32c(self, layer, "mha.ln_norm.weight");
+    float* lnb = layer_f32c(self, layer, "mha.ln_norm.bias");
+    float* wq = layer_f32c(self, layer, "mha.mha.linearQ.weight");
+    float* bq = layer_f32c(self, layer, "mha.mha.linearQ.bias");
+    float* wk = layer_f32c(self, layer, "mha.mha.linearK.weight");
+    float* bk = layer_f32c(self, layer, "mha.mha.linearK.bias");
+    float* wv = layer_f32c(self, layer, "mha.mha.linearV.weight");
+    float* bv = layer_f32c(self, layer, "mha.mha.linearV.bias");
+    float* wo = layer_f32c(self, layer, "mha.mha.linearO.weight");
+    float* bo = layer_f32c(self, layer, "mha.mha.linearO.bias");
+    if (!lnw || !lnb || !wq || !bq || !wk || !bk || !wv || !bv || !wo || !bo)
+        return false;
+
+    float *xn, *Q, *K, *V, *S, *ctx, *o;
+    cudaMalloc(&xn, (size_t)T * C * sizeof(float));
+    cudaMalloc(&Q, (size_t)T * C * sizeof(float));
+    cudaMalloc(&K, (size_t)T * C * sizeof(float));
+    cudaMalloc(&V, (size_t)T * C * sizeof(float));
+    cudaMalloc(&S, (size_t)nh * T * T * sizeof(float));
+    cudaMalloc(&ctx, (size_t)T * C * sizeof(float));
+    cudaMalloc(&o, (size_t)T * C * sizeof(float));
+    row_layer_norm_to_kernel<<<T, kBlock>>>(d_x, xn, lnw, lnb, T, C);
+    clinear_(blas, xn, wq, bq, Q, T, C, C);
+    clinear_(blas, xn, wk, bk, K, T, C, C);
+    clinear_(blas, xn, wv, bv, V, T, C, C);
+    const float scale = 1.0f / std::sqrt((float)dk);
+    long stot = (long)nh * T * T;
+    mhsa_scores_kernel<<<div_ceil_((int)stot, kBlock), kBlock>>>(Q, K, S, T, nh,
+                                                                 dk, scale);
+    softmax_rows_kernel_c<<<nh * T, 256>>>(S, T);
+    mhsa_context_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(S, V, ctx, T, nh,
+                                                              dk);
+    clinear_(blas, ctx, wo, bo, o, T, C, C);
+    scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, o, 1.0f,
+                                                            (long)T * C);
+    cudaFree(xn); cudaFree(Q); cudaFree(K); cudaFree(V); cudaFree(S);
+    cudaFree(ctx); cudaFree(o);
+    cudaFree(lnw); cudaFree(lnb); cudaFree(wq); cudaFree(bq); cudaFree(wk);
+    cudaFree(bk); cudaFree(wv); cudaFree(bv); cudaFree(wo); cudaFree(bo);
+    return true;
+}
+
+// Convolution module: x += pw2(swish(bn(dw(glu(pw1(ln_norm(x))))))).
+bool conv_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
+           float* d_x, int T) {
+    const int C = DiarizenConformerArch::kFeatDim;
+    const int K = DiarizenConformerArch::kKernelSize;
+    float* lnw = layer_f32c(self, layer, "conv.ln_norm.weight");
+    float* lnb = layer_f32c(self, layer, "conv.ln_norm.bias");
+    float* pw1 = layer_f32c(self, layer, "conv.pointwise_conv1.weight");
+    float* pb1 = layer_f32c(self, layer, "conv.pointwise_conv1.bias");
+    float* dww = layer_f32c(self, layer, "conv.depthwise_conv.weight");
+    float* dwb = layer_f32c(self, layer, "conv.depthwise_conv.bias");
+    float* bnw = layer_f32c(self, layer, "conv.bn_norm.weight");
+    float* bnb = layer_f32c(self, layer, "conv.bn_norm.bias");
+    float* bnm = layer_f32c(self, layer, "conv.bn_norm.running_mean");
+    float* bnv = layer_f32c(self, layer, "conv.bn_norm.running_var");
+    float* pw2 = layer_f32c(self, layer, "conv.pointwise_conv2.weight");
+    float* pb2 = layer_f32c(self, layer, "conv.pointwise_conv2.bias");
+    if (!lnw || !lnb || !pw1 || !pb1 || !dww || !dwb || !bnw || !bnb || !bnm ||
+        !bnv || !pw2 || !pb2)
+        return false;
+
+    float *xn, *pc1, *glu, *gct, *dw, *swt, *pc2;
+    cudaMalloc(&xn, (size_t)T * C * sizeof(float));
+    cudaMalloc(&pc1, (size_t)T * 2 * C * sizeof(float));
+    cudaMalloc(&glu, (size_t)T * C * sizeof(float));
+    cudaMalloc(&gct, (size_t)C * T * sizeof(float));
+    cudaMalloc(&dw, (size_t)C * T * sizeof(float));
+    cudaMalloc(&swt, (size_t)T * C * sizeof(float));
+    cudaMalloc(&pc2, (size_t)T * C * sizeof(float));
+    row_layer_norm_to_kernel<<<T, kBlock>>>(d_x, xn, lnw, lnb, T, C);
+    // pointwise_conv1 (1x1) == per-frame linear C -> 2C.
+    clinear_(blas, xn, pw1, pb1, pc1, T, 2 * C, C);
+    glu_tc_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(pc1, glu, T, C);
+    transpose_tc_to_ct_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(glu, gct, T,
+                                                                    C);
+    depthwise_conv1d_kernel<<<div_ceil_(C * T, kBlock), kBlock>>>(gct, dww, dwb,
+                                                                  dw, C, T, K);
+    batchnorm_ct_kernel<<<div_ceil_(C * T, kBlock), kBlock>>>(dw, bnw, bnb, bnm,
+                                                              bnv, C, T, 1e-5f);
+    swish_kernel<<<div_ceil_(C * T, kBlock), kBlock>>>(dw, (long)C * T);
+    transpose_ct_to_tc_kernel<<<div_ceil_(C * T, kBlock), kBlock>>>(dw, swt, C,
+                                                                    T);
+    // pointwise_conv2 (1x1) == per-frame linear C -> C.
+    clinear_(blas, swt, pw2, pb2, pc2, T, C, C);
+    scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, pc2, 1.0f,
+                                                            (long)T * C);
+    cudaFree(xn); cudaFree(pc1); cudaFree(glu); cudaFree(gct); cudaFree(dw);
+    cudaFree(swt); cudaFree(pc2);
+    cudaFree(lnw); cudaFree(lnb); cudaFree(pw1); cudaFree(pb1); cudaFree(dww);
+    cudaFree(dwb); cudaFree(bnw); cudaFree(bnb); cudaFree(bnm); cudaFree(bnv);
+    cudaFree(pw2); cudaFree(pb2);
+    return true;
+}
+
+}  // namespace
+
+bool DiarizenConformerHead::run_block_(int layer, float* d_x, int T,
+                                       void* cublas) {
+    auto blas = static_cast<cublasHandle_t>(cublas);
+    const int C = DiarizenConformerArch::kFeatDim;
+    if (!ffn_(*this, blas, layer, "ffn1", d_x, T)) return false;
+    if (!mha_(*this, blas, layer, d_x, T)) return false;
+    if (!conv_(*this, blas, layer, d_x, T)) return false;
+    if (!ffn_(*this, blas, layer, "ffn2", d_x, T)) return false;
+    // Final per-block LayerNorm, in place.
+    {
+        char s[128];
+        std::snprintf(s, sizeof(s), "conformer.conformer_layer.%d.ln_norm.weight",
+                      layer);
+        const auto* vw = find(s);
+        std::snprintf(s, sizeof(s), "conformer.conformer_layer.%d.ln_norm.bias",
+                      layer);
+        const auto* vb = find(s);
+        if (!vw || !vb) return false;
+        float* w = nullptr;
+        float* b = nullptr;
+        cudaMalloc(&w, vw->numel * sizeof(float));
+        cudaMalloc(&b, vb->numel * sizeof(float));
+        half_to_float_kernel<<<div_ceil_((int)vw->numel, kBlock), kBlock>>>(
+            vw->data, w, (int)vw->numel);
+        half_to_float_kernel<<<div_ceil_((int)vb->numel, kBlock), kBlock>>>(
+            vb->data, b, (int)vb->numel);
+        row_layer_norm_to_kernel<<<T, kBlock>>>(d_x, d_x, w, b, T, C);
+        cudaFree(w);
+        cudaFree(b);
+    }
+    return true;
+}
+
+std::vector<float> DiarizenConformerHead::run_(const float* feat, int T,
+                                               int stage) {
+    if (!loaded_ || T <= 0 || !feat) return {};
+    const int C = DiarizenConformerArch::kFeatDim;
+    const int NC = DiarizenConformerArch::kNumClasses;
+
+    float* d_x = nullptr;
+    if (cudaMalloc(&d_x, (size_t)T * C * sizeof(float)) != cudaSuccess) return {};
+    cudaMemcpy(d_x, feat, (size_t)T * C * sizeof(float), cudaMemcpyHostToDevice);
+
+    cublasHandle_t blas = nullptr;
+    if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS) {
+        cudaFree(d_x);
+        return {};
+    }
+    for (int l = 0; l < DiarizenConformerArch::kNumLayer; ++l) {
+        if (!run_block_(l, d_x, T, blas)) {
+            cublasDestroy(blas);
+            cudaFree(d_x);
+            return {};
+        }
+    }
+
+    int out_dim = C;
+    float* d_out = d_x;
+    float* d_logits = nullptr;
+    if (stage >= 1) {
+        float* cw = fetch_f32(*this, "classifier.weight", nullptr);
+        float* cb = fetch_f32(*this, "classifier.bias", nullptr);
+        if (!cw || !cb) {
+            cublasDestroy(blas);
+            cudaFree(d_x);
+            if (cw) cudaFree(cw);
+            if (cb) cudaFree(cb);
+            return {};
+        }
+        cudaMalloc(&d_logits, (size_t)T * NC * sizeof(float));
+        clinear_(blas, d_x, cw, cb, d_logits, T, NC, C);
+        cudaFree(cw);
+        cudaFree(cb);
+        out_dim = NC;
+        d_out = d_logits;
+        if (stage >= 2)
+            logsoftmax_rows_kernel<<<T, 1>>>(d_logits, T, NC);
+    }
+    cublasDestroy(blas);
+
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        cudaFree(d_x);
+        if (d_logits) cudaFree(d_logits);
+        return {};
+    }
+    std::vector<float> host((size_t)T * out_dim);
+    cudaMemcpy(host.data(), d_out, host.size() * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    cudaFree(d_x);
+    if (d_logits) cudaFree(d_logits);
+    return host;
+}
+
+std::vector<float> DiarizenConformerHead::debug_conformer(const float* feat,
+                                                          int T) {
+    return run_(feat, T, 0);
+}
+std::vector<float> DiarizenConformerHead::debug_logits(const float* feat, int T) {
+    return run_(feat, T, 1);
+}
+std::vector<float> DiarizenConformerHead::debug_probs(const float* feat, int T) {
+    return run_(feat, T, 2);
+}
+
+}  // namespace orator
+}  // namespace deusridet
