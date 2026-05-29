@@ -37,6 +37,7 @@ A `LICENSE` file must be present at the repository root.
 | 09 | [09-tempus.md](09-tempus.md) | Three-tier temporal architecture |
 | 10 | [10-nexus.md](10-nexus.md) | WebUI & observability |
 | 11 | [11-machina.md](11-machina.md) | Technical stack, quantization, models, memory budget |
+| 12 | [12-diarizen.md](12-diarizen.md) | DiariZen session-boundary reclusterer (speaker re-attribution) |
 
 ## Refactor Backlog
 

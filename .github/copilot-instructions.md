@@ -150,6 +150,7 @@ Long-form design documents for every subsystem live under
 | 09 | Tempus (three-tier time) | [en](../docs/en/architecture/09-tempus.md) | [zh](../docs/zh/architecture/09-tempus.md) |
 | 10 | Nexus (WebUI, WS, HTTP) | [en](../docs/en/architecture/10-nexus.md) | [zh](../docs/zh/architecture/10-nexus.md) |
 | 11 | Machina (stack, quant, models, budget) | [en](../docs/en/architecture/11-machina.md) | [zh](../docs/zh/architecture/11-machina.md) |
+| 12 | DiariZen reclusterer (speaker re-attribution) | [en](../docs/en/architecture/12-diarizen.md) | [zh](../docs/zh/architecture/12-diarizen.md) |
 
 ## Latin Nomenclatura (glance-reference)
 

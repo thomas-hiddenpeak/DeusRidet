@@ -33,6 +33,7 @@ DeusRidet 以 **GPLv3** 发布。任何使用、修改或整合 DeusRidet 代码
 | 09 | [09-tempus.md](09-tempus.md) | 三级时序架构 |
 | 10 | [10-nexus.md](10-nexus.md) | WebUI 与可观测性 |
 | 11 | [11-machina.md](11-machina.md) | 技术栈、量化、模型、内存预算 |
+| 12 | [12-diarizen.md](12-diarizen.md) | DiariZen 会话边界 reclusterer（说话人重归因）|
 
 ## 重构积压
 
