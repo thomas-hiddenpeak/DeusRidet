@@ -183,6 +183,8 @@ def main() -> int:
         return _h
 
     handles = [
+        model.wavlm_model.feature_extractor.register_forward_hook(
+            _cap("cnn_out")),
         model.lnorm.register_forward_hook(_cap("wavlm_lnorm_out")),
         model.conformer.register_forward_hook(_cap("conformer_out")),
         model.classifier.register_forward_hook(_cap("classifier_logits")),
