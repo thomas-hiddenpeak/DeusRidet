@@ -277,6 +277,14 @@ target_include_directories(test_diarizen_wavlm_pruned_loader
     PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_diarizen_wavlm_pruned_loader
     PRIVATE orator communis machina CUDA::cudart)
+# DiariZen-v2 native CUDA port — P1a-step2a CNN feature-extractor bit-eq
+# harness. Driven by tools/diarizen_bit_eq_p1a.py against the cnn_out tap.
+add_executable(test_diarizen_cnn_biteq
+    tests/test_diarizen_cnn_biteq.cpp)
+target_include_directories(test_diarizen_cnn_biteq
+    PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_diarizen_cnn_biteq
+    PRIVATE orator communis machina CUDA::cudart CUDA::cublas cudnn)
 # ============================================================================
 add_executable(test_overlap_separator tests/test_overlap_separator.cpp)
 target_include_directories(test_overlap_separator PRIVATE ${CMAKE_SOURCE_DIR})

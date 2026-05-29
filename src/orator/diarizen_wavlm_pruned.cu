@@ -21,6 +21,7 @@
 #include <regex>
 
 #include <cuda_runtime.h>
+#include <cudnn.h>
 
 namespace deusridet {
 namespace orator {
@@ -65,6 +66,15 @@ DiarizenWavlmPruned::~DiarizenWavlmPruned() {
 }
 
 void DiarizenWavlmPruned::release_() {
+    if (cudnn_ws_) {
+        cudaFree(cudnn_ws_);
+        cudnn_ws_ = nullptr;
+        cudnn_ws_bytes_ = 0;
+    }
+    if (cudnn_) {
+        cudnnDestroy(static_cast<cudnnHandle_t>(cudnn_));
+        cudnn_ = nullptr;
+    }
     if (arena_) {
         cudaFree(arena_);
         arena_ = nullptr;
@@ -77,6 +87,7 @@ void DiarizenWavlmPruned::release_() {
 
 // --------------------------------------------------------------------------
 // load
+// --------------------------------------------------------------------------
 // --------------------------------------------------------------------------
 bool DiarizenWavlmPruned::load(const std::string& path) {
     release_();

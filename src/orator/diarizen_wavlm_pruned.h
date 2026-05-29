@@ -126,6 +126,16 @@ public:
     /// total arena bytes. Used by the smoke test target.
     void log_summary() const;
 
+    /// P1a-step2a milestone: run ONLY the CNN feature extractor (7 pruned
+    /// conv blocks -> per-frame channel LayerNorm -> exact-erf GELU ->
+    /// dummy_weight scale). Input is host float32 PCM normalised to
+    /// [-1, 1]; output is the [T, 211] feature map flattened row-major
+    /// (frame-major). Returns empty on error. Lazily creates the cuDNN
+    /// handle on first call. Used by the bit-equality test against the
+    /// `cnn_out` tap of the Python reference dump.
+    std::vector<float> debug_cnn_features(const float* pcm, int n_samples,
+                                          int& T_out);
+
 private:
     bool loaded_ = false;
     void*       arena_  = nullptr;   ///< owned, GPU
@@ -134,6 +144,14 @@ private:
     std::unordered_map<std::string, DiarizenWavlmPrunedTensorView> tensors_;
     std::vector<DiarizenWavlmPrunedLayerDims> layer_dims_;
 
+    // Lazily-created compute handles (forward path only; loader does not
+    // need them). Declared void* to keep cudnn/cublas headers out of this
+    // public header — the .cu casts them back.
+    void* cudnn_  = nullptr;   ///< cudnnHandle_t
+    void* cudnn_ws_ = nullptr; ///< conv workspace (GPU), grown on demand
+    std::size_t cudnn_ws_bytes_ = 0;
+
+    bool ensure_handles_();
     void release_();
 };
 
