@@ -21,6 +21,7 @@
 
 #include "paged_attention.h"
 #include "layer.h"
+#include "gptq.h"
 #include "../communis/log.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -574,14 +575,23 @@ void full_attention_forward_paged_prefill(
 {
     using MC = ModelConfig;
 
+    // Per-projection branch: GPTQ if quantized, else FP16 linear.
+    auto proj = [&](const Linear& fp16, const GptqWeight& gq, const __half* in, __half* out) {
+        if (gq.qweight != nullptr) {
+            gptq_gemm(in, gq, out, M, stream);
+        } else {
+            linear_forward(in, fp16, out, M, stream);
+        }
+    };
+
     // 1. Q projection [M, 5120] → q_buf[M, 12288] (interleaved Q+Gate)
-    linear_forward(x, attn.fp16_q, state.q_buf, M, stream);
+    proj(attn.fp16_q, attn.gq_q, x, state.q_buf);
 
     // 2. K projection [M, 5120] → kv_buf[M, 1024]
-    linear_forward(x, attn.fp16_k, state.kv_buf, M, stream);
+    proj(attn.fp16_k, attn.gq_k, x, state.kv_buf);
 
     // 3. V projection [M, 5120] → dn_z[M, 1024]
-    linear_forward(x, attn.fp16_v, state.dn_z, M, stream);
+    proj(attn.fp16_v, attn.gq_v, x, state.dn_z);
 
     __half* k_batch = state.kv_buf;
     __half* v_batch = state.dn_z;
@@ -634,7 +644,7 @@ void full_attention_forward_paged_prefill(
                  (size_t)M * MC::ATTN_OUT_DIM, stream);
 
     // 10. O projection [M, 6144] → norm_out[M, 5120]
-    linear_forward(state.attn_out, attn.fp16_o, state.norm_out, M, stream);
+    proj(attn.fp16_o, attn.gq_o, state.attn_out, state.norm_out);
 }
 
 } // namespace deusridet

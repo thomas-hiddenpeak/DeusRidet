@@ -194,6 +194,11 @@ bool ConscientiStream::prefill_tokens(const int* token_ids, int num_tokens) {
 
             rms_norm(state_->residual, lw.input_layernorm, state_->norm_out,
                      chunk_size, MC::HIDDEN_SIZE, MC::RMS_EPS, stream);
+            if (const char* dbg = std::getenv("DEUSRIDET_DBG_PREFILL_BISECT")) {
+                (void)dbg;
+                cudaError_t e = cudaStreamSynchronize(stream);
+                if (e != cudaSuccess) { LOG_ERROR("Conscientia", "PREFILL FAIL after rms_norm L=%d : %s", layer, cudaGetErrorString(e)); return false; }
+            }
 
             if (lw.is_full_attention) {
                 full_attention_forward_paged_prefill(
@@ -201,19 +206,35 @@ bool ConscientiStream::prefill_tokens(const int* token_ids, int num_tokens) {
                     kv_pool, blk_tbl, fa_layer_idx,
                     pos_start, chunk_size, seq_len_after,
                     max_phys, blk_size, *state_, stream);
+                if (std::getenv("DEUSRIDET_DBG_PREFILL_BISECT")) {
+                    cudaError_t e = cudaStreamSynchronize(stream);
+                    if (e != cudaSuccess) { LOG_ERROR("Conscientia", "PREFILL FAIL after FA L=%d fa_idx=%d : %s", layer, fa_layer_idx, cudaGetErrorString(e)); return false; }
+                }
                 fa_layer_idx++;
             } else {
                 deltanet_prefill(state_->norm_out, lw.delta_net,
                                  dn_layer_idx, chunk_size, *state_, stream);
+                if (std::getenv("DEUSRIDET_DBG_PREFILL_BISECT")) {
+                    cudaError_t e = cudaStreamSynchronize(stream);
+                    if (e != cudaSuccess) { LOG_ERROR("Conscientia", "PREFILL FAIL after DN L=%d dn_idx=%d : %s", layer, dn_layer_idx, cudaGetErrorString(e)); return false; }
+                }
                 dn_layer_idx++;
             }
 
             residual_rms_norm(state_->residual, state_->norm_out,
                               lw.post_attn_layernorm, state_->norm_out,
                               chunk_size, MC::HIDDEN_SIZE, MC::RMS_EPS, stream);
+            if (std::getenv("DEUSRIDET_DBG_PREFILL_BISECT")) {
+                cudaError_t e = cudaStreamSynchronize(stream);
+                if (e != cudaSuccess) { LOG_ERROR("Conscientia", "PREFILL FAIL after residual_rms_norm L=%d : %s", layer, cudaGetErrorString(e)); return false; }
+            }
 
             mlp_forward_prefill(state_->norm_out, lw.mlp, state_->residual,
                                 chunk_size, *state_, stream);
+            if (std::getenv("DEUSRIDET_DBG_PREFILL_BISECT")) {
+                cudaError_t e = cudaStreamSynchronize(stream);
+                if (e != cudaSuccess) { LOG_ERROR("Conscientia", "PREFILL FAIL after mlp L=%d : %s", layer, cudaGetErrorString(e)); return false; }
+            }
         }
 
         chunk_start += chunk_size;

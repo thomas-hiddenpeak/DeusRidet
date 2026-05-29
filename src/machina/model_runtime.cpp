@@ -80,56 +80,69 @@ bool merge_projection_weights(ModelWeights& weights) {
             auto& dn = lw.delta_net;
 
             // Merged qkv+a+b → repacked [10496, 5120]
-            Linear srcs[3] = { dn.fp16_qkv, dn.fp16_a, dn.fp16_b };
-            if (!merge_and_repack_fp16(srcs, 3, dn.repacked_qkv_ab,
-                                       MC::LIN_QKV_AB_DIM, MC::HIDDEN_SIZE)) {
-                LOG_ERROR("Model", "Failed to repack DN qkv_ab for layer %d", i);
-                return false;
+            // Skip when qkv is GPTQ (fp16 source nullptr); prefill will use 3 separate GEMMs.
+            if (dn.fp16_qkv.weight != nullptr) {
+                Linear srcs[3] = { dn.fp16_qkv, dn.fp16_a, dn.fp16_b };
+                if (!merge_and_repack_fp16(srcs, 3, dn.repacked_qkv_ab,
+                                           MC::LIN_QKV_AB_DIM, MC::HIDDEN_SIZE)) {
+                    LOG_ERROR("Model", "Failed to repack DN qkv_ab for layer %d", i);
+                    return false;
+                }
+                total_bytes += (size_t)MC::LIN_QKV_AB_DIM * MC::HIDDEN_SIZE * sizeof(__half);
             }
-            total_bytes += (size_t)MC::LIN_QKV_AB_DIM * MC::HIDDEN_SIZE * sizeof(__half);
 
-            // z → repacked [6144, 5120]
-            if (!repack_fp16_weight(dn.fp16_z.weight, dn.repacked_z,
-                                    dn.fp16_z.out_features, dn.fp16_z.in_features)) {
-                LOG_ERROR("Model", "Failed to repack DN z for layer %d", i);
-                return false;
+            // z → repacked [6144, 5120] (skip if GPTQ)
+            if (dn.fp16_z.weight != nullptr) {
+                if (!repack_fp16_weight(dn.fp16_z.weight, dn.repacked_z,
+                                        dn.fp16_z.out_features, dn.fp16_z.in_features)) {
+                    LOG_ERROR("Model", "Failed to repack DN z for layer %d", i);
+                    return false;
+                }
+                total_bytes += (size_t)dn.fp16_z.out_features * dn.fp16_z.in_features * sizeof(__half);
             }
-            total_bytes += (size_t)dn.fp16_z.out_features * dn.fp16_z.in_features * sizeof(__half);
 
-            // out → repacked [5120, 6144]
-            if (!repack_fp16_weight(dn.fp16_out.weight, dn.repacked_out,
-                                    dn.fp16_out.out_features, dn.fp16_out.in_features)) {
-                LOG_ERROR("Model", "Failed to repack DN out for layer %d", i);
-                return false;
+            // out → repacked [5120, 6144] (skip if GPTQ)
+            if (dn.fp16_out.weight != nullptr) {
+                if (!repack_fp16_weight(dn.fp16_out.weight, dn.repacked_out,
+                                        dn.fp16_out.out_features, dn.fp16_out.in_features)) {
+                    LOG_ERROR("Model", "Failed to repack DN out for layer %d", i);
+                    return false;
+                }
+                total_bytes += (size_t)dn.fp16_out.out_features * dn.fp16_out.in_features * sizeof(__half);
             }
-            total_bytes += (size_t)dn.fp16_out.out_features * dn.fp16_out.in_features * sizeof(__half);
         } else {
             auto& fa = lw.full_attn;
 
-            // q → repacked [12288, 5120]
-            if (!repack_fp16_weight(fa.fp16_q.weight, fa.repacked_q,
-                                    fa.fp16_q.out_features, fa.fp16_q.in_features)) {
-                LOG_ERROR("Model", "Failed to repack FA q for layer %d", i);
-                return false;
+            // q → repacked [12288, 5120] (skip if GPTQ)
+            if (fa.fp16_q.weight != nullptr) {
+                if (!repack_fp16_weight(fa.fp16_q.weight, fa.repacked_q,
+                                        fa.fp16_q.out_features, fa.fp16_q.in_features)) {
+                    LOG_ERROR("Model", "Failed to repack FA q for layer %d", i);
+                    return false;
+                }
+                total_bytes += (size_t)fa.fp16_q.out_features * fa.fp16_q.in_features * sizeof(__half);
             }
-            total_bytes += (size_t)fa.fp16_q.out_features * fa.fp16_q.in_features * sizeof(__half);
 
-            // Merged k+v → repacked [2048, 5120]
-            Linear kv_srcs[2] = { fa.fp16_k, fa.fp16_v };
-            if (!merge_and_repack_fp16(kv_srcs, 2, fa.repacked_kv,
-                                       MC::FA_KV_DIM, MC::HIDDEN_SIZE)) {
-                LOG_ERROR("Model", "Failed to repack FA kv for layer %d", i);
-                return false;
+            // Merged k+v → repacked [2048, 5120] (skip if either is GPTQ)
+            if (fa.fp16_k.weight != nullptr && fa.fp16_v.weight != nullptr) {
+                Linear kv_srcs[2] = { fa.fp16_k, fa.fp16_v };
+                if (!merge_and_repack_fp16(kv_srcs, 2, fa.repacked_kv,
+                                           MC::FA_KV_DIM, MC::HIDDEN_SIZE)) {
+                    LOG_ERROR("Model", "Failed to repack FA kv for layer %d", i);
+                    return false;
+                }
+                total_bytes += (size_t)MC::FA_KV_DIM * MC::HIDDEN_SIZE * sizeof(__half);
             }
-            total_bytes += (size_t)MC::FA_KV_DIM * MC::HIDDEN_SIZE * sizeof(__half);
 
-            // o → repacked [5120, 6144]
-            if (!repack_fp16_weight(fa.fp16_o.weight, fa.repacked_o,
-                                    fa.fp16_o.out_features, fa.fp16_o.in_features)) {
-                LOG_ERROR("Model", "Failed to repack FA o for layer %d", i);
-                return false;
+            // o → repacked [5120, 6144] (skip if GPTQ)
+            if (fa.fp16_o.weight != nullptr) {
+                if (!repack_fp16_weight(fa.fp16_o.weight, fa.repacked_o,
+                                        fa.fp16_o.out_features, fa.fp16_o.in_features)) {
+                    LOG_ERROR("Model", "Failed to repack FA o for layer %d", i);
+                    return false;
+                }
+                total_bytes += (size_t)fa.fp16_o.out_features * fa.fp16_o.in_features * sizeof(__half);
             }
-            total_bytes += (size_t)fa.fp16_o.out_features * fa.fp16_o.in_features * sizeof(__half);
         }
 
         // Repack FP16 MLP weights (unquantized models only)

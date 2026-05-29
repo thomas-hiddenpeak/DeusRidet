@@ -111,14 +111,21 @@ struct Int8Linear {
 // ============================================================================
 
 struct DeltaNetWeights {
-    // FP16 weights (point into pool_blocks, no extra alloc)
+    // FP16 weights (point into pool_blocks, no extra alloc).
+    // For partially-quantized checkpoints, qkv/z/out may be empty (weight=nullptr).
     Linear fp16_qkv;   // 5120 → 10240
     Linear fp16_z;     // 5120 → 6144
-    Linear fp16_a;     // 5120 → 48   (num_v_heads, for decay)
-    Linear fp16_b;     // 5120 → 48   (num_v_heads, for beta)
+    Linear fp16_a;     // 5120 → 48   (num_v_heads, for decay) — always FP16
+    Linear fp16_b;     // 5120 → 48   (num_v_heads, for beta)  — always FP16
     Linear fp16_out;   // 6144 → 5120
 
-    // Repacked FP16 weights for prefill fp16_gemm (created post-load)
+    // GPTQ-Int4 alternatives (populated for fully-quantized checkpoints; gq_*.qweight==nullptr means use FP16).
+    GptqWeight gq_qkv;  // 5120 → 10240
+    GptqWeight gq_z;    // 5120 → 6144
+    GptqWeight gq_out;  // 6144 → 5120
+
+    // Repacked FP16 weights for prefill fp16_gemm (created post-load).
+    // Only allocated when the corresponding fp16_* source has weight!=nullptr.
     __half* repacked_qkv_ab = nullptr;  // merged qkv+a+b [10496, 5120] tile-repacked
     __half* repacked_z      = nullptr;  // [6144, 5120] tile-repacked
     __half* repacked_out    = nullptr;  // [5120, 6144] tile-repacked
@@ -130,13 +137,20 @@ struct DeltaNetWeights {
 };
 
 struct FullAttentionWeights {
-    // FP16 weights (point into pool_blocks, no extra alloc)
+    // FP16 weights (point into pool_blocks, no extra alloc).
+    // For fully-quantized checkpoints, q/k/v/o may be empty (weight=nullptr).
     Linear fp16_q;   // 5120 → 12288
     Linear fp16_k;   // 5120 → 1024
     Linear fp16_v;   // 5120 → 1024
     Linear fp16_o;   // 6144 → 5120
 
-    // Repacked FP16 weights for prefill fp16_gemm (created post-load)
+    // GPTQ-Int4 alternatives (populated for quantized checkpoints).
+    GptqWeight gq_q;  // 5120 → 12288
+    GptqWeight gq_k;  // 5120 → 1024
+    GptqWeight gq_v;  // 5120 → 1024
+    GptqWeight gq_o;  // 6144 → 5120
+
+    // Repacked FP16 weights for prefill fp16_gemm (created post-load).
     __half* repacked_q  = nullptr;  // [12288, 5120] tile-repacked
     __half* repacked_kv = nullptr;  // merged k+v [2048, 5120] tile-repacked
     __half* repacked_o  = nullptr;  // [5120, 6144] tile-repacked

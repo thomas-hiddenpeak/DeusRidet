@@ -274,9 +274,18 @@ void full_attention_forward(const __half* x, const FullAttentionWeights& attn,
     };
     if (trace) cudaEventRecord(t0, stream);
 
+    // Per-projection branch: GPTQ GEMV if quantized, else FP16 GEMV.
+    auto proj_gemv = [&](const Linear& fp16, const GptqWeight& gq,
+                         const __half* in, __half* out) {
+        if (gq.qweight != nullptr) {
+            gptq_gemv(in, gq, out, stream);
+        } else {
+            fp16_gemv(in, fp16.weight, out, fp16.in_features, fp16.out_features, stream);
+        }
+    };
+
     // 1. Q projection via FP16 GEMV: q_proj [5120→12288], interleaved Q+Gate
-    fp16_gemv(x, attn.fp16_q.weight, state.q_buf,
-              attn.fp16_q.in_features, attn.fp16_q.out_features, stream);
+    proj_gemv(attn.fp16_q, attn.gq_q, x, state.q_buf);
     mark("q_proj");
 
     // Deinterleave Q and Gate into separate contiguous buffers
@@ -288,10 +297,8 @@ void full_attention_forward(const __half* x, const FullAttentionWeights& attn,
         state.q_buf, q_ptr, gate_ptr, MC::NUM_ATTN_HEADS, MC::HEAD_DIM);
 
     // 2. K and V projections via FP16 GEMV: x[5120] → dn_z[2048] = [K(1024), V(1024)]
-    fp16_gemv(x, attn.fp16_k.weight, state.dn_z,
-              attn.fp16_k.in_features, attn.fp16_k.out_features, stream);
-    fp16_gemv(x, attn.fp16_v.weight, state.dn_z + MC::KV_PROJ_DIM,
-              attn.fp16_v.in_features, attn.fp16_v.out_features, stream);
+    proj_gemv(attn.fp16_k, attn.gq_k, x, state.dn_z);
+    proj_gemv(attn.fp16_v, attn.gq_v, x, state.dn_z + MC::KV_PROJ_DIM);
     __half* k_buf = state.dn_z;
     __half* v_buf = state.dn_z + MC::NUM_KV_HEADS * MC::HEAD_DIM;
     mark("k_proj+v_proj+deinterleave");
@@ -333,8 +340,7 @@ void full_attention_forward(const __half* x, const FullAttentionWeights& attn,
     mark("sigmoid_gate");
 
     // 8. o_proj via FP16 GEMV: attn_out[6144] → norm_out[5120]
-    fp16_gemv(state.attn_out, attn.fp16_o.weight, state.norm_out,
-              attn.fp16_o.in_features, attn.fp16_o.out_features, stream);
+    proj_gemv(attn.fp16_o, attn.gq_o, state.attn_out, state.norm_out);
     mark("o_proj");
 
     if (trace) { cudaEventDestroy(t0); cudaEventDestroy(t1); }
@@ -592,10 +598,19 @@ void deltanet_forward(const __half* x, const DeltaNetWeights& dn,
                       InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
 
-    // 1. QKV+A+B projections via FP16 GEMV → dn_qkv[10496]
-    // Output layout: [0:10240]=qkv, [10240:10288]=a, [10288:10336]=b, [10336:10496]=pad
-    fp16_gemv(x, dn.fp16_qkv.weight, state.dn_qkv,
-              dn.fp16_qkv.in_features, dn.fp16_qkv.out_features, stream);
+    const bool qkv_is_gptq = (dn.gq_qkv.qweight != nullptr);
+    const bool z_is_gptq   = (dn.gq_z.qweight   != nullptr);
+    const bool out_is_gptq = (dn.gq_out.qweight != nullptr);
+
+    // 1. QKV + A + B projections (decode M=1). For decode, dn_qkv is a single row
+    // of length LIN_QKV_AB_DIM, no stride issue → just write each piece in place.
+    // Layout: [0:LIN_CONV_DIM)=qkv, [LIN_CONV_DIM:+nv)=a, [LIN_CONV_DIM+nv:+2nv)=b
+    if (qkv_is_gptq) {
+        gptq_gemv(x, dn.gq_qkv, state.dn_qkv, stream);
+    } else {
+        fp16_gemv(x, dn.fp16_qkv.weight, state.dn_qkv,
+                  dn.fp16_qkv.in_features, dn.fp16_qkv.out_features, stream);
+    }
     fp16_gemv(x, dn.fp16_a.weight, state.dn_qkv + MC::LIN_CONV_DIM,
               dn.fp16_a.in_features, dn.fp16_a.out_features, stream);
     fp16_gemv(x, dn.fp16_b.weight, state.dn_qkv + MC::LIN_CONV_DIM + MC::LIN_NUM_V_HEADS,
@@ -606,9 +621,13 @@ void deltanet_forward(const __half* x, const DeltaNetWeights& dn,
                             dn.conv1d_weight, state.dn_qkv,
                             MC::LIN_CONV_DIM, MC::CONV_KERNEL, stream);
 
-    // z projection via FP16 GEMV
-    fp16_gemv(x, dn.fp16_z.weight, state.dn_z,
-              dn.fp16_z.in_features, dn.fp16_z.out_features, stream);
+    // z projection
+    if (z_is_gptq) {
+        gptq_gemv(x, dn.gq_z, state.dn_z, stream);
+    } else {
+        fp16_gemv(x, dn.fp16_z.weight, state.dn_z,
+                  dn.fp16_z.in_features, dn.fp16_z.out_features, stream);
+    }
 
     // Fused: repeat_interleave + compute_g_beta + l2norm_q + l2norm_k + recurrent
     // a/b already in dn_qkv at offsets LIN_CONV_DIM and LIN_CONV_DIM+48 from merged proj.
@@ -632,8 +651,12 @@ void deltanet_forward(const __half* x, const DeltaNetWeights& dn,
                    MC::LIN_NUM_V_HEADS, MC::LIN_V_HEAD_DIM, MC::RMS_EPS, stream);
 
     // 11. out_proj via FP16 GEMV: [6144] → [5120]
-    fp16_gemv(state.attn_out, dn.fp16_out.weight, state.norm_out,
-              dn.fp16_out.in_features, dn.fp16_out.out_features, stream);
+    if (out_is_gptq) {
+        gptq_gemv(state.attn_out, dn.gq_out, state.norm_out, stream);
+    } else {
+        fp16_gemv(state.attn_out, dn.fp16_out.weight, state.norm_out,
+                  dn.fp16_out.in_features, dn.fp16_out.out_features, stream);
+    }
 }
 
 } // namespace deusridet

@@ -203,6 +203,37 @@ void full_attention_prefill(const __half* x, const FullAttentionWeights& attn,
 }
 
 // ============================================================================
+// Scatter kernel: compose dn_qkv buffer from separate qkv/a/b GEMM outputs.
+// Used by the GPTQ DN prefill path where the merged FP16 GEMM is unavailable.
+// Layout of dn_qkv rows: [0:conv_dim)=qkv, [conv_dim:conv_dim+nv)=a,
+//   [conv_dim+nv:conv_dim+2*nv)=b, [conv_dim+2*nv:qkv_ab_dim)=zero pad.
+// ============================================================================
+
+static __global__ void scatter_dn_qkv_kernel(
+    const __half* __restrict__ qkv_src,  // [M, conv_dim]
+    const __half* __restrict__ a_src,    // [M, num_v_heads]
+    const __half* __restrict__ b_src,    // [M, num_v_heads]
+    __half* __restrict__ dst,            // [M, qkv_ab_dim]
+    int M, int conv_dim, int num_v_heads, int qkv_ab_dim)
+{
+    int m = blockIdx.y;
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (m >= M || c >= qkv_ab_dim) return;
+
+    __half v;
+    if (c < conv_dim) {
+        v = qkv_src[m * conv_dim + c];
+    } else if (c < conv_dim + num_v_heads) {
+        v = a_src[m * num_v_heads + (c - conv_dim)];
+    } else if (c < conv_dim + 2 * num_v_heads) {
+        v = b_src[m * num_v_heads + (c - conv_dim - num_v_heads)];
+    } else {
+        v = __float2half(0.0f);
+    }
+    dst[m * qkv_ab_dim + c] = v;
+}
+
+// ============================================================================
 // Batched prefill: DeltaNet (M tokens)
 //
 // Strategy: batch projections (INT8 GEMM), process conv1d + recurrent
@@ -213,16 +244,53 @@ void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
                       int dn_layer_idx, int M,
                       InferenceState& state, cudaStream_t stream) {
     using MC = ModelConfig;
+    const bool dbg = (std::getenv("DEUSRIDET_DBG_DN_BISECT") != nullptr);
+#define DN_DBG(tag) do { if (dbg) { cudaError_t _e = cudaStreamSynchronize(stream); fprintf(stderr, "[DN_DBG] dn_idx=%d step=%s status=%s\n", dn_layer_idx, tag, cudaGetErrorString(_e)); if (_e != cudaSuccess) return; } } while(0)
 
-    // 1. Merged qkv+a+b projection: x[M, 5120] → dn_qkv[M, 10496] (FP16 GEMM)
-    fp16_gemm(x, dn.repacked_qkv_ab, state.dn_qkv,
-              M, MC::HIDDEN_SIZE, MC::LIN_QKV_AB_DIM, stream);
+    const bool qkv_is_gptq = (dn.gq_qkv.qweight != nullptr);
+    const bool z_is_gptq   = (dn.gq_z.qweight   != nullptr);
+    const bool out_is_gptq = (dn.gq_out.qweight != nullptr);
 
-    // Z: x[M, 5120] → dn_z[M, 6144] (FP16 GEMM)
-    fp16_gemm(x, dn.repacked_z, state.dn_z,
-              M, MC::HIDDEN_SIZE, MC::LIN_VALUE_DIM, stream);
+    if (qkv_is_gptq) {
+        // GPTQ qkv path: write into q_buf scratch [M, conv_dim], then scatter.
+        // q_buf is [max_seq, Q_PROJ_DIM=12288] >= [M, LIN_CONV_DIM=10240].
+        gptq_gemm(x, dn.gq_qkv, state.q_buf, M, stream);
+        DN_DBG("qkv_gptq_gemm");
 
-    // 2. Batch conv1d: all M tokens in one launch (stride=10368 for merged buffer)
+        // a / b are always FP16 in this checkpoint family. Write into attn_out scratch.
+        // attn_out is [max_seq, ATTN_OUT_DIM=6144] >> M*48 each.
+        __half* a_scratch = state.attn_out;
+        __half* b_scratch = state.attn_out + (size_t)M * MC::LIN_NUM_V_HEADS;
+        linear_forward(x, dn.fp16_a, a_scratch, M, stream);
+        linear_forward(x, dn.fp16_b, b_scratch, M, stream);
+        DN_DBG("ab_fp16_gemm");
+
+        // Scatter qkv|a|b|pad → dn_qkv[M, LIN_QKV_AB_DIM] strided.
+        {
+            const int BLOCK = 256;
+            dim3 grid((MC::LIN_QKV_AB_DIM + BLOCK - 1) / BLOCK, M);
+            scatter_dn_qkv_kernel<<<grid, BLOCK, 0, stream>>>(
+                state.q_buf, a_scratch, b_scratch, state.dn_qkv,
+                M, MC::LIN_CONV_DIM, MC::LIN_NUM_V_HEADS, MC::LIN_QKV_AB_DIM);
+        }
+        DN_DBG("scatter_dn_qkv");
+    } else {
+        // FP16 merged path: x[M, 5120] → dn_qkv[M, 10496]
+        fp16_gemm(x, dn.repacked_qkv_ab, state.dn_qkv,
+                  M, MC::HIDDEN_SIZE, MC::LIN_QKV_AB_DIM, stream);
+        DN_DBG("qkv_ab_gemm");
+    }
+
+    // Z: x[M, 5120] → dn_z[M, 6144]
+    if (z_is_gptq) {
+        gptq_gemm(x, dn.gq_z, state.dn_z, M, stream);
+    } else {
+        fp16_gemm(x, dn.repacked_z, state.dn_z,
+                  M, MC::HIDDEN_SIZE, MC::LIN_VALUE_DIM, stream);
+    }
+    DN_DBG("z_gemm");
+
+    // 2. Batch conv1d: all M tokens in one launch (stride=10496 for merged buffer)
     {
         int conv_blocks = (MC::LIN_CONV_DIM + 255) / 256;
         conv1d_batch_silu_kernel<<<conv_blocks, 256, 0, stream>>>(
@@ -230,6 +298,7 @@ void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
             dn.conv1d_weight, M, MC::LIN_CONV_DIM, MC::CONV_KERNEL,
             MC::LIN_QKV_AB_DIM);
     }
+    DN_DBG("conv1d_batch_silu");
 
     // 3. Fused head kernel: repeat_interleave + g/beta + L2norm + recurrent
     //    a/b read from within dn_qkv buffer at offsets 10240 and 10288
@@ -246,15 +315,23 @@ void deltanet_prefill(const __half* x, const DeltaNetWeights& dn,
             MC::LIN_CONV_DIM, MC::LIN_CONV_DIM + MC::LIN_NUM_V_HEADS,
             MC::LIN_QKV_AB_DIM, MC::RMS_EPS);
     }
+    DN_DBG("fused_head_kernel");
 
     // 4. Batched gated RMSNorm: attn_out[M, 48, 128] with gate dn_z[M, 48, 128]
     rms_norm_gated(state.attn_out, state.dn_z,
                    dn.norm_weight, state.attn_out,
                    M * MC::LIN_NUM_V_HEADS, MC::LIN_V_HEAD_DIM, MC::RMS_EPS, stream);
+    DN_DBG("rms_norm_gated");
 
-    // 5. Batched out_proj: attn_out[M, 6144] → norm_out[M, 5120] (FP16 GEMM)
-    fp16_gemm(state.attn_out, dn.repacked_out, state.norm_out,
-              M, MC::ATTN_OUT_DIM, MC::HIDDEN_SIZE, stream);
+    // 5. Batched out_proj: attn_out[M, 6144] → norm_out[M, 5120]
+    if (out_is_gptq) {
+        gptq_gemm(state.attn_out, dn.gq_out, state.norm_out, M, stream);
+    } else {
+        fp16_gemm(state.attn_out, dn.repacked_out, state.norm_out,
+                  M, MC::ATTN_OUT_DIM, MC::HIDDEN_SIZE, stream);
+    }
+    DN_DBG("out_proj_gemm");
+#undef DN_DBG
 }
 
 // ============================================================================

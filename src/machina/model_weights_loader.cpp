@@ -88,6 +88,22 @@ static bool is_model_tensor(const std::string& name) {
     if (strcmp(suffix, "mlp.gate_proj.weight") == 0) return true;
     if (strcmp(suffix, "mlp.up_proj.weight") == 0) return true;
     if (strcmp(suffix, "mlp.down_proj.weight") == 0) return true;
+    // Full-attention GPTQ (fully-quantized checkpoints, e.g. 27B-GPTQ)
+    if (strcmp(suffix, "self_attn.q_proj.qweight") == 0) return true;
+    if (strcmp(suffix, "self_attn.q_proj.scales") == 0) return true;
+    if (strcmp(suffix, "self_attn.k_proj.qweight") == 0) return true;
+    if (strcmp(suffix, "self_attn.k_proj.scales") == 0) return true;
+    if (strcmp(suffix, "self_attn.v_proj.qweight") == 0) return true;
+    if (strcmp(suffix, "self_attn.v_proj.scales") == 0) return true;
+    if (strcmp(suffix, "self_attn.o_proj.qweight") == 0) return true;
+    if (strcmp(suffix, "self_attn.o_proj.scales") == 0) return true;
+    // DeltaNet GPTQ (fully-quantized checkpoints)
+    if (strcmp(suffix, "linear_attn.in_proj_qkv.qweight") == 0) return true;
+    if (strcmp(suffix, "linear_attn.in_proj_qkv.scales") == 0) return true;
+    if (strcmp(suffix, "linear_attn.in_proj_z.qweight") == 0) return true;
+    if (strcmp(suffix, "linear_attn.in_proj_z.scales") == 0) return true;
+    if (strcmp(suffix, "linear_attn.out_proj.qweight") == 0) return true;
+    if (strcmp(suffix, "linear_attn.out_proj.scales") == 0) return true;
 
     return false;
 }
@@ -286,6 +302,64 @@ static void dispatch_tensor(const std::string& name, Tensor& tensor,
     else if (strcmp(suffix, "mlp.down_proj.weight") == 0) {
         copy_tensor_to_device(d_ptr, tensor, false, stream);
         assign_fp16_linear(lw.mlp.fp16_down_proj, d_ptr, tensor);
+    }
+    // Full-attention GPTQ
+    else if (strcmp(suffix, "self_attn.q_proj.qweight") == 0) {
+        assign_gptq_qweight(lw.full_attn.gq_q, d_ptr, tensor);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "self_attn.q_proj.scales") == 0) {
+        assign_gptq_scales(lw.full_attn.gq_q, d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "self_attn.k_proj.qweight") == 0) {
+        assign_gptq_qweight(lw.full_attn.gq_k, d_ptr, tensor);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "self_attn.k_proj.scales") == 0) {
+        assign_gptq_scales(lw.full_attn.gq_k, d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "self_attn.v_proj.qweight") == 0) {
+        assign_gptq_qweight(lw.full_attn.gq_v, d_ptr, tensor);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "self_attn.v_proj.scales") == 0) {
+        assign_gptq_scales(lw.full_attn.gq_v, d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "self_attn.o_proj.qweight") == 0) {
+        assign_gptq_qweight(lw.full_attn.gq_o, d_ptr, tensor);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "self_attn.o_proj.scales") == 0) {
+        assign_gptq_scales(lw.full_attn.gq_o, d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    // DeltaNet GPTQ
+    else if (strcmp(suffix, "linear_attn.in_proj_qkv.qweight") == 0) {
+        assign_gptq_qweight(lw.delta_net.gq_qkv, d_ptr, tensor);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.in_proj_qkv.scales") == 0) {
+        assign_gptq_scales(lw.delta_net.gq_qkv, d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.in_proj_z.qweight") == 0) {
+        assign_gptq_qweight(lw.delta_net.gq_z, d_ptr, tensor);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.in_proj_z.scales") == 0) {
+        assign_gptq_scales(lw.delta_net.gq_z, d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.out_proj.qweight") == 0) {
+        assign_gptq_qweight(lw.delta_net.gq_out, d_ptr, tensor);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
+    }
+    else if (strcmp(suffix, "linear_attn.out_proj.scales") == 0) {
+        assign_gptq_scales(lw.delta_net.gq_out, d_ptr);
+        copy_tensor_to_device(d_ptr, tensor, false, stream);
     }
 }
 
