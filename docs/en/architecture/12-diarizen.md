@@ -135,17 +135,28 @@ lands, marking these as `env-gated, lazy, session-scoped`.
 Per [`workflow.instructions.md`](../../../.github/instructions/workflow.instructions.md)
 no step exceeds the soft size cap; each ends with a green build.
 
+> **2026-05-29 update.** The native CUDA port (P1–P3 below) is
+> *deferred*. We shipped the equivalent capability via an IPC fast-path
+> calling the existing Python DiariZen-v2 stack out-of-process. See
+> `docs/{en,zh}/devlog/2026-05-29.md`. The table is preserved for the
+> future native port; the *Hybrid IPC* row at the bottom records what
+> actually ships today.
+
 | Phase | Deliverable | Verify | Status |
 |-------|-------------|--------|--------|
 | **P0** | This RFC (en/zh) + `00-overview.md` TOC update + weight conversion script (Python, runs in existing `py310_diarizen` env) | RFC reads, script produces 4 safetensors files | **done 2026-05-29** |
-| **P1a** | WavLM-Large 25-hidden tap + s80-md safetensors loader extension to `wavlm_ecapa_encoder` | `test_wavlm_s80md` bit-equality (cosine ≥ 0.999) vs Python reference on one 16 s chunk | not started |
-| **P1b** | `diarizen_conformer_head.cu` forward path, weight loader, median filter | dry-run on a fixed input tensor matches Python `model.head(x)` to ≤ 1e-3 abs | not started |
-| **P1c** | `diarizen_segmentation.cu` orchestrator (16 s × 0.1 s sliding, stitch) on top of P1a + P1b | end-to-end segmentation logits vs Python reference cosine ≥ 0.99 on `tests/test.mp3` first 60 s | not started |
-| **P2a** | `diarizen_resnet34_embed.cu` + safetensors loader | embedding cosine ≥ 0.999 vs Python on 10 reference clips | not started |
-| **P2b** | `diarizen_vbx_cluster.cu` (NumPy → CUDA port of `VBx.py`) | label sequence bit-equality vs Python on a fixed embedding sequence | not started |
-| **P3a** | `diarizen_pipeline.cpp` facade wiring stages S→C→E→K | offline run on `tests/test.mp3` reproduces 93.5 % ± 0.5 pp via `tools/verification_2026/offline_score.py` | not started |
-| **P3b** | `awaken` integration: session-boundary trigger + `speaker_amend` broadcast, gated by `DEUSRIDET_DIARIZEN_RECLUSTER=1` | live `awaken` run captured by `tools/replay_to_transcript.py` produces `accuracy(tests/test.mp3, speaker-id 4-way): 31.0% → X%` | not started |
-| **P3c** | Default flip to `=1` *if and only if* P3b accuracy ≥ 80 % live | constitutional accuracy line in commit message | not started |
+| **P1a** | WavLM-Large 25-hidden tap + s80-md safetensors loader extension to `wavlm_ecapa_encoder` | `test_wavlm_s80md` bit-equality (cosine ≥ 0.999) vs Python reference on one 16 s chunk | deferred (replaced by IPC fast-path) |
+| **P1b** | `diarizen_conformer_head.cu` forward path, weight loader, median filter | dry-run on a fixed input tensor matches Python `model.head(x)` to ≤ 1e-3 abs | deferred |
+| **P1c** | `diarizen_segmentation.cu` orchestrator (16 s × 0.1 s sliding, stitch) on top of P1a + P1b | end-to-end segmentation logits vs Python reference cosine ≥ 0.99 on `tests/test.mp3` first 60 s | deferred |
+| **P2a** | `diarizen_resnet34_embed.cu` + safetensors loader | embedding cosine ≥ 0.999 vs Python on 10 reference clips | deferred |
+| **P2b** | `diarizen_vbx_cluster.cu` (NumPy → CUDA port of `VBx.py`) | label sequence bit-equality vs Python on a fixed embedding sequence | deferred |
+| **P3a** | `diarizen_pipeline.cpp` facade wiring stages S→C→E→K | offline run on `tests/test.mp3` reproduces 93.5 % ± 0.5 pp via `tools/verification_2026/offline_score.py` | **done via IPC** (`e96255b`) |
+| **P3b** | `awaken` integration: session-boundary trigger + `speaker_amend` broadcast, gated by `DEUSRIDET_DIARIZEN_RECLUSTER=1` | live `awaken` run captured by `tools/replay_to_transcript.py` produces `accuracy(tests/test.mp3, speaker-id 4-way): 31.0% → X%` | **done via IPC** (`b0e3a8f` + `0cc9d0d`) |
+| **P3c** | Default flip to `=1` *if and only if* P3b accuracy ≥ 80 % live | constitutional accuracy line in commit message | pending LLM-loaded retest |
+| **Hybrid IPC P0** | `DiarizenFacade` C++/Python line-JSON bridge using `tools/diarizen_worker.py` | round-trip diarize call returns 1658-seg list on `tests/test.mp3` | **done 2026-05-29** (`e96255b`) |
+| **Hybrid IPC P1** | `AudioPipeline` session capture tap + WS `diarizen_finalize` | `accuracy(tests/test.mp3, diarization): — → 93.6%` via `tools/diarizen_live_score.py` | **done 2026-05-29** (`b0e3a8f`) |
+| **Hybrid IPC P2** | `TranscriptHoldback` + `DiarizenPeriodicWorker`; WS `diarizen_trigger` / `diarizen_finalize`; LLM-facing `speaker_id` rewrite before injection | `accuracy(tests/test.mp3, diarization): 93.5% → 93.6%` no-regression run | **done 2026-05-29** (`0cc9d0d`) |
+| **Hybrid IPC P2-verify** | LLM loaded (`DEUSRIDET_TEST_WS_ENABLE_LLM=1`) end-to-end re-run | accuracy stays ≥ 93.5% with holdback active | pending (Qwen3.5-9B path missing on box) |
 
 A failed phase does not block reporting — per `workflow.instructions.md`
 git discipline, every attempted phase commits its work even if reverted.

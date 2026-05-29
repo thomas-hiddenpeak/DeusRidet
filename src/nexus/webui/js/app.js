@@ -12,6 +12,7 @@ import { ConsciousnessPanel } from './components/consciousness-panel.js';
 import { TextOutputPanel } from './components/text-output-panel.js';
 import { ConfigPanel } from './components/config-panel.js';
 import { TimelinePanel } from './components/timeline-panel.js';
+import { DiarizenPanel } from './components/diarizen-panel.js';
 import { spkColor } from './utils/speaker-colors.js';
 
 // --- Log utility ---
@@ -78,6 +79,21 @@ ws.onText = (msg) => {
             // into the surviving identity.
             timelinePanel.onSpeakerRelabel(obj);
             log(`Speaker relabel: seg=${obj.segment_id} ${obj.old_id} → ${obj.new_id} (conf=${(obj.confidence ?? 0).toFixed(3)})`);
+            return;
+        }
+        if (obj.type === 'speaker_diarize_progress') {
+            diarizenPanel.onProgress(obj);
+            log(`DiariZen ${obj.status} samples=${obj.samples ?? '?'}`);
+            return;
+        }
+        if (obj.type === 'speaker_diarize_partial') {
+            diarizenPanel.onPartial(obj);
+            log(`DiariZen partial pass=${obj.pass} segs=${obj.segment_count} changed=${obj.changed_pending ?? '?'}`);
+            return;
+        }
+        if (obj.type === 'speaker_diarize_final') {
+            diarizenPanel.onFinal(obj);
+            log(`DiariZen FINAL pass=${obj.pass} segs=${obj.segment_count}`);
             return;
         }
         if (obj.type === 'asr_transcript') {
@@ -178,6 +194,7 @@ const consciousnessPanel = new ConsciousnessPanel(ws);
 const textOutputPanel = new TextOutputPanel(ws);
 const configPanel = new ConfigPanel(ws);
 const timelinePanel = new TimelinePanel();
+const diarizenPanel = new DiarizenPanel(ws);
 
 // --- VAD source selector ---
 const vadSourceSelect = document.getElementById('vad-source-select');

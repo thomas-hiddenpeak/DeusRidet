@@ -118,17 +118,26 @@ Loader 落地时更新 `11-machina.md` Machina 显存预算表，标注为
 按 [`workflow.instructions.md`](../../../.github/instructions/workflow.instructions.md)，
 任何一阶段都不超过软上限，每阶段以绿色构建收尾。
 
+> **2026-05-29 更新。** 下表中原生 CUDA 移植（P1–P3）**延后**。
+> 我们通过 IPC 捷径调外部 Python DiariZen-v2 进程，已交付等价能力。
+> 见 `docs/{en,zh}/devlog/2026-05-29.md`。表格保留以备未来原生移植；
+> 表尾的 *Hybrid IPC* 行记录今天实际发布的内容。
+
 | 阶段 | 交付 | 验证 | 状态 |
 |------|------|------|------|
 | **P0** | 本 RFC（en/zh）+ `00-overview.md` TOC 更新 + 权重转换脚本（Python，在现有 `py310_diarizen` env 跑） | RFC 可读，脚本产出 4 个 safetensors 文件 | **done 2026-05-29** |
-| **P1a** | WavLM-Large 25-hidden tap + s80-md safetensors loader 扩展到 `wavlm_ecapa_encoder` | `test_wavlm_s80md` 与 Python 参考的 cosine ≥ 0.999（一个 16 s 块） | 未开始 |
-| **P1b** | `diarizen_conformer_head.cu` 前向 + 权重加载器 + 中值滤波 | 在固定输入张量上 dry-run，匹配 Python `model.head(x)` 至 ≤ 1e-3 abs | 未开始 |
-| **P1c** | `diarizen_segmentation.cu` 编排器（16 s × 0.1 s 滑动 + 拼接），跑在 P1a + P1b 之上 | 在 `tests/test.mp3` 前 60 s 上，端到端分段 logits 与 Python 参考 cosine ≥ 0.99 | 未开始 |
-| **P2a** | `diarizen_resnet34_embed.cu` + safetensors loader | 10 个参考片段上嵌入与 Python cosine ≥ 0.999 | 未开始 |
-| **P2b** | `diarizen_vbx_cluster.cu`（`VBx.py` 的 NumPy → CUDA 移植） | 固定嵌入序列上标签序列与 Python 位等价 | 未开始 |
-| **P3a** | `diarizen_pipeline.cpp` 门面把 S→C→E→K 接起来 | 在 `tests/test.mp3` 上离线运行通过 `tools/verification_2026/offline_score.py` 重现 93.5 % ± 0.5 pp | 未开始 |
-| **P3b** | `awaken` 集成：会话边界触发器 + `speaker_amend` 广播，受 `DEUSRIDET_DIARIZEN_RECLUSTER=1` 控制 | 由 `tools/replay_to_transcript.py` 捕获的 live `awaken` 跑出 `accuracy(tests/test.mp3, speaker-id 4-way): 31.0% → X%` | 未开始 |
-| **P3c** | 默认翻为 `=1`——**当且仅当** P3b 实测 live 准确率 ≥ 80 % | commit message 中带宪法 accuracy 行 | 未开始 |
+| **P1a** | WavLM-Large 25-hidden tap + s80-md safetensors loader 扩展到 `wavlm_ecapa_encoder` | `test_wavlm_s80md` 与 Python 参考的 cosine ≥ 0.999（一个 16 s 块） | 延后（由 IPC 捷径替代） |
+| **P1b** | `diarizen_conformer_head.cu` 前向 + 权重加载器 + 中值滤波 | 在固定输入张量上 dry-run，匹配 Python `model.head(x)` 至 ≤ 1e-3 abs | 延后 |
+| **P1c** | `diarizen_segmentation.cu` 编排器（16 s × 0.1 s 滑动 + 拼接），跑在 P1a + P1b 之上 | 在 `tests/test.mp3` 前 60 s 上，端到端分段 logits 与 Python 参考 cosine ≥ 0.99 | 延后 |
+| **P2a** | `diarizen_resnet34_embed.cu` + safetensors loader | 10 个参考片段上嵌入与 Python cosine ≥ 0.999 | 延后 |
+| **P2b** | `diarizen_vbx_cluster.cu`（`VBx.py` 的 NumPy → CUDA 移植） | 固定嵌入序列上标签序列与 Python 位等价 | 延后 |
+| **P3a** | `diarizen_pipeline.cpp` 门面把 S→C→E→K 接起来 | 在 `tests/test.mp3` 上离线运行通过 `tools/verification_2026/offline_score.py` 重现 93.5 % ± 0.5 pp | **已经 IPC 完成**（`e96255b`） |
+| **P3b** | `awaken` 集成：会话边界触发器 + `speaker_amend` 广播，受 `DEUSRIDET_DIARIZEN_RECLUSTER=1` 控制 | 由 `tools/replay_to_transcript.py` 捕获的 live `awaken` 跑出 `accuracy(tests/test.mp3, speaker-id 4-way): 31.0% → X%` | **已经 IPC 完成**（`b0e3a8f` + `0cc9d0d`） |
+| **P3c** | 默认翻为 `=1`——**当且仅当** P3b 实测 live 准确率 ≥ 80 % | commit message 中带宪法 accuracy 行 | 待 LLM 加载复测 |
+| **Hybrid IPC P0** | `DiarizenFacade` C++/Python 行 JSON 桥，使用 `tools/diarizen_worker.py` | `tests/test.mp3` 上 round-trip diarize 调用返回 1658 段 | **done 2026-05-29**（`e96255b`） |
+| **Hybrid IPC P1** | `AudioPipeline` session 捕获 tap + WS `diarizen_finalize` | 通过 `tools/diarizen_live_score.py` 得 `accuracy(tests/test.mp3, diarization): — → 93.6%` | **done 2026-05-29**（`b0e3a8f`） |
+| **Hybrid IPC P2** | `TranscriptHoldback` + `DiarizenPeriodicWorker`；WS `diarizen_trigger` / `diarizen_finalize`；LLM 注入前重写 `speaker_id` | `accuracy(tests/test.mp3, diarization): 93.5% → 93.6%` 无回归 | **done 2026-05-29**（`0cc9d0d`） |
+| **Hybrid IPC P2-verify** | LLM 加载（`DEUSRIDET_TEST_WS_ENABLE_LLM=1`）端到端复测 | holdback 激活下 accuracy 保持 ≥ 93.5% | 待办（本机 Qwen3.5-9B 路径缺失） |
 
 按 `workflow.instructions.md` git 纪律，任一阶段失败不阻塞汇报；
 每次尝试都提交，即使最后回滚。
