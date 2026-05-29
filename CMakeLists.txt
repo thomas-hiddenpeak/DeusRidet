@@ -259,6 +259,14 @@ set_target_properties(profile_prefill PROPERTIES
 add_executable(orator_reclusterer_eval tools/orator_reclusterer_eval.cpp)
 target_include_directories(orator_reclusterer_eval PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(orator_reclusterer_eval PRIVATE orator communis)
+
+# DiariZen-v2 facade smoke test — spawns the persistent Python worker and
+# diarises tests/verification_2026/test_16k.wav. See docs/{en,zh}/architecture/
+# 12-diarizen.md (Hybrid integration mode, phases P1a–P3c will replace the
+# Python worker piece by piece while leaving this facade unchanged).
+add_executable(test_diarizen_facade tests/test_diarizen_facade.cpp)
+target_include_directories(test_diarizen_facade PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(test_diarizen_facade PRIVATE orator communis)
 # ============================================================================
 add_executable(test_overlap_separator tests/test_overlap_separator.cpp)
 target_include_directories(test_overlap_separator PRIVATE ${CMAKE_SOURCE_DIR})
