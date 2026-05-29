@@ -14,13 +14,15 @@
  *     tools/diarizen_worker.py's S-stage.
  *
  * Architecture (verified against the torchaudio-style reference
- * diarizen/models/module/wav2vec2/components.py): the encoder is POST-NORM
- * (encoder_layer_norm_first = False). Each layer:
- *   residual = x; x = attn(x); x = residual + x; x = layer_norm(x)
- *   x = x + feed_forward(x); x = final_layer_norm(x)
- * Fully head-pruned layers (9, 12, 16, 17) skip attention but STILL apply
- * both layer norms. Attention uses gated relative-position bias with per-
- * layer surviving-head selection.
+ * diarizen/models/module/wav2vec2/components.py, and confirmed on the loaded
+ * model object): the Transformer wrapper has layer_norm_first = False (so the
+ * tap-0 front end carries NO transformer.layer_norm), but each EncoderLayer
+ * has layer_norm_first = True -> the layers are PRE-NORM. Each layer:
+ *   residual = x; x = layer_norm(x); x = attn(x); x = residual + x
+ *   x = x + feed_forward(final_layer_norm(x))
+ * Fully head-pruned layers (9, 12, 16, 17) skip the attention sub-block AND
+ * its layer_norm entirely, running only the pre-norm FFN residual. Attention
+ * uses gated relative-position bias with per-layer surviving-head selection.
  */
 #include "diarizen_wavlm_pruned.h"
 
@@ -277,6 +279,37 @@ void linear_(cublasHandle_t blas, const float* d_X, const float* d_W,
                                                                    T, M);
 }
 
+// Fetch a top-level tensor by exact name into a fresh fp32 device buffer.
+float* top_f32(const DiarizenWavlmPruned& self, const char* name,
+               std::size_t* out_numel) {
+    const auto* v = self.find(name);
+    if (!v || !v->data) {
+        LOG_ERROR(kLog, "tensor missing: %s", name);
+        return nullptr;
+    }
+    float* d = nullptr;
+    if (cudaMalloc(&d, v->numel * sizeof(float)) != cudaSuccess) return nullptr;
+    half_to_float_kernel<<<div_ceil_((int)v->numel, kBlock), kBlock>>>(
+        v->data, d, (int)v->numel);
+    if (out_numel) *out_numel = v->numel;
+    return d;
+}
+
+// Learned weighted sum over the 25 hidden taps. taps is [25, T, H] frame-
+// major per slot; ws is [25]. out[t, c] = sum_k ws[k] * taps[k, t, c].
+// One thread per (t, c).
+__global__ void weighted_sum_kernel(const float* __restrict__ taps,  // [25,T,H]
+                                    const float* __restrict__ ws,    // [25]
+                                    float* __restrict__ out,         // [T,H]
+                                    long TH) {
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= TH) return;
+    float acc = 0.0f;
+#pragma unroll
+    for (int k = 0; k < 25; ++k) acc += ws[k] * taps[(long)k * TH + idx];
+    out[idx] = acc;
+}
+
 }  // namespace
 
 bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int T,
@@ -441,6 +474,100 @@ std::vector<float> DiarizenWavlmPruned::debug_layers(const float* pcm,
     cudaMemcpy(host.data(), d_hidden, host.size() * sizeof(float),
                cudaMemcpyDeviceToHost);
     cudaFree(d_hidden);
+    T_out = T;
+    return host;
+}
+
+std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail(const float* pcm,
+                                                         int n_samples,
+                                                         int& T_out) {
+    int T = 0;
+    float* d_hidden = run_frontend_(pcm, n_samples, T);
+    if (!d_hidden) return {};
+    const int H = DiarizenWavlmPrunedArch::kHiddenDim;       // 1024
+    const int kNumTaps = DiarizenWavlmPrunedArch::kTransformerLayers + 1;  // 25
+    const long TH = (long)T * H;
+
+    // Collect all 25 taps (front end + 24 layers) into [25, T, H].
+    float* d_taps = nullptr;
+    if (!cuda_ck_(cudaMalloc(&d_taps, (size_t)kNumTaps * TH * sizeof(float)),
+                  "taps malloc")) {
+        cudaFree(d_hidden);
+        return {};
+    }
+    cudaMemcpy(d_taps, d_hidden, TH * sizeof(float), cudaMemcpyDeviceToDevice);
+
+    float* d_pos_bias = compute_position_bias_(T);
+    cublasHandle_t blas = nullptr;
+    if (!d_pos_bias || cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS) {
+        cudaFree(d_hidden); cudaFree(d_taps);
+        if (d_pos_bias) cudaFree(d_pos_bias);
+        return {};
+    }
+    for (int l = 0; l < DiarizenWavlmPrunedArch::kTransformerLayers; ++l) {
+        if (!run_encoder_layer_(l, d_hidden, T, d_pos_bias, blas)) {
+            cublasDestroy(blas); cudaFree(d_hidden);
+            cudaFree(d_taps); cudaFree(d_pos_bias);
+            return {};
+        }
+        cudaMemcpy(d_taps + (long)(l + 1) * TH, d_hidden, TH * sizeof(float),
+                   cudaMemcpyDeviceToDevice);
+    }
+    cudaFree(d_pos_bias);
+    cudaFree(d_hidden);
+
+    // weight_sum.weight [1, 25] -> ws[25]; summed[t, c] = sum_k ws[k]*tap_k.
+    float* d_ws = top_f32(*this, "weight_sum.weight", nullptr);
+    float* d_sum = nullptr;
+    cudaMalloc(&d_sum, TH * sizeof(float));
+    if (!d_ws || !d_sum) {
+        cublasDestroy(blas); cudaFree(d_taps);
+        if (d_ws) cudaFree(d_ws);
+        if (d_sum) cudaFree(d_sum);
+        return {};
+    }
+    weighted_sum_kernel<<<div_ceil_((int)TH, kBlock), kBlock>>>(d_taps, d_ws,
+                                                                d_sum, TH);
+    cudaFree(d_taps);
+    cudaFree(d_ws);
+
+    // proj: [T, 256] = summed[T, 1024] @ proj.weight^T + proj.bias.
+    const int D = 256;
+    float* d_pw = top_f32(*this, "proj.weight", nullptr);
+    float* d_pb = top_f32(*this, "proj.bias", nullptr);
+    float* d_proj = nullptr;
+    cudaMalloc(&d_proj, (size_t)T * D * sizeof(float));
+    if (!d_pw || !d_pb || !d_proj) {
+        cublasDestroy(blas); cudaFree(d_sum);
+        if (d_pw) cudaFree(d_pw);
+        if (d_pb) cudaFree(d_pb);
+        if (d_proj) cudaFree(d_proj);
+        return {};
+    }
+    linear_(blas, d_sum, d_pw, d_pb, d_proj, T, D, H);
+    cublasDestroy(blas);
+    cudaFree(d_sum); cudaFree(d_pw); cudaFree(d_pb);
+
+    // lnorm: LayerNorm(256) in place over the feature dim.
+    float* d_lw = top_f32(*this, "lnorm.weight", nullptr);
+    float* d_lb = top_f32(*this, "lnorm.bias", nullptr);
+    if (!d_lw || !d_lb) {
+        cudaFree(d_proj);
+        if (d_lw) cudaFree(d_lw);
+        if (d_lb) cudaFree(d_lb);
+        return {};
+    }
+    row_layer_norm_to_kernel<<<T, kBlock>>>(d_proj, d_proj, d_lw, d_lb, T, D);
+    cudaFree(d_lw); cudaFree(d_lb);
+
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        cudaFree(d_proj);
+        return {};
+    }
+    std::vector<float> host((size_t)T * D);
+    cudaMemcpy(host.data(), d_proj, host.size() * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    cudaFree(d_proj);
     T_out = T;
     return host;
 }

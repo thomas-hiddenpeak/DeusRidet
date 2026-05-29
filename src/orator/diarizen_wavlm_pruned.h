@@ -163,6 +163,15 @@ public:
     std::vector<float> debug_layers(const float* pcm, int n_samples,
                                     int up_to_layer, int& T_out);
 
+    /// P1a-step2d milestone: full WavLM-pruned tail. Collects all 25 hidden
+    /// taps (front end + 24 layers), forms the learned weighted sum
+    /// (weight_sum.weight [1, 25], plain Linear with no bias), projects
+    /// 1024 -> 256 (proj.weight/bias), then applies LayerNorm(256)
+    /// (lnorm.weight/bias). Output is the [T, 256] feature flattened
+    /// frame-major. Bit-checked against the `wavlm_lnorm_out` reference tap.
+    std::vector<float> debug_lnorm_tail(const float* pcm, int n_samples,
+                                        int& T_out);
+
 private:
     bool loaded_ = false;
     void*       arena_  = nullptr;   ///< owned, GPU

@@ -60,6 +60,10 @@ def main() -> int:
         lh = np.asarray(data["layer_hiddens"], dtype=np.float32)  # [25,1,T,1024]
         ref = lh[0].reshape(lh.shape[-2], lh.shape[-1])           # [T, 1024]
         ref_name = "layer_hiddens[0]"
+    elif args.tap == "lnorm":
+        ref = np.asarray(data["wavlm_lnorm_out"], dtype=np.float32)  # [1, T, 256]
+        ref = ref.reshape(ref.shape[-2], ref.shape[-1])             # [T, 256]
+        ref_name = "wavlm_lnorm_out"
     else:
         ref = np.asarray(data["cnn_out"], dtype=np.float32)       # [1, T, 211]
         ref = ref.reshape(ref.shape[-2], ref.shape[-1])          # [T, 211]
@@ -77,6 +81,8 @@ def main() -> int:
             cmd += ["--layer", str(layer_n)]
         elif args.tap == "tap0":
             cmd.append("--tap0")
+        elif args.tap == "lnorm":
+            cmd.append("--lnorm")
         print("running:", " ".join(cmd))
         r = subprocess.run(cmd)
         if r.returncode != 0:

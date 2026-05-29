@@ -17,7 +17,7 @@ using deusridet::orator::DiarizenWavlmPruned;
 int main(int argc, char** argv) {
     if (argc < 5) {
         std::fprintf(stderr,
-                     "usage: %s <safetensors> <pcm.bin> <n_samples> <out.bin> [--tap0|--layer N]\n",
+                     "usage: %s <safetensors> <pcm.bin> <n_samples> <out.bin> [--tap0|--layer N|--lnorm]\n",
                      argv[0]);
         return 2;
     }
@@ -26,6 +26,7 @@ int main(int argc, char** argv) {
     const int n_samples = std::atoi(argv[3]);
     const char* out_path = argv[4];
     const bool tap0 = (argc >= 6) && (std::string(argv[5]) == "--tap0");
+    const bool lnorm = (argc >= 6) && (std::string(argv[5]) == "--lnorm");
     int layer_n = -1;
     if (argc >= 7 && std::string(argv[5]) == "--layer")
         layer_n = std::atoi(argv[6]);
@@ -54,7 +55,10 @@ int main(int argc, char** argv) {
     int T = 0;
     std::vector<float> feats;
     const char* mode;
-    if (layer_n >= 0) {
+    if (lnorm) {
+        feats = m.debug_lnorm_tail(pcm.data(), n_samples, T);
+        mode = "debug_lnorm_tail";
+    } else if (layer_n >= 0) {
         feats = m.debug_layers(pcm.data(), n_samples, layer_n, T);
         mode = "debug_layers";
     } else if (tap0) {
