@@ -69,6 +69,16 @@ def _parse_args() -> argparse.Namespace:
         help="output .npz path (overwritten)",
     )
     p.add_argument(
+        "--dump-heads",
+        default=None,
+        help="if set, also write the per-layer remaining_heads table to "
+             "this JSON path (24 int lists). These indices are NOT in the "
+             "safetensors but the native CUDA forward needs them to align "
+             "the gated relative-position bias with the pruned attention "
+             "heads. Anti-entropy: the loader reads this sidecar instead of "
+             "hardcoding the table.",
+    )
+    p.add_argument(
         "--device",
         default="cuda",
         choices=("cuda", "cpu"),
@@ -133,6 +143,28 @@ def main() -> int:
     # `pipe.model` is the DiariZen segmentation Model (BaseModel subclass).
     model = pipe.model
     model.eval()
+
+    # Optionally export the per-layer remaining_heads table. These are the
+    # original (0..15) head indices kept after structured pruning; they are
+    # non-contiguous and absent from the safetensors. The native CUDA loader
+    # reads this sidecar to select the gated relative-position bias slices
+    # that align with each layer's surviving q/k/v heads.
+    if args.dump_heads:
+        import json  # noqa: PLC0415
+
+        heads_path = Path(args.dump_heads).resolve()
+        layers = model.wavlm_model.encoder.transformer.layers
+        table = []
+        for layer in layers:
+            att = getattr(layer, "attention", None)
+            if att is None:
+                table.append([])  # attention sub-block fully pruned
+            else:
+                table.append([int(h) for h in att.remaining_heads])
+        heads_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(heads_path, "w", encoding="utf-8") as fh:
+            json.dump({"remaining_heads": table}, fh, indent=2)
+        print(f"[dump] wrote remaining_heads -> {heads_path}", file=sys.stderr)
 
     print(f"[dump] loading audio window: offset={args.offset}s "
           f"duration={args.duration}s", file=sys.stderr)
