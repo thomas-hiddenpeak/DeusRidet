@@ -19,20 +19,24 @@ namespace deusridet {
 class AudioPipeline;
 class WsServer;
 class ConscientiStream;
+namespace orator { class DiarizenFacade; }
 
 namespace actus {
 
 // Dispatches a single text-frame command received by the awaken WS server.
 // Called from the WsServer text-callback thread. Performs no allocations
 // beyond what each command's JSON reply already does. Unknown commands are
-// logged to stdout.
+// logged to stdout. `diarizen` may be null when DiariZen-v2 capture is
+// disabled; in that case the `diarizen_finalize` command replies with an
+// error envelope.
 void handle_ws_text_command(int fd,
                             const std::string& msg,
                             AudioPipeline& audio,
                             WsServer& server,
                             ConscientiStream& consciousness,
                             std::atomic<bool>& loopback,
-                            bool llm_loaded);
+                            bool llm_loaded,
+                            orator::DiarizenFacade* diarizen = nullptr);
 
 // Peer routing helper (R1 split): handles the four consciousness_* prefixes
 // plus text_input. Returns true if the message matched one of those prefixes

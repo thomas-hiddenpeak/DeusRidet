@@ -34,6 +34,7 @@
 #include "awaken_hello.h"
 #include "awaken_consciousness.h"
 #include "orator/wavlm_ecapa_encoder.h"
+#include "orator/diarizen_facade.h"
 #include "conscientia/stream.h"
 #include "conscientia/conscientia_facade.h"
 #include "memoria/cache_manager.h"
@@ -136,6 +137,11 @@ int awaken(const std::string& webui_dir,
     std::atomic<uint64_t> total_bytes{0};
     std::atomic<bool> loopback{false};
 
+    // DiariZen-v2 Hybrid P1 facade handle (constructed below, after audio
+    // start). Declared early so the WS text-callback lambda can capture it
+    // by reference; remains null until the gate below promotes it.
+    std::shared_ptr<orator::DiarizenFacade> diarizen_facade;
+
     // Persistent timeline data logger (JSONL).
     TimelineLogger timeline;
     if (timeline.open()) {
@@ -197,7 +203,8 @@ int awaken(const std::string& webui_dir,
 
     // Text WS frames (runtime-control command router) — migrated to Actus helper.
     server.set_on_text([&](int fd, const std::string& msg) {
-        actus::handle_ws_text_command(fd, msg, audio, server, cb.stream, loopback, cb.loaded);
+        actus::handle_ws_text_command(fd, msg, audio, server, cb.stream, loopback, cb.loaded,
+                                       diarizen_facade.get());
     });
 
 
@@ -281,6 +288,25 @@ int awaken(const std::string& webui_dir,
     if (!audio.start(audio_cfg)) {
         fprintf(stderr, "[awaken] Failed to start audio pipeline\n");
         return 1;
+    }
+
+    // DiariZen-v2 Hybrid P1: optional session-level capture for offline
+    // reclustering. Off by default; enable with DEUSRIDET_DIARIZEN_ENABLE=1.
+    // The facade is constructed here (cheap — Python worker spawns lazily
+    // on first diarize() call).
+    if (const char* en = std::getenv("DEUSRIDET_DIARIZEN_ENABLE")) {
+        if (en[0] == '1') {
+            double cap_sec = 4000.0;
+            if (const char* cap = std::getenv("DEUSRIDET_DIARIZEN_CAP_SEC")) {
+                double v = std::atof(cap);
+                if (v >= 60.0 && v <= 14400.0) cap_sec = v;
+            }
+            audio.diarizen_capture_enable(true, cap_sec);
+            diarizen_facade = std::make_shared<orator::DiarizenFacade>();
+            printf("[awaken] DiariZen-v2 capture ENABLED (cap=%.0fs); "
+                   "send WS text `diarizen_finalize` to score session\n",
+                   cap_sec);
+        }
     }
 
     // Start WS server.

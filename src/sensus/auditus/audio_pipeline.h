@@ -530,9 +530,29 @@ public:
     void set_asr_vad_source(VadSource s) { asr_vad_source_.store(static_cast<int>(s), std::memory_order_relaxed); }
     VadSource asr_vad_source() const { return static_cast<VadSource>(asr_vad_source_.load(std::memory_order_relaxed)); }
 
+    // DiariZen-v2 session-level capture (Hybrid P1).
+    //   When enabled, every sample pushed via push_pcm() is also appended to
+    //   an internal in-RAM session buffer (mono 16 kHz int16, deinterleaved
+    //   by push_pcm's caller). `max_seconds` caps the buffer to bound RAM
+    //   (default 4000 s = ~125 MB). When the cap is hit, further samples
+    //   are silently dropped from the capture buffer (the live pipeline is
+    //   unaffected). `dump_wav` writes the captured samples to a minimal
+    //   16-kHz mono WAV and returns the number of samples written; 0 on
+    //   failure or empty buffer. `clear` resets the buffer; use it between
+    //   sessions to avoid concatenating audio across replay runs.
+    void diarizen_capture_enable(bool on, double max_seconds = 4000.0);
+    bool diarizen_capture_enabled() const;
+    size_t diarizen_capture_samples() const;
+    size_t diarizen_dump_wav(const std::string& path) const;
+    void diarizen_capture_clear();
+
 private:
     void process_loop();
     void asr_loop();
+
+    // DiariZen-v2 capture tap (called from push_pcm). Defined in
+    // audio_pipeline_diarizen_capture.cpp.
+    void diarizen_capture_tap_(const int16_t* data, int n_samples);
 
     // process_loop() stage decomposition (Step 11 A1).
     //   See docs/{en,zh}/architecture/00-overview.md §"Step 11" for the
@@ -717,6 +737,18 @@ private:
     std::unique_ptr<orator::OratorReclusterer> reclusterer_;
     uint64_t reclusterer_seg_id_ = 0;
     OnSpeakerRelabel on_speaker_relabel_;
+
+    // DiariZen-v2 Hybrid P1 — optional session-level PCM capture.
+    // Guarded by diarizen_capture_mu_ because push_pcm() runs on the WS
+    // producer thread and dump_wav/clear may be called from the router
+    // thread that handles control messages. The enable bit is also exposed
+    // as an atomic so push_pcm()'s hot path can short-circuit without
+    // taking the mutex when capture is off (the common case).
+    mutable std::mutex      diarizen_capture_mu_;
+    std::atomic<bool>       diarizen_capture_on_atomic_{false};
+    bool                    diarizen_capture_on_ = false;
+    size_t                  diarizen_capture_cap_samples_ = 0;
+    std::vector<int16_t>    diarizen_capture_buf_;
 };
 
 } // namespace deusridet

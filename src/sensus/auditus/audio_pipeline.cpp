@@ -472,6 +472,8 @@ void AudioPipeline::asr_loop() {
 
 void AudioPipeline::push_pcm(const int16_t* data, int n_samples) {
     if (!ring_ || n_samples <= 0) return;
+    // DiariZen-v2 session capture (Hybrid P1). No-op when disabled.
+    diarizen_capture_tap_(data, n_samples);
     size_t bytes = n_samples * sizeof(int16_t);
     size_t written = ring_->push(reinterpret_cast<const uint8_t*>(data), bytes);
     int n_enqueued = (int)(written / sizeof(int16_t));
