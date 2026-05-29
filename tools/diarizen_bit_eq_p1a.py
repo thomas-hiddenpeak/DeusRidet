@@ -36,16 +36,27 @@ def main() -> int:
     ap.add_argument("--tol-cos", type=float, default=0.999)
     ap.add_argument(
         "--tap",
-        choices=["cnn", "tap0"],
         default="cnn",
         help="cnn = CNN feature extractor (cnn_out, 211 ch); "
-        "tap0 = encoder front end vs layer_hiddens[0] (1024 ch)",
+        "tap0 = encoder front end vs layer_hiddens[0] (1024 ch); "
+        "layerN (e.g. layer1..layer24) = front end + first N transformer "
+        "layers vs layer_hiddens[N]",
     )
     args = ap.parse_args()
 
     data = np.load(args.npz)
     wave = np.asarray(data["wave_in"], dtype=np.float32).reshape(-1)
-    if args.tap == "tap0":
+    layer_n = None
+    if args.tap.startswith("layer") and args.tap != "layer":
+        try:
+            layer_n = int(args.tap[len("layer"):])
+        except ValueError:
+            layer_n = None
+    if layer_n is not None:
+        lh = np.asarray(data["layer_hiddens"], dtype=np.float32)  # [25,1,T,1024]
+        ref = lh[layer_n].reshape(lh.shape[-2], lh.shape[-1])     # [T, 1024]
+        ref_name = f"layer_hiddens[{layer_n}]"
+    elif args.tap == "tap0":
         lh = np.asarray(data["layer_hiddens"], dtype=np.float32)  # [25,1,T,1024]
         ref = lh[0].reshape(lh.shape[-2], lh.shape[-1])           # [T, 1024]
         ref_name = "layer_hiddens[0]"
@@ -62,7 +73,9 @@ def main() -> int:
         wave.tofile(pcm_path)
 
         cmd = [args.bin, args.weights, pcm_path, str(n), out_path]
-        if args.tap == "tap0":
+        if layer_n is not None:
+            cmd += ["--layer", str(layer_n)]
+        elif args.tap == "tap0":
             cmd.append("--tap0")
         print("running:", " ".join(cmd))
         r = subprocess.run(cmd)

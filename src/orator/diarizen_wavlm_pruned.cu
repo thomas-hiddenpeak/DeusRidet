@@ -82,6 +82,7 @@ void DiarizenWavlmPruned::release_() {
     arena_bytes_ = 0;
     tensors_.clear();
     layer_dims_.clear();
+    remaining_heads_.clear();
     loaded_ = false;
 }
 
@@ -252,6 +253,78 @@ bool DiarizenWavlmPruned::load(const std::string& path) {
     if (!tail_ok) {
         release_();
         return false;
+    }
+
+    // Load the remaining_heads sidecar (<weights w/o .safetensors>_heads.json).
+    // The surviving attention-head ids are not stored in safetensors; they are
+    // exported by tools/diarizen_dump_reference.py --dump-heads. Parsing is a
+    // tiny one-shot integer op so it stays on the CPU (anti-entropy: do NOT
+    // hardcode the 24-list table in the .cu).
+    {
+        std::string side = path;
+        const std::string ext = ".safetensors";
+        if (side.size() > ext.size() &&
+            side.compare(side.size() - ext.size(), ext.size(), ext) == 0)
+            side = side.substr(0, side.size() - ext.size());
+        side += "_heads.json";
+
+        remaining_heads_.assign(DiarizenWavlmPrunedArch::kTransformerLayers, {});
+        FILE* hf = std::fopen(side.c_str(), "rb");
+        if (!hf) {
+            LOG_ERROR(kLog, "missing remaining_heads sidecar: %s", side.c_str());
+            release_();
+            return false;
+        }
+        std::fseek(hf, 0, SEEK_END);
+        long hn = std::ftell(hf);
+        std::fseek(hf, 0, SEEK_SET);
+        std::string js((size_t)hn, '\0');
+        size_t hgot = std::fread(&js[0], 1, (size_t)hn, hf);
+        std::fclose(hf);
+        js.resize(hgot);
+
+        // Minimal parser: find "remaining_heads", then scan nested [ ... ]
+        // integer lists. The outer array holds exactly kTransformerLayers
+        // inner arrays.
+        size_t pos = js.find("remaining_heads");
+        if (pos == std::string::npos) pos = 0;
+        pos = js.find('[', pos);          // outer array open
+        int li = -1;
+        bool in_inner = false;
+        while (pos < js.size() &&
+               li < DiarizenWavlmPrunedArch::kTransformerLayers) {
+            char c = js[pos];
+            if (!in_inner) {
+                if (c == '[') { ++li; in_inner = true; }
+                else if (c == ']') break;     // outer close
+                ++pos;
+            } else {
+                if (c == ']') { in_inner = false; ++pos; continue; }
+                if (c == '-' || (c >= '0' && c <= '9')) {
+                    long v = std::strtol(js.c_str() + pos, nullptr, 10);
+                    if (li >= 0 && li < (int)remaining_heads_.size())
+                        remaining_heads_[li].push_back((int)v);
+                    // advance past the number
+                    if (c == '-') ++pos;
+                    while (pos < js.size() && js[pos] >= '0' && js[pos] <= '9')
+                        ++pos;
+                } else {
+                    ++pos;
+                }
+            }
+        }
+        // Sanity: surviving-head count must equal num_heads parsed from
+        // the safetensors projection widths.
+        for (int i = 0; i < DiarizenWavlmPrunedArch::kTransformerLayers; ++i) {
+            if ((int)remaining_heads_[i].size() != layer_dims_[i].num_heads) {
+                LOG_ERROR(kLog,
+                          "layer %d head mismatch: sidecar %zu vs weights %d",
+                          i, remaining_heads_[i].size(),
+                          layer_dims_[i].num_heads);
+                release_();
+                return false;
+            }
+        }
     }
 
     loaded_ = true;

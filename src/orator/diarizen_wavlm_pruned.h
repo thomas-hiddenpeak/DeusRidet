@@ -118,6 +118,14 @@ public:
         return layer_dims_;
     }
 
+    /// Per-layer surviving attention head ids (original 0..15 indices),
+    /// loaded from the `<weights>_heads.json` sidecar. Size 24; an empty
+    /// inner list means the layer's attention is fully pruned. Used by the
+    /// forward pass to select rows of the [16, T, T] relative-position bias.
+    const std::vector<int>& remaining_heads(int layer) const {
+        return remaining_heads_[layer];
+    }
+
     /// Look up a tensor by its safetensors name. Returns nullptr-bearing
     /// view if absent. Stable for the lifetime of the object.
     const DiarizenWavlmPrunedTensorView* find(const std::string& name) const;
@@ -146,6 +154,15 @@ public:
     /// `layer_hiddens[0]` reference tap.
     std::vector<float> debug_tap0(const float* pcm, int n_samples, int& T_out);
 
+    /// P1a-step2c milestone: run the encoder front end followed by the first
+    /// `up_to_layer` transformer EncoderLayers (PRE-NORM WavLM-pruned, with
+    /// gated relative-position attention and per-layer head pruning). With
+    /// up_to_layer == 0 this equals tap 0; with up_to_layer == k it equals
+    /// the reference `layer_hiddens[k]`. Output is the [T, 1024] hidden
+    /// flattened frame-major. Returns empty on error.
+    std::vector<float> debug_layers(const float* pcm, int n_samples,
+                                    int up_to_layer, int& T_out);
+
 private:
     bool loaded_ = false;
     void*       arena_  = nullptr;   ///< owned, GPU
@@ -153,6 +170,7 @@ private:
 
     std::unordered_map<std::string, DiarizenWavlmPrunedTensorView> tensors_;
     std::vector<DiarizenWavlmPrunedLayerDims> layer_dims_;
+    std::vector<std::vector<int>> remaining_heads_;  ///< 24 lists, from sidecar
 
     // Lazily-created compute handles (forward path only; loader does not
     // need them). Declared void* to keep cudnn/cublas headers out of this
@@ -168,6 +186,26 @@ private:
     /// allocated GPU buffer of shape [T_out, 211] (frame-major). Caller
     /// owns the pointer and must cudaFree it. Returns nullptr on error.
     float* run_cnn_(const float* pcm, int n_samples, int& T_out);
+
+    /// Internal: run CNN + feature_projection + pos_conv (= tap 0) and
+    /// return a freshly allocated GPU buffer of shape [T_out, 1024]
+    /// (frame-major). Caller owns the pointer and must cudaFree it. Used by
+    /// both debug_tap0 and debug_layers. Returns nullptr on error.
+    float* run_frontend_(const float* pcm, int n_samples, int& T_out);
+
+    /// Internal (defined in diarizen_wavlm_pruned_layers.cu): run a single
+    /// PRE-NORM transformer EncoderLayer in place on the device hidden
+    /// buffer d_hidden [T, 1024]. `layer` selects the per-layer weights and
+    /// pruned head set. `d_pos_bias` is the shared [16, T, T] relative
+    /// position bias (computed once and reused); may be nullptr for layers
+    /// whose attention is fully pruned. cublas/cudnn handles are passed in.
+    bool run_encoder_layer_(int layer, float* d_hidden, int T,
+                            const float* d_pos_bias, void* cublas);
+
+    /// Internal: compute the shared [16, T, T] relative position bias from
+    /// rel_attn_embed (layer 0 only). Returns a freshly allocated device
+    /// buffer; caller frees. Returns nullptr on error.
+    float* compute_position_bias_(int T);
 };
 
 }  // namespace orator
