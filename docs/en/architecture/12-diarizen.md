@@ -156,10 +156,49 @@ no step exceeds the soft size cap; each ends with a green build.
 | **Hybrid IPC P0** | `DiarizenFacade` C++/Python line-JSON bridge using `tools/diarizen_worker.py` | round-trip diarize call returns 1658-seg list on `tests/test.mp3` | **done 2026-05-29** (`e96255b`) |
 | **Hybrid IPC P1** | `AudioPipeline` session capture tap + WS `diarizen_finalize` | `accuracy(tests/test.mp3, diarization): — → 93.6%` via `tools/diarizen_live_score.py` | **done 2026-05-29** (`b0e3a8f`) |
 | **Hybrid IPC P2** | `TranscriptHoldback` + `DiarizenPeriodicWorker`; WS `diarizen_trigger` / `diarizen_finalize`; LLM-facing `speaker_id` rewrite before injection | `accuracy(tests/test.mp3, diarization): 93.5% → 93.6%` no-regression run | **done 2026-05-29** (`0cc9d0d`) |
-| **Hybrid IPC P2-verify** | LLM loaded (`DEUSRIDET_TEST_WS_ENABLE_LLM=1`) end-to-end re-run | accuracy stays ≥ 93.5% with holdback active | pending (Qwen3.5-9B path missing on box) |
+| **Hybrid IPC P2-verify** | LLM loaded (`DEUSRIDET_TEST_WS_ENABLE_LLM=1`) end-to-end re-run | accuracy stays ≥ 93.5% with holdback active | **engine STABLE, gate BLOCKED** 2026-05-29 (`c294ebf` + `6249481`) — 27B Qwen3.6-uncensored-heretic GPTQ-Int4 LLM ran for the full 50-minute window with 0 CUDA errors during live `awaken` + diarizen replay, but the diarizen worker re-loops on `facade.diarize returned empty: diarize: no opening brace` and exceeds the 1500 s client budget; no `speaker_diarize_final` returned, so no accuracy line was emitted. Blocker re-classified from "27B prefill kernel mismatch" (resolved by `c294ebf`) to "worker re-extraction loop" |
 
 A failed phase does not block reporting — per `workflow.instructions.md`
 git discipline, every attempted phase commits its work even if reverted.
+
+### Architectural anchor — native CUDA P1–P3 is mandatory, not optional
+
+The IPC fast-path (Hybrid IPC P0/P1/P2, the bottom three rows) is a
+bridge, not a destination. The project's hard constraint is **pure
+C++/CUDA** for every always-on subsystem (see
+[philosophy.instructions.md](../../../.github/instructions/philosophy.instructions.md)
+§"Compute Belongs on the GPU" and the project one-line
+definition "self-contained multimodal LLM application"). A Python
+subprocess on the inference loop is acceptable only as a temporary
+compatibility shim, never as a shipping default. Therefore:
+
+- **Native P1a/P1b/P1c (WavLM s80-md tap + Conformer EEND head +
+  segmentation orchestrator) MUST land** before DiariZen can be
+  promoted to `DEUSRIDET_DIARIZEN_ENABLE=1` by default. Status today:
+  `deferred (replaced by IPC fast-path)`.
+- **Native P2a/P2b (ResNet34-LM embedding + VBx cluster) MUST land**
+  for the same reason. Status: `deferred`.
+- **Native P3a (`diarizen_pipeline.cpp` C++ facade)** replaces the
+  Python worker entirely; only after this lands can the
+  `tools/diarizen_worker.py` subprocess and the line-JSON bridge in
+  `src/orator/diarizen_facade.cpp` be deleted.
+- IPC artefacts (`diarizen_worker.py`, `DiarizenFacade` JSON bridge,
+  `py310_diarizen` conda env in deployment notes) carry a
+  `// TODO(native-cuda-port): replace with diarizen_pipeline.cpp`
+  comment and are tracked here as the only outstanding philosophy
+  violations in the active codebase.
+
+**Default flip gate (P3c)** is therefore guarded by *two*
+independent preconditions:
+1. Native P1–P3 lands (architectural constraint).
+2. Live `awaken` + LLM-loaded retest produces
+   `accuracy(tests/test.mp3, diarization): <baseline>% → ≥ 93.5%`
+   (Constitutional rule, philosophy §"Accuracy Is the Sole
+   Metric").
+
+Neither precondition alone is sufficient. The IPC fast-path can
+produce the number, but a number obtained through a Python
+subprocess cannot ship as the default.
 
 ## Risks Identified at Planning Time
 

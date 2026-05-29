@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# TODO(native-cuda-port): replace with diarizen_pipeline.cpp once native
+# CUDA P1–P3 (S-WavLM-s80-md tap + Conformer EEND head + ResNet34-LM
+# embedder + VBx clustering) lands. This Python worker is the only
+# remaining philosophy violation tracked in the active codebase. See
+# docs/{en,zh}/architecture/12-diarizen.md §"Architectural anchor".
 """Persistent DiariZen-v2 worker (Orator/DiariZen facade backend).
 
 Protocol (one JSON object per line on stdin/stdout; logs to stderr):

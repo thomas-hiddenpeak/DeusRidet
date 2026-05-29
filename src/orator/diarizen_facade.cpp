@@ -4,6 +4,13 @@
  *     worker. POSIX pipes + fork/execvp + a tiny hand-rolled JSON reader
  *     limited to the worker's known reply shape. Not a generic IPC layer.
  * @serves DiarizenFacade. No callers outside src/orator/.
+ *
+ * TODO(native-cuda-port): replace this whole subprocess bridge with
+ * diarizen_pipeline.cpp once native CUDA P1–P3 lands (S-WavLM-s80-md
+ * tap + Conformer EEND head + ResNet34-LM 256-d embedder + VBx
+ * clustering). Python IPC is a temporary compatibility shim and the
+ * only outstanding philosophy violation in the active codebase. See
+ * docs/{en,zh}/architecture/12-diarizen.md §"Architectural anchor".
  */
 #include "orator/diarizen_facade.h"
 

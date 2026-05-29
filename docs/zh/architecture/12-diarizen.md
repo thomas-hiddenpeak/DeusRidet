@@ -137,10 +137,43 @@ Loader 落地时更新 `11-machina.md` Machina 显存预算表，标注为
 | **Hybrid IPC P0** | `DiarizenFacade` C++/Python 行 JSON 桥，使用 `tools/diarizen_worker.py` | `tests/test.mp3` 上 round-trip diarize 调用返回 1658 段 | **done 2026-05-29**（`e96255b`） |
 | **Hybrid IPC P1** | `AudioPipeline` session 捕获 tap + WS `diarizen_finalize` | 通过 `tools/diarizen_live_score.py` 得 `accuracy(tests/test.mp3, diarization): — → 93.6%` | **done 2026-05-29**（`b0e3a8f`） |
 | **Hybrid IPC P2** | `TranscriptHoldback` + `DiarizenPeriodicWorker`；WS `diarizen_trigger` / `diarizen_finalize`；LLM 注入前重写 `speaker_id` | `accuracy(tests/test.mp3, diarization): 93.5% → 93.6%` 无回归 | **done 2026-05-29**（`0cc9d0d`） |
-| **Hybrid IPC P2-verify** | LLM 加载（`DEUSRIDET_TEST_WS_ENABLE_LLM=1`）端到端复测 | holdback 激活下 accuracy 保持 ≥ 93.5% | 待办（本机 Qwen3.5-9B 路径缺失） |
+| **Hybrid IPC P2-verify** | LLM 加载（`DEUSRIDET_TEST_WS_ENABLE_LLM=1`）端到端复测 | holdback 激活下 accuracy 保持 ≥ 93.5% | **engine 稳定、gate 阻塞** 2026-05-29（`c294ebf` + `6249481`）—— 27B Qwen3.6-uncensored-heretic GPTQ-Int4 LLM 在 live `awaken` + diarizen 回放期间整 50 分钟运行无任何 CUDA 错误，但 diarizen worker 卡在 `facade.diarize returned empty: diarize: no opening brace` 的死循环，超过 client 1500 s 预算，未返回 `speaker_diarize_final`，因此没有 accuracy 行。阻塞从 "27B prefill kernel mismatch"（由 `c294ebf` 解决）重新分类为 "worker 再 extract 死循环" |
 
 按 `workflow.instructions.md` git 纪律，任一阶段失败不阻塞汇报；
 每次尝试都提交，即使最后回滚。
+
+### 架构锚定 —— 原生 CUDA P1–P3 是强制，不是可选
+
+IPC 捷径（Hybrid IPC P0/P1/P2，表尾三行）是过渡桥，不是终点。
+项目的硬约束是**纯 C++/CUDA**，覆盖所有常驻子系统（见
+[philosophy.instructions.md](../../../.github/instructions/philosophy.instructions.md)
+§"Compute Belongs on the GPU" 与项目一句话定义"自洽的多模态 LLM
+应用"）。在推理回路上挂 Python 子进程，仅当作临时兼容垫片可
+接受，永远不能作为发布默认。所以：
+
+- **原生 P1a/P1b/P1c**（WavLM s80-md tap + Conformer EEND head +
+  segmentation 编排器）**必须落地**，DiariZen 才能被翻为
+  `DEUSRIDET_DIARIZEN_ENABLE=1` 默认。当前状态：
+  `延后（由 IPC 捷径替代）`。
+- **原生 P2a/P2b**（ResNet34-LM 嵌入 + VBx 聚类）出于同一理由
+  **必须落地**。当前状态：`延后`。
+- **原生 P3a（`diarizen_pipeline.cpp` C++ 门面）** 替代 Python
+  worker 全部职责；只有等它落地之后，才能删除
+  `tools/diarizen_worker.py` 子进程与
+  `src/orator/diarizen_facade.cpp` 中的行 JSON 桥。
+- IPC 制品（`diarizen_worker.py`、`DiarizenFacade` JSON 桥、
+  部署说明里的 `py310_diarizen` conda env）一律带
+  `// TODO(native-cuda-port): replace with diarizen_pipeline.cpp`
+  注释，并在此作为**仅剩的、活跃代码库中的哲学违例**追踪。
+
+**默认翻转 gate（P3c）** 因此受 *两个* 独立前提同时约束：
+1. 原生 P1–P3 已落地（架构约束）。
+2. live `awaken` + LLM 加载复测产出
+   `accuracy(tests/test.mp3, diarization): <baseline>% → ≥ 93.5%`
+   （宪法规则，philosophy §"Accuracy Is the Sole Metric"）。
+
+任一单独前提都不够。IPC 捷径可以给出数字，但通过 Python 子进程
+得到的数字不能作为默认值发布。
 
 ## 计划期识别到的风险
 
