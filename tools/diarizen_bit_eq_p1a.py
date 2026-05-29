@@ -34,14 +34,27 @@ def main() -> int:
     )
     ap.add_argument("--bin", default="build/test_diarizen_cnn_biteq")
     ap.add_argument("--tol-cos", type=float, default=0.999)
+    ap.add_argument(
+        "--tap",
+        choices=["cnn", "tap0"],
+        default="cnn",
+        help="cnn = CNN feature extractor (cnn_out, 211 ch); "
+        "tap0 = encoder front end vs layer_hiddens[0] (1024 ch)",
+    )
     args = ap.parse_args()
 
     data = np.load(args.npz)
     wave = np.asarray(data["wave_in"], dtype=np.float32).reshape(-1)
-    ref = np.asarray(data["cnn_out"], dtype=np.float32)  # [1, T, 211]
-    ref = ref.reshape(ref.shape[-2], ref.shape[-1])      # [T, 211]
+    if args.tap == "tap0":
+        lh = np.asarray(data["layer_hiddens"], dtype=np.float32)  # [25,1,T,1024]
+        ref = lh[0].reshape(lh.shape[-2], lh.shape[-1])           # [T, 1024]
+        ref_name = "layer_hiddens[0]"
+    else:
+        ref = np.asarray(data["cnn_out"], dtype=np.float32)       # [1, T, 211]
+        ref = ref.reshape(ref.shape[-2], ref.shape[-1])          # [T, 211]
+        ref_name = "cnn_out"
     n = wave.size
-    print(f"wave_in: {n} samples  cnn_out: {ref.shape}")
+    print(f"wave_in: {n} samples  {ref_name}: {ref.shape}")
 
     with tempfile.TemporaryDirectory() as td:
         pcm_path = os.path.join(td, "wave_in.bin")
@@ -49,6 +62,8 @@ def main() -> int:
         wave.tofile(pcm_path)
 
         cmd = [args.bin, args.weights, pcm_path, str(n), out_path]
+        if args.tap == "tap0":
+            cmd.append("--tap0")
         print("running:", " ".join(cmd))
         r = subprocess.run(cmd)
         if r.returncode != 0:

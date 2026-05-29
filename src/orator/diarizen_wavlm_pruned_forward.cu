@@ -27,6 +27,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <initializer_list>
 #include <vector>
 
 #include <cublas_v2.h>
@@ -179,6 +180,144 @@ __global__ void transpose_scale_kernel(const float* __restrict__ src,  // [C,T]
     dst[t * C + c] = src[c * T + t] * scale[c];
 }
 
+// Per-frame LayerNorm over the feature dimension of a frame-major [T, C]
+// buffer (one block per frame t). Affine (gamma/beta), eps 1e-5, in place.
+__global__ void row_layer_norm_kernel(float* __restrict__ data,  // [T, C]
+                                      const float* __restrict__ gamma,
+                                      const float* __restrict__ beta,
+                                      int T, int C) {
+    int t = blockIdx.x;
+    if (t >= T) return;
+    float* row = data + (size_t)t * C;
+
+    float sum = 0.0f;
+    for (int c = threadIdx.x; c < C; c += blockDim.x) sum += row[c];
+    for (int o = warpSize / 2; o > 0; o >>= 1)
+        sum += __shfl_down_sync(0xffffffff, sum, o);
+    __shared__ float s_buf[32];
+    int lane = threadIdx.x % warpSize;
+    int warp = threadIdx.x / warpSize;
+    if (lane == 0) s_buf[warp] = sum;
+    __syncthreads();
+    __shared__ float s_mean, s_inv;
+    int nw = (blockDim.x + warpSize - 1) / warpSize;
+    if (threadIdx.x == 0) {
+        float tot = 0.0f;
+        for (int i = 0; i < nw; ++i) tot += s_buf[i];
+        s_mean = tot / C;
+    }
+    __syncthreads();
+    float mean = s_mean;
+
+    float vs = 0.0f;
+    for (int c = threadIdx.x; c < C; c += blockDim.x) {
+        float d = row[c] - mean;
+        vs += d * d;
+    }
+    for (int o = warpSize / 2; o > 0; o >>= 1)
+        vs += __shfl_down_sync(0xffffffff, vs, o);
+    if (lane == 0) s_buf[warp] = vs;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float tot = 0.0f;
+        for (int i = 0; i < nw; ++i) tot += s_buf[i];
+        s_inv = rsqrtf(tot / C + 1e-5f);
+    }
+    __syncthreads();
+    float inv = s_inv;
+
+    for (int c = threadIdx.x; c < C; c += blockDim.x)
+        row[c] = (row[c] - mean) * inv * gamma[c] + beta[c];
+}
+
+// Add a per-feature bias to a frame-major [T, N] buffer in place.
+__global__ void bias_add_rows_kernel(float* __restrict__ data, // [T, N]
+                                     const float* __restrict__ bias, // [N]
+                                     int T, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    long total = (long)T * N;
+    if (idx >= total) return;
+    data[idx] += bias[idx % N];
+}
+
+// Transpose frame-major [T, C] -> channel-major [C, T].
+__global__ void transpose_TC_to_CT_kernel(const float* __restrict__ src, // [T,C]
+                                          float* __restrict__ dst,        // [C,T]
+                                          int T, int C) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = T * C;
+    if (idx >= total) return;
+    int t = idx / C;
+    int c = idx % C;
+    dst[c * T + t] = src[t * C + c];
+}
+
+// weight_norm reconstruction (dim=2): per kernel-tap k, compute the L2 norm
+// of v[:, :, k] over the (out, in) axes. v is [O, I, K] contiguous.
+__global__ void posconv_norm_kernel(const float* __restrict__ v,
+                                    int O, int I, int K,
+                                    float* __restrict__ norm) {  // [K]
+    int k = blockIdx.x;
+    if (k >= K) return;
+    float acc = 0.0f;
+    int OI = O * I;
+    for (int oi = threadIdx.x; oi < OI; oi += blockDim.x) {
+        float val = v[(size_t)oi * K + k];
+        acc += val * val;
+    }
+    for (int o = warpSize / 2; o > 0; o >>= 1)
+        acc += __shfl_down_sync(0xffffffff, acc, o);
+    __shared__ float s_buf[32];
+    int lane = threadIdx.x % warpSize;
+    int warp = threadIdx.x / warpSize;
+    if (lane == 0) s_buf[warp] = acc;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float tot = 0.0f;
+        int nw = (blockDim.x + warpSize - 1) / warpSize;
+        for (int i = 0; i < nw; ++i) tot += s_buf[i];
+        norm[k] = sqrtf(tot);
+    }
+}
+
+// W[o, i, k] = g[k] * v[o, i, k] / norm[k]. g is the weight_norm scale
+// vector of shape [1, 1, K]; v is [O, I, K]; output W matches v's layout.
+__global__ void posconv_weight_kernel(const float* __restrict__ v,
+                                      const float* __restrict__ g,    // [K]
+                                      const float* __restrict__ norm, // [K]
+                                      int O, int I, int K,
+                                      float* __restrict__ W) {
+    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    long total = (long)O * I * K;
+    if (idx >= total) return;
+    int k = idx % K;
+    W[idx] = g[k] * v[idx] / norm[k];
+}
+
+// Add a per-channel bias to a channel-major [C, T] buffer in place.
+__global__ void bias_add_channels_kernel(float* __restrict__ data, // [C,T]
+                                         const float* __restrict__ bias, // [C]
+                                         int C, int T) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = C * T;
+    if (idx >= total) return;
+    data[idx] += bias[idx / T];
+}
+
+// Transpose channel-major [C, src_stride] -> frame-major [T, C] and add into
+// an existing frame-major [T, C] residual buffer (out += src^T), reading only
+// the first T of src_stride columns (used to trim pos_conv's SamePad frame).
+__global__ void transpose_CT_to_TC_add_kernel(const float* __restrict__ src, // [C,src_stride]
+                                              float* __restrict__ out,        // [T,C]
+                                              int C, int T, int src_stride) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = C * T;
+    if (idx >= total) return;
+    int c = idx / T;
+    int t = idx % T;
+    out[(size_t)t * C + c] += src[(size_t)c * src_stride + t];
+}
+
 }  // namespace
 
 // --------------------------------------------------------------------------
@@ -196,17 +335,16 @@ bool DiarizenWavlmPruned::ensure_handles_() {
 }
 
 // --------------------------------------------------------------------------
-// CNN feature extractor (P1a-step2a)
+// CNN feature extractor (P1a-step2a) — internal, returns a GPU buffer
 // --------------------------------------------------------------------------
-std::vector<float>
-DiarizenWavlmPruned::debug_cnn_features(const float* pcm, int n_samples,
-                                        int& T_out) {
+float* DiarizenWavlmPruned::run_cnn_(const float* pcm, int n_samples,
+                                     int& T_out) {
     T_out = 0;
     if (!loaded_) {
-        LOG_ERROR(kLog, "debug_cnn_features called before load()");
-        return {};
+        LOG_ERROR(kLog, "run_cnn_ called before load()");
+        return nullptr;
     }
-    if (!ensure_handles_()) return {};
+    if (!ensure_handles_()) return nullptr;
     auto cudnn = static_cast<cudnnHandle_t>(cudnn_);
 
     constexpr int kCnn = DiarizenWavlmPrunedArch::kCnnLayers;
@@ -234,7 +372,7 @@ DiarizenWavlmPruned::debug_cnn_features(const float* pcm, int n_samples,
         w_lnb[i] = find(key);
         if (!w_conv[i] || !w_lng[i] || !w_lnb[i]) {
             LOG_ERROR(kLog, "missing CNN tensor for conv layer %d", i);
-            return {};
+            return nullptr;
         }
         // conv.weight shape [C_out, C_in, K]
         cout[i] = w_conv[i]->shape[0];
@@ -243,7 +381,7 @@ DiarizenWavlmPruned::debug_cnn_features(const float* pcm, int n_samples,
     const auto* dummy = find("wavlm_model.feature_extractor.dummy_weight");
     if (!dummy) {
         LOG_ERROR(kLog, "missing feature_extractor.dummy_weight");
-        return {};
+        return nullptr;
     }
 
     // ---- Allocate GPU scratch ------------------------------------------
@@ -251,14 +389,14 @@ DiarizenWavlmPruned::debug_cnn_features(const float* pcm, int n_samples,
     // (layer 0: 512 x ~51199). Plus an fp32 weight staging buffer sized
     // for the largest conv weight.
     auto fail = [&](const char* what, void* a, void* b, void* c, void* d,
-                    void* e) -> std::vector<float> {
-        LOG_ERROR(kLog, "debug_cnn_features: %s", what);
+                    void* e) -> float* {
+        LOG_ERROR(kLog, "run_cnn_: %s", what);
         if (a) cudaFree(a);
         if (b) cudaFree(b);
         if (c) cudaFree(c);
         if (d) cudaFree(d);
         if (e) cudaFree(e);
-        return {};
+        return nullptr;
     };
 
     // Compute conv output lengths.
@@ -422,17 +560,201 @@ DiarizenWavlmPruned::debug_cnn_features(const float* pcm, int n_samples,
     if (!cuda_ck_(cudaDeviceSynchronize(), "cnn sync"))
         return fail("sync", d_pcm, d_a, d_b, d_w, d_out);
 
-    std::vector<float> host((size_t)T_final * Cf);
-    cudaMemcpy(host.data(), d_out, host.size() * sizeof(float),
-               cudaMemcpyDeviceToHost);
-
+    // Free all scratch except d_out, which is handed back to the caller.
     cudaFree(d_pcm);
     cudaFree(d_a);
     cudaFree(d_b);
     cudaFree(d_w);
-    cudaFree(d_out);
 
     T_out = T_final;
+    return d_out;
+}
+
+// --------------------------------------------------------------------------
+// CNN feature extractor (P1a-step2a) — public host wrapper
+// --------------------------------------------------------------------------
+std::vector<float>
+DiarizenWavlmPruned::debug_cnn_features(const float* pcm, int n_samples,
+                                        int& T_out) {
+    int T = 0;
+    float* d_out = run_cnn_(pcm, n_samples, T);
+    if (!d_out) return {};
+    const int Cf = DiarizenWavlmPrunedArch::kFeatProjInDim;  // 211
+    std::vector<float> host((size_t)T * Cf);
+    cudaMemcpy(host.data(), d_out, host.size() * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    cudaFree(d_out);
+    T_out = T;
+    return host;
+}
+
+// --------------------------------------------------------------------------
+// Tap 0 = encoder front end (P1a-step2b): feature_projection (LayerNorm ->
+// Linear) -> positional convolution -> residual add. No transformer.layer_norm
+// (it is not part of any of the 25 weight_sum taps; see header). Bit-checked
+// against the reference `layer_hiddens[0]` tap.
+// --------------------------------------------------------------------------
+std::vector<float>
+DiarizenWavlmPruned::debug_tap0(const float* pcm, int n_samples, int& T_out) {
+    T_out = 0;
+    int T = 0;
+    float* d_cnn = run_cnn_(pcm, n_samples, T);  // [T, 211] frame-major
+    if (!d_cnn) return {};
+
+    constexpr int Cin = DiarizenWavlmPrunedArch::kFeatProjInDim;  // 211
+    constexpr int Cout = DiarizenWavlmPrunedArch::kHiddenDim;     // 1024
+    constexpr int kPosK = 128;        // pos_conv kernel size
+    constexpr int kPosGroups = 16;    // pos_conv groups
+    constexpr int kPosCinG = Cout / kPosGroups;  // in channels per group = 64
+    constexpr int kPosPad = 64;       // pos_conv padding
+
+    auto bail = [&](const char* what, std::initializer_list<void*> ptrs) {
+        LOG_ERROR(kLog, "debug_tap0: %s", what);
+        for (void* p : ptrs)
+            if (p) cudaFree(p);
+        return std::vector<float>{};
+    };
+
+    // Resolve weight views.
+    const auto* fp_lng = find("wavlm_model.encoder.feature_projection.layer_norm.weight");
+    const auto* fp_lnb = find("wavlm_model.encoder.feature_projection.layer_norm.bias");
+    const auto* fp_w   = find("wavlm_model.encoder.feature_projection.projection.weight");
+    const auto* fp_b   = find("wavlm_model.encoder.feature_projection.projection.bias");
+    const auto* pc_b   = find("wavlm_model.encoder.transformer.pos_conv_embed.conv.bias");
+    const auto* pc_g   = find("wavlm_model.encoder.transformer.pos_conv_embed.conv.parametrizations.weight.original0");
+    const auto* pc_v   = find("wavlm_model.encoder.transformer.pos_conv_embed.conv.parametrizations.weight.original1");
+    if (!fp_lng || !fp_lnb || !fp_w || !fp_b || !pc_b || !pc_g || !pc_v)
+        return bail("missing tap0 tensor", {d_cnn});
+
+    // ---- feature_projection: LayerNorm(211) over features ----------------
+    float* d_lngb = nullptr;
+    cudaMalloc(&d_lngb, (size_t)2 * Cin * sizeof(float));
+    half_to_float_kernel<<<div_ceil_(Cin, kBlock), kBlock>>>(fp_lng->data, d_lngb, Cin);
+    half_to_float_kernel<<<div_ceil_(Cin, kBlock), kBlock>>>(fp_lnb->data, d_lngb + Cin, Cin);
+    row_layer_norm_kernel<<<T, kBlock>>>(d_cnn, d_lngb, d_lngb + Cin, T, Cin);
+    cudaFree(d_lngb);
+
+    // ---- feature_projection: Linear 211 -> 1024 (+bias) ------------------
+    float* d_projW = nullptr;  // [1024,211] fp32
+    cudaMalloc(&d_projW, (size_t)Cout * Cin * sizeof(float));
+    half_to_float_kernel<<<div_ceil_(Cout * Cin, kBlock), kBlock>>>(
+        fp_w->data, d_projW, Cout * Cin);
+    float* d_projB = nullptr;
+    cudaMalloc(&d_projB, (size_t)Cout * sizeof(float));
+    half_to_float_kernel<<<div_ceil_(Cout, kBlock), kBlock>>>(fp_b->data, d_projB, Cout);
+
+    float* d_hidden = nullptr;  // [T,1024] frame-major
+    cudaMalloc(&d_hidden, (size_t)T * Cout * sizeof(float));
+
+    cublasHandle_t blas = nullptr;
+    if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS)
+        return bail("cublasCreate", {d_cnn, d_projW, d_projB, d_hidden});
+
+    // Y[T,1024] = X[T,211] * W^T, W is [1024,211]. Column-major mapping:
+    // C(1024 x T) = op(W)^T (1024 x 211) * X_colmajor(211 x T).
+    const float alpha = 1.0f, beta = 0.0f;
+    cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, Cout, T, Cin, &alpha,
+                d_projW, Cin, d_cnn, Cin, &beta, d_hidden, Cout);
+    bias_add_rows_kernel<<<div_ceil_(T * Cout, kBlock), kBlock>>>(d_hidden, d_projB, T, Cout);
+    cublasDestroy(blas);
+    cudaFree(d_cnn);
+    cudaFree(d_projW);
+    cudaFree(d_projB);
+
+    // ---- positional convolution -----------------------------------------
+    // Transpose hidden [T,1024] -> channel-major [1024,T] for conv input.
+    float* d_ct = nullptr;
+    cudaMalloc(&d_ct, (size_t)Cout * T * sizeof(float));
+    transpose_TC_to_CT_kernel<<<div_ceil_(T * Cout, kBlock), kBlock>>>(
+        d_hidden, d_ct, T, Cout);
+
+    // Reconstruct weight_norm weight W = g * v / ||v||_(out,in) per k.
+    const long vnum = (long)Cout * kPosCinG * kPosK;
+    float* d_v = nullptr;
+    cudaMalloc(&d_v, vnum * sizeof(float));
+    half_to_float_kernel<<<div_ceil_((int)vnum, kBlock), kBlock>>>(pc_v->data, d_v, (int)vnum);
+    float* d_g = nullptr;
+    cudaMalloc(&d_g, (size_t)kPosK * sizeof(float));
+    half_to_float_kernel<<<div_ceil_(kPosK, kBlock), kBlock>>>(pc_g->data, d_g, kPosK);
+    float* d_norm = nullptr;
+    cudaMalloc(&d_norm, (size_t)kPosK * sizeof(float));
+    posconv_norm_kernel<<<kPosK, kBlock>>>(d_v, Cout, kPosCinG, kPosK, d_norm);
+    float* d_pcW = nullptr;
+    cudaMalloc(&d_pcW, vnum * sizeof(float));
+    posconv_weight_kernel<<<div_ceil_((int)vnum, kBlock), kBlock>>>(
+        d_v, d_g, d_norm, Cout, kPosCinG, kPosK, d_pcW);
+    cudaFree(d_v);
+    cudaFree(d_g);
+    cudaFree(d_norm);
+
+    // Grouped conv1d via cuDNN: in [1,1024,1,T] pad_w=64 -> out [1,1024,1,T+1].
+    const int T_conv = T + 2 * kPosPad - kPosK + 1;  // = T + 1
+    float* d_conv = nullptr;
+    cudaMalloc(&d_conv, (size_t)Cout * T_conv * sizeof(float));
+    auto cudnn = static_cast<cudnnHandle_t>(cudnn_);
+    cudnnTensorDescriptor_t in_d, out_d;
+    cudnnFilterDescriptor_t filt_d;
+    cudnnConvolutionDescriptor_t conv_d;
+    cudnnCreateTensorDescriptor(&in_d);
+    cudnnCreateTensorDescriptor(&out_d);
+    cudnnCreateFilterDescriptor(&filt_d);
+    cudnnCreateConvolutionDescriptor(&conv_d);
+    cudnnSetTensor4dDescriptor(in_d, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, Cout, 1, T);
+    cudnnSetTensor4dDescriptor(out_d, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, Cout, 1, T_conv);
+    cudnnSetFilter4dDescriptor(filt_d, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW,
+                               Cout, kPosCinG, 1, kPosK);
+    cudnnSetConvolution2dDescriptor(conv_d, 0, kPosPad, 1, 1, 1, 1,
+                                    CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
+    cudnnSetConvolutionGroupCount(conv_d, kPosGroups);
+
+    int returned = 0;
+    cudnnConvolutionFwdAlgoPerf_t perf;
+    cudnnGetConvolutionForwardAlgorithm_v7(cudnn, in_d, filt_d, conv_d, out_d,
+                                           1, &returned, &perf);
+    size_t ws = 0;
+    cudnnGetConvolutionForwardWorkspaceSize(cudnn, in_d, filt_d, conv_d, out_d,
+                                            perf.algo, &ws);
+    if (ws > cudnn_ws_bytes_) {
+        if (cudnn_ws_) cudaFree(cudnn_ws_);
+        cudaMalloc(&cudnn_ws_, ws);
+        cudnn_ws_bytes_ = ws;
+    }
+    cudnnStatus_t cs = cudnnConvolutionForward(
+        cudnn, &alpha, in_d, d_ct, filt_d, d_pcW, conv_d, perf.algo,
+        cudnn_ws_, cudnn_ws_bytes_, &beta, out_d, d_conv);
+    cudnnDestroyTensorDescriptor(in_d);
+    cudnnDestroyTensorDescriptor(out_d);
+    cudnnDestroyFilterDescriptor(filt_d);
+    cudnnDestroyConvolutionDescriptor(conv_d);
+    cudaFree(d_ct);
+    cudaFree(d_pcW);
+    if (cs != CUDNN_STATUS_SUCCESS) {
+        LOG_ERROR(kLog, "pos_conv failed: %s", cudnnGetErrorString(cs));
+        return bail("pos_conv forward", {d_hidden, d_conv});
+    }
+
+    // Bias + exact GELU on the full [1024, T+1] conv output (pre-trim).
+    float* d_convB = nullptr;
+    cudaMalloc(&d_convB, (size_t)Cout * sizeof(float));
+    half_to_float_kernel<<<div_ceil_(Cout, kBlock), kBlock>>>(pc_b->data, d_convB, Cout);
+    bias_add_channels_kernel<<<div_ceil_(Cout * T_conv, kBlock), kBlock>>>(
+        d_conv, d_convB, Cout, T_conv);
+    gelu_exact_kernel<<<div_ceil_(Cout * T_conv, kBlock), kBlock>>>(d_conv, Cout * T_conv);
+    cudaFree(d_convB);
+
+    // Residual: hidden += pos_conv^T (trimmed to first T of T+1 frames).
+    transpose_CT_to_TC_add_kernel<<<div_ceil_(Cout * T, kBlock), kBlock>>>(
+        d_conv, d_hidden, Cout, T, T_conv);
+    cudaFree(d_conv);
+
+    if (!cuda_ck_(cudaDeviceSynchronize(), "tap0 sync"))
+        return bail("sync", {d_hidden});
+
+    std::vector<float> host((size_t)T * Cout);
+    cudaMemcpy(host.data(), d_hidden, host.size() * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    cudaFree(d_hidden);
+    T_out = T;
     return host;
 }
 

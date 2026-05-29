@@ -136,6 +136,16 @@ public:
     std::vector<float> debug_cnn_features(const float* pcm, int n_samples,
                                           int& T_out);
 
+    /// P1a-step2b milestone: run the CNN feature extractor followed by the
+    /// encoder front end (feature_projection LayerNorm+Linear -> positional
+    /// convolution -> residual add). This equals tap 0 of the 25 WavLM
+    /// taps consumed by weight_sum (the transformer.layer_norm is NOT part
+    /// of any tap and is omitted, matching extract_features /
+    /// get_intermediate_outputs). Output is the [T, 1024] hidden flattened
+    /// frame-major. Returns empty on error. Bit-checked against the
+    /// `layer_hiddens[0]` reference tap.
+    std::vector<float> debug_tap0(const float* pcm, int n_samples, int& T_out);
+
 private:
     bool loaded_ = false;
     void*       arena_  = nullptr;   ///< owned, GPU
@@ -153,6 +163,11 @@ private:
 
     bool ensure_handles_();
     void release_();
+
+    /// Internal: run the CNN feature extractor and return a freshly
+    /// allocated GPU buffer of shape [T_out, 211] (frame-major). Caller
+    /// owns the pointer and must cudaFree it. Returns nullptr on error.
+    float* run_cnn_(const float* pcm, int n_samples, int& T_out);
 };
 
 }  // namespace orator

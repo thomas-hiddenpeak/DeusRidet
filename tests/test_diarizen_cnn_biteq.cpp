@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 using deusridet::orator::DiarizenWavlmPruned;
@@ -16,7 +17,7 @@ using deusridet::orator::DiarizenWavlmPruned;
 int main(int argc, char** argv) {
     if (argc < 5) {
         std::fprintf(stderr,
-                     "usage: %s <safetensors> <pcm.bin> <n_samples> <out.bin>\n",
+                     "usage: %s <safetensors> <pcm.bin> <n_samples> <out.bin> [--tap0]\n",
                      argv[0]);
         return 2;
     }
@@ -24,6 +25,7 @@ int main(int argc, char** argv) {
     const char* pcm_path = argv[2];
     const int n_samples = std::atoi(argv[3]);
     const char* out_path = argv[4];
+    const bool tap0 = (argc >= 6) && (std::string(argv[5]) == "--tap0");
 
     // Read raw float32 PCM.
     std::vector<float> pcm(n_samples);
@@ -47,12 +49,16 @@ int main(int argc, char** argv) {
     }
 
     int T = 0;
-    std::vector<float> feats = m.debug_cnn_features(pcm.data(), n_samples, T);
+    std::vector<float> feats = tap0
+                                  ? m.debug_tap0(pcm.data(), n_samples, T)
+                                  : m.debug_cnn_features(pcm.data(), n_samples, T);
     if (feats.empty()) {
-        std::fprintf(stderr, "debug_cnn_features failed\n");
+        std::fprintf(stderr, "%s failed\n",
+                     tap0 ? "debug_tap0" : "debug_cnn_features");
         return 1;
     }
-    std::fprintf(stderr, "cnn features: T=%d C=%d (%zu floats)\n", T,
+    std::fprintf(stderr, "%s: T=%d C=%d (%zu floats)\n",
+                 tap0 ? "tap0" : "cnn features", T,
                  (int)(feats.size() / (T ? T : 1)), feats.size());
 
     FILE* o = std::fopen(out_path, "wb");
