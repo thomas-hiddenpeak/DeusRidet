@@ -267,6 +267,16 @@ target_link_libraries(orator_reclusterer_eval PRIVATE orator communis)
 add_executable(test_diarizen_facade tests/test_diarizen_facade.cpp)
 target_include_directories(test_diarizen_facade PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(test_diarizen_facade PRIVATE orator communis)
+
+# DiariZen-v2 native CUDA port — P1a-step1 smoke test for the WavLM-pruned
+# safetensors loader (no forward pass yet). See docs/{en,zh}/architecture/
+# 12-diarizen.md "Architectural anchor" and the per-phase table.
+add_executable(test_diarizen_wavlm_pruned_loader
+    tests/test_diarizen_wavlm_pruned_loader.cpp)
+target_include_directories(test_diarizen_wavlm_pruned_loader
+    PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_diarizen_wavlm_pruned_loader
+    PRIVATE orator communis machina CUDA::cudart)
 # ============================================================================
 add_executable(test_overlap_separator tests/test_overlap_separator.cpp)
 target_include_directories(test_overlap_separator PRIVATE ${CMAKE_SOURCE_DIR})

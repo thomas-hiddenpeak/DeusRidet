@@ -1,0 +1,283 @@
+/**
+ * @file diarizen_wavlm_pruned.cu
+ * @philosophical_role P1a-step1 of the DiariZen native CUDA port. Loader
+ *     only: maps every fp16 tensor of the BUT-FIT wavlm_pruned.safetensors
+ *     into a single contiguous GPU arena, captures per-layer pruned
+ *     dimensions, and validates the architecture against the known
+ *     wavlm-large-s80-md-v2 invariants. Forward pass deliberately omitted
+ *     and lives in P1a-step2.
+ * @serves DiarizenWavlmPruned. The Conformer head (P1b) is its sole
+ *     consumer once forward() lands; until then the smoke-test target
+ *     `test_diarizen_wavlm_pruned_loader` exercises the loader path.
+ */
+#include "diarizen_wavlm_pruned.h"
+
+#include "../communis/log.h"
+#include "../machina/safetensors.h"
+#include "../machina/tensor.h"
+
+#include <cstring>
+#include <cstdio>
+#include <regex>
+
+#include <cuda_runtime.h>
+
+namespace deusridet {
+namespace orator {
+
+namespace {
+
+constexpr const char* kLog = "DiariZenWavlm";
+
+inline bool cuda_ok_(cudaError_t e, const char* what) {
+    if (e != cudaSuccess) {
+        LOG_ERROR(kLog, "CUDA %s failed: %s", what, cudaGetErrorString(e));
+        return false;
+    }
+    return true;
+}
+
+// Parse a `wavlm_model.encoder.transformer.layers.<N>.<rest>` key. Returns
+// (layer_index, "<rest>"). Returns (-1, name) when the key does not match,
+// so we can skip non-layer tensors quickly.
+struct LayerKey {
+    int  layer = -1;
+    std::string rest;
+};
+
+LayerKey parse_layer_key_(const std::string& name) {
+    static const std::regex re(
+        R"(^wavlm_model\.encoder\.transformer\.layers\.(\d+)\.(.+)$)");
+    std::smatch m;
+    if (!std::regex_match(name, m, re)) return {-1, name};
+    return {std::stoi(m[1].str()), m[2].str()};
+}
+
+}  // namespace
+
+// --------------------------------------------------------------------------
+// Lifecycle
+// --------------------------------------------------------------------------
+DiarizenWavlmPruned::DiarizenWavlmPruned() = default;
+
+DiarizenWavlmPruned::~DiarizenWavlmPruned() {
+    release_();
+}
+
+void DiarizenWavlmPruned::release_() {
+    if (arena_) {
+        cudaFree(arena_);
+        arena_ = nullptr;
+    }
+    arena_bytes_ = 0;
+    tensors_.clear();
+    layer_dims_.clear();
+    loaded_ = false;
+}
+
+// --------------------------------------------------------------------------
+// load
+// --------------------------------------------------------------------------
+bool DiarizenWavlmPruned::load(const std::string& path) {
+    release_();
+
+    LOG_INFO(kLog, "loading wavlm-pruned weights: %s", path.c_str());
+    SafetensorsFile sf(path);
+    auto names = sf.tensor_names();
+    if (names.empty()) {
+        LOG_ERROR(kLog, "no tensors found in %s", path.c_str());
+        return false;
+    }
+
+    // Pass 1: validate dtype + accumulate arena bytes. Match the per-
+    // tensor alignment used in pass 2 (16 bytes) so the running total
+    // here matches the cursor walk below; otherwise the last tensors
+    // overflow the arena.
+    constexpr std::size_t kTensorAlign = 16;
+    std::size_t total = 0;
+    for (const auto& n : names) {
+        auto t = sf.get_tensor(n);
+        if (!t) {
+            LOG_ERROR(kLog, "tensor missing during enumeration: %s",
+                      n.c_str());
+            return false;
+        }
+        if (t->dtype() != DataType::FP16) {
+            LOG_ERROR(kLog,
+                      "tensor %s is not fp16 (got dtype=%d); the "
+                      "wavlm-large-s80-md-v2 conversion should produce "
+                      "only fp16 tensors",
+                      n.c_str(), static_cast<int>(t->dtype()));
+            return false;
+        }
+        total += (t->nbytes() + kTensorAlign - 1) & ~(kTensorAlign - 1);
+    }
+
+    // Pad to 256-byte alignment for safety against any future kernel that
+    // wants cuBLAS-friendly bases.
+    constexpr std::size_t kAlign = 256;
+    const std::size_t arena_total = (total + kAlign - 1) & ~(kAlign - 1);
+    LOG_INFO(kLog, "allocating arena %.2f MB (%zu tensors, raw %.2f MB)",
+             arena_total / (1024.0 * 1024.0), names.size(),
+             total / (1024.0 * 1024.0));
+
+    if (!cuda_ok_(cudaMalloc(&arena_, arena_total), "cudaMalloc arena"))
+        return false;
+    arena_bytes_ = arena_total;
+
+    // Pass 2: copy each tensor into the arena and record its view.
+    std::size_t cursor = 0;
+    tensors_.reserve(names.size());
+    layer_dims_.assign(DiarizenWavlmPrunedArch::kTransformerLayers, {});
+    for (int i = 0; i < DiarizenWavlmPrunedArch::kTransformerLayers; ++i) {
+        layer_dims_[i].layer_index = i;
+    }
+
+    for (const auto& n : names) {
+        auto t = sf.get_tensor(n);
+        const std::size_t nb = t->nbytes();
+        // Per-tensor alignment too (small enough vs arena).
+        const std::size_t aligned = (nb + kTensorAlign - 1) & ~(kTensorAlign - 1);
+        if (cursor + aligned > arena_total) {
+            LOG_ERROR(kLog,
+                      "arena overflow on tensor %s (cursor=%zu, need=%zu)",
+                      n.c_str(), cursor, aligned);
+            release_();
+            return false;
+        }
+        void* dst = static_cast<char*>(arena_) + cursor;
+        if (!cuda_ok_(cudaMemcpy(dst, t->data(), nb, cudaMemcpyHostToDevice),
+                      "cudaMemcpy tensor")) {
+            release_();
+            return false;
+        }
+
+        DiarizenWavlmPrunedTensorView v;
+        v.data  = static_cast<const __half*>(dst);
+        v.numel = t->numel();
+        const auto& shape = t->shape();
+        v.dim = static_cast<int>(shape.size());
+        for (int d = 0; d < v.dim && d < 4; ++d) {
+            v.shape[d] = static_cast<int>(shape[d]);
+        }
+        tensors_.emplace(n, v);
+
+        // Capture per-layer pruned dims.
+        const auto lk = parse_layer_key_(n);
+        if (lk.layer >= 0 && lk.layer < (int)layer_dims_.size()) {
+            auto& dims = layer_dims_[lk.layer];
+            if (lk.rest == "attention.k_proj.weight" && v.dim == 2) {
+                dims.attn_inner = v.shape[0];
+                dims.attn_head_dim =
+                    v.shape[0] / DiarizenWavlmPrunedArch::kNumAttnHeads;
+            } else if (lk.rest == "feed_forward.intermediate_dense.weight"
+                       && v.dim == 2) {
+                dims.ffn_inner = v.shape[0];
+            } else if (lk.rest == "attention.gru_rel_pos_linear.weight"
+                       && v.dim == 2) {
+                dims.gru_rel_pos_inner = v.shape[0];
+            }
+        }
+
+        cursor += aligned;
+    }
+
+    // Final validation: ffn must exist on every layer; attention can be
+    // fully pruned away (BUT-FIT's structured pruning removes the entire
+    // attention sub-block on some layers — known cases: layers 9, 12,
+    // 16, 17 in wavlm-large-s80-md-v2). attn_inner == 0 is a legal
+    // "no-op attention" marker; the forward pass (P1a-step2) treats
+    // such a layer as residual + FFN only.
+    for (const auto& d : layer_dims_) {
+        if (d.ffn_inner <= 0) {
+            LOG_ERROR(kLog,
+                      "layer %d missing ffn_inner (got %d) - checkpoint "
+                      "structurally broken",
+                      d.layer_index, d.ffn_inner);
+            release_();
+            return false;
+        }
+        if (d.attn_inner > 0 &&
+            d.attn_inner % DiarizenWavlmPrunedArch::kNumAttnHeads != 0) {
+            LOG_ERROR(kLog,
+                      "layer %d attn_inner=%d not divisible by num_heads=%d",
+                      d.layer_index, d.attn_inner,
+                      DiarizenWavlmPrunedArch::kNumAttnHeads);
+            release_();
+            return false;
+        }
+    }
+
+    // Sanity-check the top-level tail tensors against the architectural
+    // constants so a wrong checkpoint fails loudly here, not 30 minutes
+    // into the first segmentation pass.
+    auto must = [&](const std::string& name, int d0, int d1) -> bool {
+        auto it = tensors_.find(name);
+        if (it == tensors_.end()) {
+            LOG_ERROR(kLog, "missing required tensor: %s", name.c_str());
+            return false;
+        }
+        const auto& v = it->second;
+        if (v.shape[0] != d0 || (d1 > 0 && v.shape[1] != d1)) {
+            LOG_ERROR(kLog,
+                      "tensor %s shape mismatch: got [%d,%d], expected [%d,%d]",
+                      name.c_str(), v.shape[0], v.shape[1], d0, d1);
+            return false;
+        }
+        return true;
+    };
+    const bool tail_ok =
+        must("weight_sum.weight", 1,
+             DiarizenWavlmPrunedArch::kLayerTaps) &&
+        must("proj.weight",
+             DiarizenWavlmPrunedArch::kFinalProjOutDim,
+             DiarizenWavlmPrunedArch::kHiddenDim) &&
+        must("lnorm.weight",
+             DiarizenWavlmPrunedArch::kFinalProjOutDim, 0) &&
+        must("wavlm_model.encoder.feature_projection.projection.weight",
+             DiarizenWavlmPrunedArch::kHiddenDim,
+             DiarizenWavlmPrunedArch::kFeatProjInDim);
+    if (!tail_ok) {
+        release_();
+        return false;
+    }
+
+    loaded_ = true;
+    LOG_INFO(kLog,
+             "loaded %zu tensors into %.2f MB arena; %d transformer layers",
+             tensors_.size(),
+             arena_bytes_ / (1024.0 * 1024.0),
+             DiarizenWavlmPrunedArch::kTransformerLayers);
+    return true;
+}
+
+// --------------------------------------------------------------------------
+// Accessors / diagnostics
+// --------------------------------------------------------------------------
+const DiarizenWavlmPrunedTensorView*
+DiarizenWavlmPruned::find(const std::string& name) const {
+    auto it = tensors_.find(name);
+    if (it == tensors_.end()) return nullptr;
+    return &it->second;
+}
+
+void DiarizenWavlmPruned::log_summary() const {
+    if (!loaded_) {
+        LOG_INFO(kLog, "(not loaded)");
+        return;
+    }
+    LOG_INFO(kLog,
+             "arena=%.2f MB  tensors=%zu  layers=%d",
+             arena_bytes_ / (1024.0 * 1024.0),
+             tensors_.size(),
+             static_cast<int>(layer_dims_.size()));
+    for (const auto& d : layer_dims_) {
+        std::fprintf(stderr,
+                     "  layer %2d  attn_inner=%4d  head_dim=%3d  ffn_inner=%4d\n",
+                     d.layer_index, d.attn_inner, d.attn_head_dim,
+                     d.ffn_inner);
+    }
+}
+
+}  // namespace orator
+}  // namespace deusridet

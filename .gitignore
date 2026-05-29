@@ -24,3 +24,7 @@ tests/asrTest*.txt
 # Auditus Evaluation Harness run artifacts (Step 15+).
 runs/
 
+
+# DiariZen native CUDA port — bit-equality reference fixtures (~75 MB each,
+# regenerable via tools/diarizen_dump_reference.py inside py310_diarizen env).
+tests/fixtures/diarizen_*.npz
