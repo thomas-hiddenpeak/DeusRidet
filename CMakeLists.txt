@@ -303,6 +303,14 @@ target_include_directories(test_diarizen_segmentation_biteq
     PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_diarizen_segmentation_biteq
     PRIVATE orator communis machina CUDA::cudart CUDA::cublas cudnn)
+# DiariZen-v2 native CUDA port — P2a WeSpeaker ResNet34-LM embedder bit-eq.
+# Links sensus to reuse the GPU PoveyFbank kernel (launch_povey_fbank).
+add_executable(test_diarizen_embedder_biteq
+    tests/test_diarizen_embedder_biteq.cpp)
+target_include_directories(test_diarizen_embedder_biteq
+    PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(test_diarizen_embedder_biteq
+    PRIVATE orator sensus communis machina CUDA::cudart CUDA::cublas CUDA::cufft cudnn)
 # ============================================================================
 add_executable(test_overlap_separator tests/test_overlap_separator.cpp)
 target_include_directories(test_overlap_separator PRIVATE ${CMAKE_SOURCE_DIR})
