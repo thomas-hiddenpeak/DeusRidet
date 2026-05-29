@@ -168,8 +168,9 @@ bool DiarizenWavlmPruned::load(const std::string& path) {
             auto& dims = layer_dims_[lk.layer];
             if (lk.rest == "attention.k_proj.weight" && v.dim == 2) {
                 dims.attn_inner = v.shape[0];
-                dims.attn_head_dim =
-                    v.shape[0] / DiarizenWavlmPrunedArch::kNumAttnHeads;
+                dims.attn_head_dim = DiarizenWavlmPrunedArch::kHeadDim;
+                dims.num_heads =
+                    v.shape[0] / DiarizenWavlmPrunedArch::kHeadDim;
             } else if (lk.rest == "feed_forward.intermediate_dense.weight"
                        && v.dim == 2) {
                 dims.ffn_inner = v.shape[0];
@@ -198,11 +199,11 @@ bool DiarizenWavlmPruned::load(const std::string& path) {
             return false;
         }
         if (d.attn_inner > 0 &&
-            d.attn_inner % DiarizenWavlmPrunedArch::kNumAttnHeads != 0) {
+            d.attn_inner % DiarizenWavlmPrunedArch::kHeadDim != 0) {
             LOG_ERROR(kLog,
-                      "layer %d attn_inner=%d not divisible by num_heads=%d",
+                      "layer %d attn_inner=%d not divisible by head_dim=%d",
                       d.layer_index, d.attn_inner,
-                      DiarizenWavlmPrunedArch::kNumAttnHeads);
+                      DiarizenWavlmPrunedArch::kHeadDim);
             release_();
             return false;
         }
@@ -273,8 +274,8 @@ void DiarizenWavlmPruned::log_summary() const {
              static_cast<int>(layer_dims_.size()));
     for (const auto& d : layer_dims_) {
         std::fprintf(stderr,
-                     "  layer %2d  attn_inner=%4d  head_dim=%3d  ffn_inner=%4d\n",
-                     d.layer_index, d.attn_inner, d.attn_head_dim,
+                     "  layer %2d  attn_inner=%4d  num_heads=%2d  ffn_inner=%4d\n",
+                     d.layer_index, d.attn_inner, d.num_heads,
                      d.ffn_inner);
     }
 }

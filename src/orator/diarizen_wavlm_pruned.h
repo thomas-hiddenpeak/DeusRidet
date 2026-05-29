@@ -38,10 +38,15 @@ namespace orator {
 // stored once on the outer struct.
 struct DiarizenWavlmPrunedLayerDims {
     int layer_index   = -1;
-    int attn_inner    = 0;   ///< total k/q/v projection out width (e.g. 320,192,...);
-                             ///< 0 = entire attention sub-block pruned away
-                             ///< (known: layers 9, 12, 16, 17 in s80-md-v2).
-    int attn_head_dim = 0;   ///< attn_inner / num_heads (16); 0 when pruned
+    int attn_inner    = 0;   ///< k/q/v projection out width = num_heads * 64
+                             ///< (e.g. 320=5h, 192=3h, ...); 0 = entire
+                             ///< attention sub-block pruned away (known:
+                             ///< layers 9, 12, 16, 17 in s80-md-v2).
+    int num_heads     = 0;   ///< attn_inner / kHeadDim; 0 when attention pruned.
+                             ///< BUT-FIT structured pruning removes whole
+                             ///< heads (head_dim stays 64); it does NOT
+                             ///< narrow per-head width.
+    int attn_head_dim = 0;   ///< always kHeadDim (64) when present, else 0.
     int ffn_inner    = 0;   ///< intermediate_dense out width (e.g. 1092); always > 0
     int gru_rel_pos_inner = 0;  ///< gru_rel_pos_linear out width (8 in known weights);
                                 ///< 0 when attention is pruned away
@@ -53,7 +58,8 @@ struct DiarizenWavlmPrunedArch {
     static constexpr int kSampleRate          = 16000;
     static constexpr int kCnnLayers           = 7;
     static constexpr int kTransformerLayers   = 24;
-    static constexpr int kNumAttnHeads        = 16;
+    static constexpr int kNumAttnHeads        = 16;   ///< total_num_heads (gru gate + rel-pos use all 16)
+    static constexpr int kHeadDim             = 64;   ///< embed_dim / total_num_heads, fixed across pruning
     static constexpr int kHiddenDim           = 1024;  ///< post feature_projection.projection
     static constexpr int kFeatProjInDim       = 211;   ///< CNN out width (pruned)
     static constexpr int kFinalProjOutDim     = 256;   ///< proj/lnorm output (P1a tap)
