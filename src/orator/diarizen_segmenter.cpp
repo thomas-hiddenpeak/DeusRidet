@@ -12,6 +12,8 @@
 #include "../communis/log.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
@@ -155,9 +157,23 @@ DiarizenSegmentation DiarizenSegmenter::segment(const float* wave,
         if (v >= 1 && v <= 64) batch = v;
     }
     std::vector<float> chunks((std::size_t)batch * win);
+    // Env-gated sub-stage profiler: splits the seg stage into chunk-fill /
+    // WavLM-batch / Conformer-per-chunk / powerset-decode so we can see which
+    // part is the per-chunk CPU/launch hog. Off unless
+    // DEUSRIDET_DIARIZEN_SEG_PROF=1.
+    const bool seg_prof = [] {
+        const char* e = std::getenv("DEUSRIDET_DIARIZEN_SEG_PROF");
+        return e && e[0] == '1';
+    }();
+    using seg_clock = std::chrono::steady_clock;
+    auto seg_ms = [](seg_clock::time_point a, seg_clock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    double ms_fill = 0, ms_wavlm = 0, ms_conf = 0, ms_decode = 0;
     for (int c0 = 0; c0 < num_chunks; c0 += batch) {
         const int B = std::min(batch, num_chunks - c0);
         // Fill B chunk windows (zero-padded past the tail).
+        const auto tf0 = seg_clock::now();
         for (int b = 0; b < B; ++b) {
             const long start = (long)(c0 + b) * step;
             float* dst = chunks.data() + (std::size_t)b * win;
@@ -166,10 +182,13 @@ DiarizenSegmentation DiarizenSegmenter::segment(const float* wave,
                 dst[i] = (idx < n_samples) ? wave[idx] : 0.0f;
             }
         }
+        if (seg_prof) ms_fill += seg_ms(tf0, seg_clock::now());
 
         int T_lnorm = 0;
+        const auto tw0 = seg_clock::now();
         std::vector<float> feat =
             wavlm_.debug_lnorm_tail_batch(chunks.data(), B, win, T_lnorm);
+        if (seg_prof) ms_wavlm += seg_ms(tw0, seg_clock::now());
         if (feat.empty() || T_lnorm <= 0) {
             LOG_ERROR(kSLog, "WavLM batched tail failed at chunk %d", c0);
             return DiarizenSegmentation{};
@@ -177,8 +196,10 @@ DiarizenSegmentation DiarizenSegmenter::segment(const float* wave,
         const int D = 256;
         for (int b = 0; b < B; ++b) {
             const int c = c0 + b;
+            const auto tc0 = seg_clock::now();
             std::vector<float> logits = conformer_.debug_logits(
                 feat.data() + (std::size_t)b * T_lnorm * D, T_lnorm);
+            if (seg_prof) ms_conf += seg_ms(tc0, seg_clock::now());
             if (logits.empty()) {
                 LOG_ERROR(kSLog, "Conformer logits failed on chunk %d", c);
                 return DiarizenSegmentation{};
@@ -187,6 +208,7 @@ DiarizenSegmentation DiarizenSegmenter::segment(const float* wave,
 
             // Powerset decode (soft=False): per frame argmax over 16 classes,
             // then map through the powerset->multilabel matrix.
+            const auto td0 = seg_clock::now();
             for (int f = 0; f < T; ++f) {
                 const float* lr =
                     logits.data() +
@@ -202,7 +224,15 @@ DiarizenSegmentation DiarizenSegmenter::segment(const float* wave,
                            ((std::size_t)c * result.num_frames + f) * nspk;
                 for (int s = 0; s < nspk; ++s) d[s] = (float)mrow[s];
             }
+            if (seg_prof) ms_decode += seg_ms(td0, seg_clock::now());
         }
+    }
+    if (seg_prof) {
+        std::fprintf(stderr,
+            "[seg-prof] C=%d B=%d T=%d | fill=%.1f wavlm=%.1f conf=%.1f "
+            "decode=%.1f ms\n",
+            num_chunks, batch, result.num_frames, ms_fill, ms_wavlm, ms_conf,
+            ms_decode);
     }
 
     if (apply_median) {

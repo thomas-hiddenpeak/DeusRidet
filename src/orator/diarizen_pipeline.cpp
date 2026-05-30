@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <vector>
 
@@ -64,17 +65,31 @@ struct DiarizenPipeline::Impl {
 
         std::vector<float> chunk(kWindowSamples);
         std::vector<float> clean(F), full(F);
+        // Env-gated sub-stage profiler: splits embed into backbone (1/chunk)
+        // vs pool (S/chunk) so we can see the per-chunk launch hog. Off unless
+        // DEUSRIDET_DIARIZEN_EMB_PROF=1.
+        const bool emb_prof = [] {
+            const char* e = std::getenv("DEUSRIDET_DIARIZEN_EMB_PROF");
+            return e && e[0] == '1';
+        }();
+        using emb_clock = std::chrono::steady_clock;
+        auto emb_ms = [](emb_clock::time_point a, emb_clock::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        double ms_back = 0, ms_pool = 0;
         for (int c = 0; c < C; ++c) {
             crop_chunk_(wave, n_samples, c, chunk);
             // The ResNet34 backbone depends only on the chunk waveform, so
             // compute it once and reuse it for every speaker of this chunk
             // (the mask only enters the pooling head). Cuts the dominant conv
             // cost by a factor of S relative to a full embed() per speaker.
+            const auto tb0 = emb_clock::now();
             if (!embedder.embed_backbone(chunk.data(), kWindowSamples)) {
                 err = "get_embeddings: embed_backbone() failed at chunk " +
                       std::to_string(c);
                 return false;
             }
+            if (emb_prof) ms_back += emb_ms(tb0, emb_clock::now());
             // clean_frames[f] = (sum_s seg < 2); clean_mask = seg * clean_frames.
             for (int s = 0; s < S; ++s) {
                 double clean_sum = 0.0, full_sum = 0.0;
@@ -96,12 +111,19 @@ struct DiarizenPipeline::Impl {
                 (void)full_sum;
                 float* dst =
                     &emb_out[(static_cast<std::size_t>(c) * S + s) * kEmbedDim];
+                const auto tp0 = emb_clock::now();
                 if (!embedder.embed_pool(used, F, dst)) {
                     err = "get_embeddings: embed_pool() failed at chunk " +
                           std::to_string(c) + " speaker " + std::to_string(s);
                     return false;
                 }
+                if (emb_prof) ms_pool += emb_ms(tp0, emb_clock::now());
             }
+        }
+        if (emb_prof) {
+            std::fprintf(stderr,
+                "[emb-prof] C=%d S=%d | backbone=%.1f pool=%.1f ms\n",
+                C, S, ms_back, ms_pool);
         }
         return true;
     }
