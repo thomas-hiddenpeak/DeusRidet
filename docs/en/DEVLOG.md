@@ -6,6 +6,7 @@ To add a new entry, create `devlog/YYYY-MM-DD.md` and prepend it here.
 
 ## DEVLOG
 
+- [2026-05-30](devlog/2026-05-30.md) — DiariZen-v2 native CUDA pipeline live-verified: wired into `awaken` behind `DEUSRIDET_DIARIZEN_NATIVE` (`d1b9d82`); accuracy 93.5% → 93.7% (+0.2 pp) on `tests/test.mp3`. Default NOT flipped — native single-chunk finalize RTF 0.54 vs Python-IPC 0.21; batching is the gating perf task before the flip
 - [2026-04-30](devlog/2026-04-30.md) — Step 18n-18aa: Auditus separated-source identity fusion selector, runtime fusion shadow ASR/speaker evidence, arbitrium + ledger/canary telemetry, deterministic/strong-pending/newborn enrollment, stable canary precision gate, and Mel rolling compaction; r2 replay restored 4/4 births, 0 stable wrong, 0 authority violations
 - [2026-04-29](devlog/2026-04-29.md) — Step 18l-18m: upstream ClearerVoice + 3D-Speaker + FunASR smoke and top30 Auditus upstream-vs-C++ probe; production py313 CUDA torch preserved
 - [2026-04-28](devlog/2026-04-28.md) — Step 18g-18k: Auditus separated-source ASR + speaker-ID validation against GT timeline; raw_o16000 kept as production primary and failure-attributed by identity monitor
