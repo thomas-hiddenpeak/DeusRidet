@@ -80,6 +80,15 @@ public:
     bool embed(const float* wave, int n_samples, const float* mask,
                int num_frames, float* out_embed);
 
+    // Split embed for the common case where many speakers share one chunk:
+    // the ResNet34 backbone depends only on the waveform (the speaker mask
+    // enters at pooling), so compute the backbone once per chunk via
+    // embed_backbone(), then call embed_pool() per speaker. embed() above is
+    // exactly embed_backbone() followed by embed_pool() and stays for the
+    // bit-eq harness; the split path is numerically identical.
+    bool embed_backbone(const float* wave, int n_samples);
+    bool embed_pool(const float* mask, int num_frames, float* out_embed);
+
     // Diagnostic tap: compute the [T, 80] CMN fbank for the waveform and copy
     // to host (row-major, T rows). Used by the P2a bit-eq harness.
     bool debug_fbank(const float* wave, int n_samples,
@@ -113,9 +122,28 @@ private:
     void run_block_(const Resnet34Block& blk, float* d_in, int H, int W,
                     float* d_out, int& H_out, int& W_out, float* d_scratch);
 
+    // Cached cuDNN convolution plan. ResNet34's conv configs are fixed once
+    // the chunk length is fixed (the segmenter always feeds a full-window,
+    // zero-padded 16 s chunk), so the ~36 distinct (C_in,C_out,H,W,K,stride,
+    // pad) shapes recur identically across every (chunk, speaker) embed call.
+    // Caching the descriptors + chosen algo removes a per-conv descriptor
+    // create/destroy and a per-conv cudnnGetConvolutionForwardAlgorithm_v7
+    // heuristic — the same per-iteration churn the WavLM/Conformer fixes
+    // eliminated. The kernel chosen is unchanged, so results are bit-identical.
+    struct ConvPlan {
+        cudnnTensorDescriptor_t in_d = nullptr;
+        cudnnTensorDescriptor_t out_d = nullptr;
+        cudnnFilterDescriptor_t filt_d = nullptr;
+        cudnnConvolutionDescriptor_t conv_d = nullptr;
+        cudnnConvolutionFwdAlgo_t algo{};
+        int H_out = 0;
+        int W_out = 0;
+    };
+
     bool loaded_ = false;
     cudnnHandle_t cudnn_ = nullptr;
     cublasHandle_t blas_ = nullptr;
+    std::unordered_map<std::uint64_t, ConvPlan> conv_cache_;
 
     // Device parameter buffers (owned).
     std::vector<float*> owned_;
@@ -143,6 +171,14 @@ private:
     size_t wave_cap_ = 0;
     float* d_fbank_ = nullptr;
     size_t fbank_cap_floats_ = 0;
+
+    // Persistent backbone features [kStatsDim, Tp] for the current chunk,
+    // shared across that chunk's speakers (filled by embed_backbone, consumed
+    // by embed_pool). Kept separate from d_bufA_..D_ because embed_pool reuses
+    // those as scratch across speakers.
+    float* d_backbone_ = nullptr;
+    size_t backbone_cap_floats_ = 0;
+    int backbone_Tp_ = 0;
 };
 
 }  // namespace orator

@@ -26,51 +26,61 @@ inline int grd(int n) { return (n + kBlk - 1) / kBlk; }
 }  // namespace
 
 // cuDNN conv2d, NCHW fp32, cross-correlation, no bias. N=1.
+// Descriptors + chosen algo are cached per (C_in,C_out,H,W,K,stride,pad): all
+// ResNet34 conv shapes are fixed once the chunk length is fixed, so every
+// (chunk, speaker) embed call replays the same ~36 configs. The cache removes
+// the per-conv descriptor create/destroy and algo heuristic; the kernel
+// selected is identical, so the convolution output is bit-for-bit unchanged.
 void DiarizenResnet34Embedder::conv2d_(const float* d_in, float* d_out, int C_in,
                                        int C_out, int H, int W, int K, int stride,
                                        int pad, const float* d_w, int& H_out,
                                        int& W_out) {
-    H_out = (H + 2 * pad - K) / stride + 1;
-    W_out = (W + 2 * pad - K) / stride + 1;
+    const std::uint64_t key =
+        (std::uint64_t)(C_in & 0x1FF) | ((std::uint64_t)(C_out & 0x1FF) << 9) |
+        ((std::uint64_t)(H & 0x7FF) << 18) | ((std::uint64_t)(W & 0x7FF) << 29) |
+        ((std::uint64_t)(K & 0x3) << 40) |
+        ((std::uint64_t)(stride & 0x3) << 42) |
+        ((std::uint64_t)(pad & 0x3) << 44);
 
-    cudnnTensorDescriptor_t in_d, out_d;
-    cudnnFilterDescriptor_t filt_d;
-    cudnnConvolutionDescriptor_t conv_d;
-    cudnnCreateTensorDescriptor(&in_d);
-    cudnnCreateTensorDescriptor(&out_d);
-    cudnnCreateFilterDescriptor(&filt_d);
-    cudnnCreateConvolutionDescriptor(&conv_d);
+    auto it = conv_cache_.find(key);
+    if (it == conv_cache_.end()) {
+        ConvPlan p;
+        p.H_out = (H + 2 * pad - K) / stride + 1;
+        p.W_out = (W + 2 * pad - K) / stride + 1;
+        cudnnCreateTensorDescriptor(&p.in_d);
+        cudnnCreateTensorDescriptor(&p.out_d);
+        cudnnCreateFilterDescriptor(&p.filt_d);
+        cudnnCreateConvolutionDescriptor(&p.conv_d);
+        cudnnSetTensor4dDescriptor(p.in_d, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1,
+                                   C_in, H, W);
+        cudnnSetTensor4dDescriptor(p.out_d, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
+                                   1, C_out, p.H_out, p.W_out);
+        cudnnSetFilter4dDescriptor(p.filt_d, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW,
+                                   C_out, C_in, K, K);
+        cudnnSetConvolution2dDescriptor(p.conv_d, pad, pad, stride, stride, 1, 1,
+                                        CUDNN_CROSS_CORRELATION,
+                                        CUDNN_DATA_FLOAT);
 
-    cudnnSetTensor4dDescriptor(in_d, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, C_in,
-                               H, W);
-    cudnnSetTensor4dDescriptor(out_d, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1,
-                               C_out, H_out, W_out);
-    cudnnSetFilter4dDescriptor(filt_d, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, C_out,
-                               C_in, K, K);
-    cudnnSetConvolution2dDescriptor(conv_d, pad, pad, stride, stride, 1, 1,
-                                    CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT);
-
-    int ret = 0;
-    cudnnConvolutionFwdAlgoPerf_t perf;
-    cudnnGetConvolutionForwardAlgorithm_v7(cudnn_, in_d, filt_d, conv_d, out_d, 1,
-                                           &ret, &perf);
-    cudnnConvolutionFwdAlgo_t algo = perf.algo;
-    size_t need = 0;
-    cudnnGetConvolutionForwardWorkspaceSize(cudnn_, in_d, filt_d, conv_d, out_d,
-                                            algo, &need);
-    if (need > ws_bytes_) {
-        algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
-        cudnnGetConvolutionForwardWorkspaceSize(cudnn_, in_d, filt_d, conv_d,
-                                                out_d, algo, &need);
+        int ret = 0;
+        cudnnConvolutionFwdAlgoPerf_t perf;
+        cudnnGetConvolutionForwardAlgorithm_v7(cudnn_, p.in_d, p.filt_d, p.conv_d,
+                                               p.out_d, 1, &ret, &perf);
+        p.algo = perf.algo;
+        size_t need = 0;
+        cudnnGetConvolutionForwardWorkspaceSize(cudnn_, p.in_d, p.filt_d,
+                                                p.conv_d, p.out_d, p.algo, &need);
+        if (need > ws_bytes_) {
+            p.algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
+        }
+        it = conv_cache_.emplace(key, p).first;
     }
-    float alpha = 1.0f, beta = 0.0f;
-    cudnnConvolutionForward(cudnn_, &alpha, in_d, d_in, filt_d, d_w, conv_d, algo,
-                            d_ws_, ws_bytes_, &beta, out_d, d_out);
+    const ConvPlan& p = it->second;
+    H_out = p.H_out;
+    W_out = p.W_out;
 
-    cudnnDestroyTensorDescriptor(in_d);
-    cudnnDestroyTensorDescriptor(out_d);
-    cudnnDestroyFilterDescriptor(filt_d);
-    cudnnDestroyConvolutionDescriptor(conv_d);
+    float alpha = 1.0f, beta = 0.0f;
+    cudnnConvolutionForward(cudnn_, &alpha, p.in_d, d_in, p.filt_d, d_w, p.conv_d,
+                            p.algo, d_ws_, ws_bytes_, &beta, p.out_d, d_out);
 }
 
 // out = relu(bn2(conv2(relu(bn1(conv1(in))))) + shortcut(in)).
@@ -124,6 +134,14 @@ bool DiarizenResnet34Embedder::debug_fbank(const float* wave, int n_samples,
 bool DiarizenResnet34Embedder::embed(const float* wave, int n_samples,
                                      const float* mask, int num_frames,
                                      float* out_embed) {
+    if (!embed_backbone(wave, n_samples)) return false;
+    return embed_pool(mask, num_frames, out_embed);
+}
+
+// Backbone: fbank -> stem conv -> ResNet34 blocks. Depends only on the
+// waveform; result [kStatsDim, Tp] is stored in d_backbone_ for reuse across
+// every speaker that shares this chunk.
+bool DiarizenResnet34Embedder::embed_backbone(const float* wave, int n_samples) {
     using A = DiarizenResnet34Arch;
     if (!loaded_) return false;
 
@@ -153,6 +171,21 @@ bool DiarizenResnet34Embedder::embed(const float* wave, int n_samples,
     // cur is layer4 output [256, 10, Tp] == [2560, Tp].
     const int rows = A::kStatsDim;  // 2560
     const int Tp = W;               // pooling time axis
+    backbone_Tp_ = Tp;
+    cudaMemcpy(d_backbone_, cur, (size_t)rows * Tp * sizeof(float),
+               cudaMemcpyDeviceToDevice);
+    return true;
+}
+
+// Pooling head: weighted statistics pooling of the stored backbone under the
+// speaker mask, then the seg_1 projection -> 256-d embedding.
+bool DiarizenResnet34Embedder::embed_pool(const float* mask, int num_frames,
+                                          float* out_embed) {
+    using A = DiarizenResnet34Arch;
+    if (!loaded_ || backbone_Tp_ <= 0) return false;
+    const int rows = A::kStatsDim;  // 2560
+    const int Tp = backbone_Tp_;
+    float* cur = d_backbone_;
 
     // Interpolate the speaker mask (nearest) to Tp; store weights in d_bufD_.
     float* d_w = d_bufD_;

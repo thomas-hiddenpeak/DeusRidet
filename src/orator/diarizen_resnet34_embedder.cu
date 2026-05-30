@@ -77,6 +77,14 @@ DiarizenResnet34Embedder::~DiarizenResnet34Embedder() {
     if (d_pool_) cudaFree(d_pool_);
     if (d_wave_) cudaFree(d_wave_);
     if (d_fbank_) cudaFree(d_fbank_);
+    if (d_backbone_) cudaFree(d_backbone_);
+    for (auto& kv : conv_cache_) {
+        ConvPlan& p = kv.second;
+        if (p.in_d) cudnnDestroyTensorDescriptor(p.in_d);
+        if (p.out_d) cudnnDestroyTensorDescriptor(p.out_d);
+        if (p.filt_d) cudnnDestroyFilterDescriptor(p.filt_d);
+        if (p.conv_d) cudnnDestroyConvolutionDescriptor(p.conv_d);
+    }
     if (cudnn_) cudnnDestroy(cudnn_);
     if (blas_) cublasDestroy(blas_);
 }
@@ -267,6 +275,10 @@ bool DiarizenResnet34Embedder::load(const std::string& path) {
     cudaMalloc(&d_pool_, A::kPoolDim * sizeof(float));
     fbank_cap_floats_ = (size_t)MAXT * A::kNumMel;
     cudaMalloc(&d_fbank_, fbank_cap_floats_ * sizeof(float));
+    // Backbone features [kStatsDim, Tp<=MAXT]; same capacity as the activation
+    // buffers so any valid Tp fits.
+    backbone_cap_floats_ = buf_floats_;
+    cudaMalloc(&d_backbone_, backbone_cap_floats_ * sizeof(float));
     ws_bytes_ = 64 * 1024 * 1024;
     cudaMalloc(&d_ws_, ws_bytes_);
 

@@ -66,6 +66,15 @@ struct DiarizenPipeline::Impl {
         std::vector<float> clean(F), full(F);
         for (int c = 0; c < C; ++c) {
             crop_chunk_(wave, n_samples, c, chunk);
+            // The ResNet34 backbone depends only on the chunk waveform, so
+            // compute it once and reuse it for every speaker of this chunk
+            // (the mask only enters the pooling head). Cuts the dominant conv
+            // cost by a factor of S relative to a full embed() per speaker.
+            if (!embedder.embed_backbone(chunk.data(), kWindowSamples)) {
+                err = "get_embeddings: embed_backbone() failed at chunk " +
+                      std::to_string(c);
+                return false;
+            }
             // clean_frames[f] = (sum_s seg < 2); clean_mask = seg * clean_frames.
             for (int s = 0; s < S; ++s) {
                 double clean_sum = 0.0, full_sum = 0.0;
@@ -87,8 +96,8 @@ struct DiarizenPipeline::Impl {
                 (void)full_sum;
                 float* dst =
                     &emb_out[(static_cast<std::size_t>(c) * S + s) * kEmbedDim];
-                if (!embedder.embed(chunk.data(), kWindowSamples, used, F, dst)) {
-                    err = "get_embeddings: embed() failed at chunk " +
+                if (!embedder.embed_pool(used, F, dst)) {
+                    err = "get_embeddings: embed_pool() failed at chunk " +
                           std::to_string(c) + " speaker " + std::to_string(s);
                     return false;
                 }
