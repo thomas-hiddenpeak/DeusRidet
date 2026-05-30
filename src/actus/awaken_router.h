@@ -20,7 +20,6 @@ class AudioPipeline;
 class WsServer;
 class ConscientiStream;
 namespace orator {
-class DiarizenFacade;
 class DiarizenPeriodicWorker;
 class DiarizenPipeline;
 }
@@ -30,11 +29,10 @@ namespace actus {
 // Dispatches a single text-frame command received by the awaken WS server.
 // Called from the WsServer text-callback thread. Performs no allocations
 // beyond what each command's JSON reply already does. Unknown commands are
-// logged to stdout. `diarizen` may be null when DiariZen-v2 capture is
-// disabled; in that case the `diarizen_finalize` command replies with an
-// error envelope. `worker` is the Hybrid P2 periodic worker; null when P2
+// logged to stdout. `worker` is the Hybrid P2 periodic worker; null when P2
 // is disabled — in that case `diarizen_trigger` and `diarizen_finalize`
-// (P2 variant) report unavailable.
+// (P2 variant) report unavailable. `native` is the in-process CUDA pipeline,
+// loaded whenever DiariZen capture is enabled.
 void handle_ws_text_command(int fd,
                             const std::string& msg,
                             AudioPipeline& audio,
@@ -42,7 +40,6 @@ void handle_ws_text_command(int fd,
                             ConscientiStream& consciousness,
                             std::atomic<bool>& loopback,
                             bool llm_loaded,
-                            orator::DiarizenFacade* diarizen = nullptr,
                             orator::DiarizenPeriodicWorker* worker = nullptr,
                             orator::DiarizenPipeline* native = nullptr);
 

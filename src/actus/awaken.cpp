@@ -34,7 +34,7 @@
 #include "awaken_hello.h"
 #include "awaken_consciousness.h"
 #include "orator/wavlm_ecapa_encoder.h"
-#include "orator/diarizen_facade.h"
+#include "orator/diarizen_pipeline.h"
 #include "orator/diarizen_periodic_worker.h"
 #include "orator/diarizen_pipeline.h"
 #include "sensus/auditus/transcript_holdback.h"
@@ -140,15 +140,10 @@ int awaken(const std::string& webui_dir,
     std::atomic<uint64_t> total_bytes{0};
     std::atomic<bool> loopback{false};
 
-    // DiariZen-v2 Hybrid P1 facade handle (constructed below, after audio
-    // start). Declared early so the WS text-callback lambda can capture it
-    // by reference; remains null until the gate below promotes it.
-    std::shared_ptr<orator::DiarizenFacade> diarizen_facade;
-    // P3b — optional in-process native pipeline (DEUSRIDET_DIARIZEN_NATIVE=1).
-    // Replaces the Python worker/facade IPC with the native CUDA
-    // DiarizenPipeline for the `diarizen_finalize` command, so its live
-    // accuracy can be scored before flipping the default. Resident once
-    // loaded: WavLM-pruned + Conformer head + ResNet34 embedder + clustering.
+    // DiariZen-v2 in-process native pipeline. Loaded once at startup
+    // whenever DiariZen capture is enabled; replaces the retired Python
+    // worker/facade IPC bridge. Resident once loaded: WavLM-pruned +
+    // Conformer head + ResNet34 embedder + clustering.
     std::shared_ptr<orator::DiarizenPipeline> diarizen_native;
     // Hybrid P2: ASR→Conscientia holdback + periodic recluster worker.
     // Constructed before install_transcript_callback so the lambda can
@@ -246,7 +241,7 @@ int awaken(const std::string& webui_dir,
     // Text WS frames (runtime-control command router) — migrated to Actus helper.
     server.set_on_text([&](int fd, const std::string& msg) {
         actus::handle_ws_text_command(fd, msg, audio, server, cb.stream, loopback, cb.loaded,
-                                       diarizen_facade.get(), diarizen_worker.get(),
+                                       diarizen_worker.get(),
                                        diarizen_native.get());
     });
 
@@ -333,47 +328,40 @@ int awaken(const std::string& webui_dir,
         return 1;
     }
 
-    // DiariZen-v2 Hybrid P1: optional session-level capture for offline
-    // reclustering. Off by default; enable with DEUSRIDET_DIARIZEN_ENABLE=1.
-    // The facade is constructed here (cheap — Python worker spawns lazily
-    // on first diarize() call). Hybrid P2 also spawns a periodic worker that
-    // re-runs DiariZen every DEUSRIDET_DIARIZEN_PERIOD_SEC seconds and
-    // rewrites the speaker_id of still-pending transcripts before they
-    // reach Conscientia.
+    // DiariZen-v2 capture + native pipeline. Off by default; enable with
+    // DEUSRIDET_DIARIZEN_ENABLE=1. The in-process CUDA pipeline is loaded
+    // once at startup (no Python subprocess). Hybrid P2 also spawns a
+    // periodic worker that re-runs DiariZen every
+    // DEUSRIDET_DIARIZEN_PERIOD_SEC seconds and rewrites the speaker_id of
+    // still-pending transcripts before they reach Conscientia.
     if (diarizen_enabled) {
         audio.diarizen_capture_enable(true, diarizen_cap_sec);
-        diarizen_facade = std::make_shared<orator::DiarizenFacade>();
-        // P3b native pipeline — load once at startup when requested. On
-        // failure, fall back silently to the worker/facade path so the
-        // service still comes up.
-        if (const char* nv = std::getenv("DEUSRIDET_DIARIZEN_NATIVE")) {
-            if (nv[0] == '1') {
-                auto np = std::make_shared<orator::DiarizenPipeline>();
-                orator::DiarizenPipelineConfig np_cfg;
-                if (np->load(np_cfg)) {
-                    diarizen_native = std::move(np);
-                    printf("[awaken] DiariZen-v2 NATIVE pipeline LOADED "
-                           "(in-process CUDA; diarizen_finalize uses native)\n");
-                } else {
-                    printf("[awaken] DiariZen-v2 native load FAILED (%s); "
-                           "falling back to worker/facade\n",
-                           np->last_error().c_str());
-                }
-            }
+        // Load the native pipeline once at startup. On failure the
+        // diarizen subsystem stays disabled (no Python fallback exists).
+        auto np = std::make_shared<orator::DiarizenPipeline>();
+        orator::DiarizenPipelineConfig np_cfg;
+        if (np->load(np_cfg)) {
+            diarizen_native = std::move(np);
+            printf("[awaken] DiariZen-v2 native pipeline LOADED "
+                   "(in-process CUDA)\n");
+        } else {
+            printf("[awaken] DiariZen-v2 native load FAILED (%s); "
+                   "diarizen disabled\n", np->last_error().c_str());
+            diarizen_enabled = false;
         }
-        if (diarizen_holdback) {
+        if (diarizen_enabled && diarizen_holdback) {
             diarizen_holdback->start();
             diarizen_worker = std::make_unique<orator::DiarizenPeriodicWorker>(
-                audio, *diarizen_facade, *diarizen_holdback, server,
+                audio, *diarizen_native, *diarizen_holdback, server,
                 diarizen_period_sec);
             diarizen_worker->start();
             printf("[awaken] DiariZen-v2 Hybrid P2 ENABLED "
                    "(cap=%.0fs period=%.0fs holdback=%.0fs); "
                    "WS commands: diarizen_trigger / diarizen_finalize\n",
                    diarizen_cap_sec, diarizen_period_sec, diarizen_holdback_sec);
-        } else {
-            printf("[awaken] DiariZen-v2 capture ENABLED (cap=%.0fs, P1 fallback "
-                   "\u2014 LLM not loaded so holdback is no-op); "
+        } else if (diarizen_enabled) {
+            printf("[awaken] DiariZen-v2 capture ENABLED (cap=%.0fs, "
+                   "LLM not loaded so holdback is no-op); "
                    "send WS text `diarizen_finalize` to score session\n",
                    diarizen_cap_sec);
         }

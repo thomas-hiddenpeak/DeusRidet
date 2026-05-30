@@ -7,7 +7,7 @@
 #include "transcript_holdback.h"
 
 #include "conscientia/stream.h"
-#include "orator/diarizen_facade.h"
+#include "orator/diarizen_pipeline.h"  // orator::DiarizenSegment
 
 #include <algorithm>
 #include <chrono>

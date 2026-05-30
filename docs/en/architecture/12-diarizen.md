@@ -179,14 +179,16 @@ compatibility shim, never as a shipping default. Therefore:
 - **Native P2a/P2b (ResNet34-LM embedding + VBx cluster) MUST land**
   for the same reason. Status: `deferred`.
 - **Native P3a (`diarizen_pipeline.cpp` C++ facade)** replaces the
-  Python worker entirely; only after this lands can the
+  Python worker entirely. **P3b-3 (done):** the
   `tools/diarizen_worker.py` subprocess and the line-JSON bridge in
-  `src/orator/diarizen_facade.cpp` be deleted.
+  `src/orator/diarizen_facade.{h,cpp}` have been **deleted**; the native
+  pipeline is the only path (`DEUSRIDET_DIARIZEN_ENABLE=1` loads it at
+  startup). `DiarizenSegment` now lives in `diarizen_pipeline.h`.
 - IPC artefacts (`diarizen_worker.py`, `DiarizenFacade` JSON bridge,
-  `py310_diarizen` conda env in deployment notes) carry a
-  `// TODO(native-cuda-port): replace with diarizen_pipeline.cpp`
-  comment and are tracked here as the only outstanding philosophy
-  violations in the active codebase.
+  `test_diarizen_facade`) — **deleted in P3b-3**; the `py310_diarizen`
+  conda env remains only as a deployment-notes relic and no longer
+  participates in any runtime path. No outstanding philosophy
+  violations remain in the active DiariZen codebase.
 
 **Default flip gate (P3c)** is therefore guarded by *two*
 independent preconditions:

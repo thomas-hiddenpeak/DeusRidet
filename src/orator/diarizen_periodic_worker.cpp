@@ -6,7 +6,7 @@
  */
 #include "diarizen_periodic_worker.h"
 
-#include "diarizen_facade.h"
+#include "diarizen_pipeline.h"
 #include "nexus/ws_server.h"
 #include "sensus/auditus/audio_pipeline.h"
 #include "sensus/auditus/transcript_holdback.h"
@@ -15,22 +15,21 @@
 #include <cstdio>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace deusridet::orator {
 
 DiarizenPeriodicWorker::DiarizenPeriodicWorker(
     AudioPipeline& audio,
-    DiarizenFacade& facade,
+    DiarizenPipeline& pipeline,
     auditus::TranscriptHoldback& holdback,
     WsServer& server,
-    double period_sec,
-    std::string wav_dir)
+    double period_sec)
     : audio_(audio),
-      facade_(facade),
+      pipeline_(pipeline),
       holdback_(holdback),
       server_(server),
-      period_sec_(period_sec < 5.0 ? 5.0 : period_sec),
-      wav_dir_(std::move(wav_dir)) {}
+      period_sec_(period_sec < 5.0 ? 5.0 : period_sec) {}
 
 DiarizenPeriodicWorker::~DiarizenPeriodicWorker() { stop(); }
 
@@ -95,22 +94,20 @@ void DiarizenPeriodicWorker::worker_loop_() {
 
 bool DiarizenPeriodicWorker::run_one_pass_(bool is_final) {
     const uint64_t seq = pass_seq_.fetch_add(1, std::memory_order_relaxed);
-    std::ostringstream path_oss;
-    path_oss << wav_dir_ << "/diarizen_partial_" << seq << ".wav";
-    const std::string wav_path = path_oss.str();
 
-    size_t n = audio_.diarizen_dump_wav(wav_path);
+    std::vector<float> pcm;
+    size_t n = audio_.diarizen_copy_pcm_f32(pcm);
     if (n == 0) {
-        std::fprintf(stderr, "[diarizen-worker] dump_wav returned 0 samples; skipping\n");
+        std::fprintf(stderr, "[diarizen-worker] copy_pcm_f32 returned 0 samples; skipping\n");
         return false;
     }
 
     double origin_sec = audio_.diarizen_capture_origin_sec();
 
-    auto segs = facade_.diarize(wav_path);
+    auto segs = pipeline_.diarize(pcm.data(), (int)pcm.size());
     if (segs.empty()) {
-        std::fprintf(stderr, "[diarizen-worker] facade.diarize returned empty: %s\n",
-                     facade_.last_error().c_str());
+        std::fprintf(stderr, "[diarizen-worker] pipeline.diarize returned empty: %s\n",
+                     pipeline_.last_error().c_str());
         return false;
     }
 

@@ -1,9 +1,10 @@
 /**
  * @file diarizen_periodic_worker.h
  * @philosophical_role Hybrid P2 — drives DiariZen-v2 reclustering on a
- *     periodic cadence and on-demand. Each pass dumps the AudioPipeline
- *     session-capture WAV, runs DiariZen, then asks the TranscriptHoldback
- *     to rewrite still-pending speaker_ids before they reach Conscientia.
+ *     periodic cadence and on-demand. Each pass copies the AudioPipeline
+ *     session-capture PCM and runs the in-process native CUDA
+ *     DiarizenPipeline, then asks the TranscriptHoldback to rewrite
+ *     still-pending speaker_ids before they reach Conscientia.
  *     A `speaker_diarize_partial` (or `speaker_diarize_final` on finalize)
  *     WS message is also broadcast for debug overlay.
  *
@@ -32,16 +33,15 @@ namespace auditus { class TranscriptHoldback; }
 
 namespace orator {
 
-class DiarizenFacade;
+class DiarizenPipeline;
 
 class DiarizenPeriodicWorker {
 public:
     DiarizenPeriodicWorker(AudioPipeline& audio,
-                           DiarizenFacade& facade,
+                           DiarizenPipeline& pipeline,
                            auditus::TranscriptHoldback& holdback,
                            WsServer& server,
-                           double period_sec,
-                           std::string wav_dir = "/tmp");
+                           double period_sec);
 
     ~DiarizenPeriodicWorker();
 
@@ -71,11 +71,10 @@ private:
     bool run_one_pass_(bool is_final);
 
     AudioPipeline&               audio_;
-    DiarizenFacade&              facade_;
+    DiarizenPipeline&            pipeline_;
     auditus::TranscriptHoldback& holdback_;
     WsServer&                    server_;
     double                       period_sec_;
-    std::string                  wav_dir_;
     std::atomic<uint64_t>        pass_seq_{0};
 
     std::mutex                   mu_;

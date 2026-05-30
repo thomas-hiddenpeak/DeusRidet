@@ -158,13 +158,14 @@ IPC 捷径（Hybrid IPC P0/P1/P2，表尾三行）是过渡桥，不是终点。
 - **原生 P2a/P2b**（ResNet34-LM 嵌入 + VBx 聚类）出于同一理由
   **必须落地**。当前状态：`延后`。
 - **原生 P3a（`diarizen_pipeline.cpp` C++ 门面）** 替代 Python
-  worker 全部职责；只有等它落地之后，才能删除
-  `tools/diarizen_worker.py` 子进程与
-  `src/orator/diarizen_facade.cpp` 中的行 JSON 桥。
+  worker 全部职责。**P3b-3（已完成）：** `tools/diarizen_worker.py`
+  子进程与 `src/orator/diarizen_facade.{h,cpp}` 中的行 JSON 桥已
+  **删除**；原生 pipeline 是唯一路径（`DEUSRIDET_DIARIZEN_ENABLE=1`
+  在启动时加载它）。`DiarizenSegment` 现位于 `diarizen_pipeline.h`。
 - IPC 制品（`diarizen_worker.py`、`DiarizenFacade` JSON 桥、
-  部署说明里的 `py310_diarizen` conda env）一律带
-  `// TODO(native-cuda-port): replace with diarizen_pipeline.cpp`
-  注释，并在此作为**仅剩的、活跃代码库中的哲学违例**追踪。
+  `test_diarizen_facade`）——**已在 P3b-3 删除**；部署说明里的
+  `py310_diarizen` conda env 仅作历史遗存，不再参与任何运行时路径。
+  活跃 DiariZen 代码库中已无遗留哲学违例。
 
 **默认翻转 gate（P3c）** 因此受 *两个* 独立前提同时约束：
 1. 原生 P1–P3 已落地（架构约束）。

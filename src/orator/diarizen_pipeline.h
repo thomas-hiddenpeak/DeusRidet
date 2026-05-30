@@ -17,10 +17,19 @@
 #include <string>
 #include <vector>
 
-#include "diarizen_facade.h"  // DiarizenSegment (shared output type)
-
 namespace deusridet {
 namespace orator {
+
+/// One labelled time interval produced by DiariZen-v2 diarisation. Labels
+/// are pipeline-local strings (e.g. "speaker0", "speaker1"); the caller is
+/// responsible for mapping them onto persistent global identities. This is
+/// the shared output type of the native pipeline (moved here when the
+/// Python-IPC facade was retired in P3b-3).
+struct DiarizenSegment {
+    double      start_sec = 0.0;
+    double      end_sec   = 0.0;
+    std::string label;
+};
 
 // Paths to the four native model assets. Defaults point at the verified
 // /home/rm01/models/dev/diarizen_v2 layout used by the 93.5% live verdict.
@@ -45,8 +54,9 @@ struct DiarizenPipelineConfig {
     double binarize_offset = 0.5;
 };
 
-// Native, in-process replacement for DiarizenFacade. Owns the three native
-// model stages; thread-compatible (one outstanding diarize() per instance).
+// Native, in-process DiariZen-v2 pipeline (retired the Python-IPC bridge).
+// Owns the three native model stages; thread-compatible (one outstanding
+// diarize() per instance).
 class DiarizenPipeline {
    public:
     DiarizenPipeline();

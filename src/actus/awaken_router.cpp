@@ -13,7 +13,6 @@
 #include "nexus/ws_server.h"
 #include "conscientia/stream.h"
 #include "conscientia/frame.h"
-#include "orator/diarizen_facade.h"
 #include "orator/diarizen_periodic_worker.h"
 #include "orator/diarizen_pipeline.h"
 
@@ -35,7 +34,6 @@ void handle_ws_text_command(int fd,
                             ConscientiStream& consciousness,
                             std::atomic<bool>& loopback,
                             bool llm_loaded,
-                            orator::DiarizenFacade* diarizen,
                             orator::DiarizenPeriodicWorker* worker,
                             orator::DiarizenPipeline* native) {
     if (msg == "loopback:on") {
@@ -355,15 +353,13 @@ void handle_ws_text_command(int fd,
             server.send_text(fd, R"json({"type":"speaker_diarize_progress","status":"triggered"})json");
         }
     } else if (msg == "diarizen_finalize") {
-        // P3b native path (DEUSRIDET_DIARIZEN_NATIVE=1): when the in-process
-        // DiarizenPipeline is loaded, finalise through it — no wav dump, no
-        // Python worker. Highest priority so it can be A/B-scored live
-        // against the worker baseline without disturbing the default path.
+        // Native path: when no holdback worker is wired (LLM not loaded),
+        // finalise the whole session directly through the in-process CUDA
+        // DiarizenPipeline — no wav dump, no Python worker.
         // Hybrid P2 path: if a periodic worker is wired, finalize through
         // it so the still-pending holdback is drained into Conscientia
-        // with the freshest relabelling. Falls back to the P1 detached
-        // diarize when no worker is present.
-        if (native && native->is_loaded()) {
+        // with the freshest relabelling (the worker is itself native-backed).
+        if (native && native->is_loaded() && !worker) {
             std::vector<float> pcm;
             size_t n = audio.diarizen_copy_pcm_f32(pcm);
             if (n == 0) {
@@ -413,57 +409,8 @@ void handle_ws_text_command(int fd,
             server.send_text(fd, ack);
             auto* worker_ptr = worker;
             std::thread([worker_ptr]() { worker_ptr->finalize(); }).detach();
-        } else if (!diarizen) {
-            server.send_text(fd, R"json({"type":"speaker_diarize_final","ok":false,"error":"diarizen disabled (set DEUSRIDET_DIARIZEN_ENABLE=1)"})json");
         } else {
-            const std::string wav_path = "/tmp/diarizen_session.wav";
-            size_t n = audio.diarizen_dump_wav(wav_path);
-            if (n == 0) {
-                server.send_text(fd, R"({"type":"speaker_diarize_final","ok":false,"error":"capture buffer empty"})");
-            } else {
-                char ack[256];
-                snprintf(ack, sizeof(ack),
-                    R"({"type":"speaker_diarize_progress","status":"running","samples":%zu,"sec":%.2f})",
-                    n, (double)n / 16000.0);
-                server.send_text(fd, ack);
-                auto* server_ptr = &server;
-                auto* facade_ptr = diarizen;
-                std::thread([server_ptr, facade_ptr, wav_path, n]() {
-                    auto t0 = std::chrono::steady_clock::now();
-                    if (!facade_ptr->start()) {
-                        std::string err = facade_ptr->last_error();
-                        std::string j = std::string("{\"type\":\"speaker_diarize_final\",\"ok\":false,\"error\":\"facade start failed: ")
-                                      + err + "\"}";
-                        server_ptr->broadcast_text(j);
-                        return;
-                    }
-                    auto segs = facade_ptr->diarize(wav_path);
-                    auto t1 = std::chrono::steady_clock::now();
-                    double wall = std::chrono::duration<double>(t1 - t0).count();
-                    if (segs.empty()) {
-                        std::string err = facade_ptr->last_error();
-                        std::string j = std::string("{\"type\":\"speaker_diarize_final\",\"ok\":false,\"error\":\"")
-                                      + (err.empty() ? "no segments" : err) + "\"}";
-                        server_ptr->broadcast_text(j);
-                        return;
-                    }
-                    std::string j = "{\"type\":\"speaker_diarize_final\",\"ok\":true,\"audio_sec\":";
-                    char buf[96];
-                    snprintf(buf, sizeof(buf), "%.3f,\"wall_sec\":%.3f,\"n_segments\":%zu,\"segments\":[",
-                             (double)n / 16000.0, wall, segs.size());
-                    j += buf;
-                    for (size_t i = 0; i < segs.size(); ++i) {
-                        if (i) j += ',';
-                        snprintf(buf, sizeof(buf), "[%.3f,%.3f,\"", segs[i].start_sec, segs[i].end_sec);
-                        j += buf;
-                        // Labels from DiariZen are short ASCII (e.g. "SPK00"); no escaping needed.
-                        j += segs[i].label;
-                        j += "\"]";
-                    }
-                    j += "]}";
-                    server_ptr->broadcast_text(j);
-                }).detach();
-            }
+            server.send_text(fd, R"json({"type":"speaker_diarize_final","ok":false,"error":"diarizen disabled (set DEUSRIDET_DIARIZEN_ENABLE=1)"})json");
         }
     } else {
         printf("[awaken] Text from fd=%d: %s\n", fd, msg.c_str());
