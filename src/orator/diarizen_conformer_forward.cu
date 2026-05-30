@@ -267,6 +267,10 @@ std::vector<float> DiarizenConformerHead::run_(const float* feat, int T,
         cudaFree(d_x);
         return {};
     }
+    // Route dense GEMMs through TF32 tensor cores (Ampere sm87). ResNet34 in
+    // this same pipeline already runs TF32 convs, so the precision regime is
+    // established; ~3-4x over fp32 ampere_sgemm on the linear layers.
+    diarizen_set_gemm_math_(blas);
     for (int l = 0; l < DiarizenConformerArch::kNumLayer; ++l) {
         if (!run_block_(l, d_x, T, blas)) {
             cublasDestroy(blas);

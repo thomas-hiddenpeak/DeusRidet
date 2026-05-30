@@ -14,7 +14,9 @@
 #include "../communis/log.h"
 
 #include <cmath>
+#include <cstdlib>
 
+#include <cublas_v2.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -26,6 +28,19 @@ constexpr const char* kLog = "DiariZenWavlm";
 constexpr int kBlock = 256;
 
 inline int div_ceil_(int a, int b) { return (a + b - 1) / b; }
+
+// Set the cuBLAS math mode for the DiariZen dense GEMMs. TF32 tensor-op math
+// (~3-4x over fp32 ampere_sgemm on Ampere sm87) is the default; the bit-eq
+// harness sets DEUSRIDET_DIARIZEN_TF32=0 to force the exact fp32 path so the
+// batched chunk-loop logic can be validated against the fp32 numpy reference.
+inline void diarizen_set_gemm_math_(cublasHandle_t blas) {
+    static const bool tf32 = [] {
+        const char* e = std::getenv("DEUSRIDET_DIARIZEN_TF32");
+        return !e || e[0] != '0';  // default ON
+    }();
+    cublasSetMathMode(blas, tf32 ? CUBLAS_TF32_TENSOR_OP_MATH
+                                 : CUBLAS_DEFAULT_MATH);
+}
 
 inline bool cuda_ck_(cudaError_t e, const char* what) {
     if (e != cudaSuccess) {

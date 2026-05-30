@@ -474,6 +474,7 @@ std::vector<float> DiarizenWavlmPruned::debug_layers(const float* pcm,
             scratch_release(d_pos_bias, bytes_pos);
             return {};
         }
+        diarizen_set_gemm_math_(blas);  // tensor-core GEMM (env-gated)
         for (int l = 0; l < up_to_layer && l < DiarizenWavlmPrunedArch::kTransformerLayers; ++l) {
             if (!run_encoder_layer_(l, d_hidden, T, d_pos_bias, blas)) {
                 cublasDestroy(blas);
@@ -525,6 +526,7 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail(const float* pcm,
         if (d_pos_bias) scratch_release(d_pos_bias, bytes_pos);
         return {};
     }
+    diarizen_set_gemm_math_(blas);  // tensor-core GEMM (env-gated)
     for (int l = 0; l < DiarizenWavlmPrunedArch::kTransformerLayers; ++l) {
         if (!run_encoder_layer_(l, d_hidden, T, d_pos_bias, blas)) {
             cublasDestroy(blas); cudaFree(d_hidden);

@@ -537,6 +537,7 @@ DiarizenWavlmPruned::run_frontend_(const float* pcm, int n_samples, int& T_out) 
     cublasHandle_t blas = nullptr;
     if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS)
         return bail("cublasCreate", {d_cnn, d_projW, d_projB, d_hidden});
+    diarizen_set_gemm_math_(blas);  // tensor-core GEMM (env-gated)
 
     // Y[T,1024] = X[T,211] * W^T, W is [1024,211]. Column-major mapping:
     // C(1024 x T) = op(W)^T (1024 x 211) * X_colmajor(211 x T).
