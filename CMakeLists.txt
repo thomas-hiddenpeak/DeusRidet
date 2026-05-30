@@ -94,6 +94,8 @@ file(GLOB_RECURSE ORATOR_SOURCES
 
 add_library(orator STATIC ${ORATOR_SOURCES})
 target_link_libraries(orator PRIVATE communis CUDA::cudart CUDA::cublas cudnn)
+# DiariZen-v2 VBx clustering (P2b) uses Eigen for the generalized eigensolver.
+target_include_directories(orator PRIVATE /usr/include/eigen3)
 
 # ============================================================================
 # Memory management static library (memoria — KV cache, block pool, SSD swap)
@@ -311,6 +313,13 @@ target_include_directories(test_diarizen_embedder_biteq
     PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_diarizen_embedder_biteq
     PRIVATE orator sensus communis machina CUDA::cudart CUDA::cublas CUDA::cufft cudnn)
+# DiariZen-v2 native CUDA port — P2b VBx clustering bit-eq (CPU/Eigen glue).
+add_executable(test_diarizen_clustering_biteq
+    tests/test_diarizen_clustering_biteq.cpp)
+target_include_directories(test_diarizen_clustering_biteq
+    PRIVATE ${CMAKE_SOURCE_DIR}/src /usr/include/eigen3)
+target_link_libraries(test_diarizen_clustering_biteq
+    PRIVATE orator communis machina CUDA::cudart CUDA::cublas cudnn)
 # ============================================================================
 add_executable(test_overlap_separator tests/test_overlap_separator.cpp)
 target_include_directories(test_overlap_separator PRIVATE ${CMAKE_SOURCE_DIR})
