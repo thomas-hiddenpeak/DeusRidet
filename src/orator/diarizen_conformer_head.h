@@ -85,6 +85,16 @@ public:
     /// head; callers MUST NOT free the result. Mirrors the WavLM weight_f32.
     float* weight_f32(const std::string& name) const;
 
+    /// Persistent scratch pool for transient forward buffers (the per-block
+    /// xn / Q / K / V / S / ctx / FFN activations). Recycles device buffers by
+    /// exact byte size so the four Conformer blocks no longer cudaMalloc /
+    /// cudaFree per chunk — each Tegra alloc/free walks the global VMM map and
+    /// under live fragmentation that churn dominated the seg stage. Buffers are
+    /// uninitialised on acquire (every consumer overwrites before read), so
+    /// recycling is bit-equivalent to fresh allocation. Mirrors the WavLM pool.
+    void* scratch_acquire(std::size_t bytes) const;
+    void  scratch_release(void* ptr, std::size_t bytes) const;
+
     /// P1b bit-equality tap: run the four Conformer blocks over the [T, 256]
     /// feature `feat` (host, frame-major) and return the conformer output
     /// [T, 256] flattened frame-major. Bit-checked vs `conformer_out`.
@@ -112,6 +122,8 @@ private:
     std::size_t arena_bytes_ = 0;
     std::unordered_map<std::string, DiarizenConformerTensorView> tensors_;
     mutable std::unordered_map<std::string, float*> f32_cache_;  ///< owned, GPU
+    mutable std::unordered_map<std::size_t, std::vector<void*>> scratch_pool_;
+    mutable void* blas_ = nullptr;  ///< cached cublasHandle_t (lazy, owned)
 };
 
 }  // namespace orator

@@ -52,6 +52,29 @@ float* DiarizenConformerHead::weight_f32(const std::string& name) const {
     return d;
 }
 
+// Persistent scratch pool (declared in the header): recycle transient forward
+// buffers by exact byte size so the four Conformer blocks no longer pay a
+// cudaMalloc/cudaFree per buffer per chunk (each Tegra alloc/free walks the
+// global VMM map). Buffers are uninitialised on acquire; every consumer
+// overwrites before read, so recycling is bit-equivalent to fresh allocation.
+void* DiarizenConformerHead::scratch_acquire(std::size_t bytes) const {
+    if (bytes == 0) return nullptr;
+    auto it = scratch_pool_.find(bytes);
+    if (it != scratch_pool_.end() && !it->second.empty()) {
+        void* p = it->second.back();
+        it->second.pop_back();
+        return p;
+    }
+    void* p = nullptr;
+    if (cudaMalloc(&p, bytes) != cudaSuccess) return nullptr;
+    return p;
+}
+
+void DiarizenConformerHead::scratch_release(void* ptr, std::size_t bytes) const {
+    if (!ptr || bytes == 0) return;
+    scratch_pool_[bytes].push_back(ptr);
+}
+
 namespace {
 
 // Fetch a tensor by exact name as a device fp32 buffer. Returns the head's
@@ -107,16 +130,20 @@ bool ffn_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
     if (!lnw || !lnb || !w1 || !b1 || !w2 || !b2) return false;
 
     float *xn = nullptr, *h1 = nullptr, *h2 = nullptr;
-    cudaMalloc(&xn, (size_t)T * C * sizeof(float));
-    cudaMalloc(&h1, (size_t)T * FF * sizeof(float));
-    cudaMalloc(&h2, (size_t)T * C * sizeof(float));
+    const std::size_t bTC = (std::size_t)T * C * sizeof(float);
+    const std::size_t bTFF = (std::size_t)T * FF * sizeof(float);
+    xn = static_cast<float*>(self.scratch_acquire(bTC));
+    h1 = static_cast<float*>(self.scratch_acquire(bTFF));
+    h2 = static_cast<float*>(self.scratch_acquire(bTC));
     row_layer_norm_to_kernel<<<T, kBlock>>>(d_x, xn, lnw, lnb, T, C);
     clinear_(blas, xn, w1, b1, h1, T, FF, C);
     swish_kernel<<<div_ceil_(T * FF, kBlock), kBlock>>>(h1, (long)T * FF);
     clinear_(blas, h1, w2, b2, h2, T, C, FF);
     scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, h2, 0.5f,
                                                             (long)T * C);
-    cudaFree(xn); cudaFree(h1); cudaFree(h2);  // scratch only; weights cached
+    self.scratch_release(xn, bTC);
+    self.scratch_release(h1, bTFF);
+    self.scratch_release(h2, bTC);  // scratch only; weights cached
     return true;
 }
 
@@ -140,13 +167,15 @@ bool mha_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
         return false;
 
     float *xn, *Q, *K, *V, *S, *ctx, *o;
-    cudaMalloc(&xn, (size_t)T * C * sizeof(float));
-    cudaMalloc(&Q, (size_t)T * C * sizeof(float));
-    cudaMalloc(&K, (size_t)T * C * sizeof(float));
-    cudaMalloc(&V, (size_t)T * C * sizeof(float));
-    cudaMalloc(&S, (size_t)nh * T * T * sizeof(float));
-    cudaMalloc(&ctx, (size_t)T * C * sizeof(float));
-    cudaMalloc(&o, (size_t)T * C * sizeof(float));
+    const std::size_t bTC = (std::size_t)T * C * sizeof(float);
+    const std::size_t bS = (std::size_t)nh * T * T * sizeof(float);
+    xn = static_cast<float*>(self.scratch_acquire(bTC));
+    Q = static_cast<float*>(self.scratch_acquire(bTC));
+    K = static_cast<float*>(self.scratch_acquire(bTC));
+    V = static_cast<float*>(self.scratch_acquire(bTC));
+    S = static_cast<float*>(self.scratch_acquire(bS));
+    ctx = static_cast<float*>(self.scratch_acquire(bTC));
+    o = static_cast<float*>(self.scratch_acquire(bTC));
     row_layer_norm_to_kernel<<<T, kBlock>>>(d_x, xn, lnw, lnb, T, C);
     clinear_(blas, xn, wq, bq, Q, T, C, C);
     clinear_(blas, xn, wk, bk, K, T, C, C);
@@ -171,8 +200,13 @@ bool mha_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
     clinear_(blas, ctx, wo, bo, o, T, C, C);
     scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, o, 1.0f,
                                                             (long)T * C);
-    cudaFree(xn); cudaFree(Q); cudaFree(K); cudaFree(V); cudaFree(S);
-    cudaFree(ctx); cudaFree(o);  // scratch only; weights cached
+    self.scratch_release(xn, bTC);
+    self.scratch_release(Q, bTC);
+    self.scratch_release(K, bTC);
+    self.scratch_release(V, bTC);
+    self.scratch_release(S, bS);
+    self.scratch_release(ctx, bTC);
+    self.scratch_release(o, bTC);  // scratch only; weights cached
     return true;
 }
 
@@ -198,13 +232,16 @@ bool conv_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
         return false;
 
     float *xn, *pc1, *glu, *gct, *dw, *swt, *pc2;
-    cudaMalloc(&xn, (size_t)T * C * sizeof(float));
-    cudaMalloc(&pc1, (size_t)T * 2 * C * sizeof(float));
-    cudaMalloc(&glu, (size_t)T * C * sizeof(float));
-    cudaMalloc(&gct, (size_t)C * T * sizeof(float));
-    cudaMalloc(&dw, (size_t)C * T * sizeof(float));
-    cudaMalloc(&swt, (size_t)T * C * sizeof(float));
-    cudaMalloc(&pc2, (size_t)T * C * sizeof(float));
+    const std::size_t bTC = (std::size_t)T * C * sizeof(float);
+    const std::size_t bT2C = (std::size_t)T * 2 * C * sizeof(float);
+    const std::size_t bCT = (std::size_t)C * T * sizeof(float);
+    xn = static_cast<float*>(self.scratch_acquire(bTC));
+    pc1 = static_cast<float*>(self.scratch_acquire(bT2C));
+    glu = static_cast<float*>(self.scratch_acquire(bTC));
+    gct = static_cast<float*>(self.scratch_acquire(bCT));
+    dw = static_cast<float*>(self.scratch_acquire(bCT));
+    swt = static_cast<float*>(self.scratch_acquire(bTC));
+    pc2 = static_cast<float*>(self.scratch_acquire(bTC));
     row_layer_norm_to_kernel<<<T, kBlock>>>(d_x, xn, lnw, lnb, T, C);
     // pointwise_conv1 (1x1) == per-frame linear C -> 2C.
     clinear_(blas, xn, pw1, pb1, pc1, T, 2 * C, C);
@@ -222,8 +259,13 @@ bool conv_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
     clinear_(blas, swt, pw2, pb2, pc2, T, C, C);
     scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, pc2, 1.0f,
                                                             (long)T * C);
-    cudaFree(xn); cudaFree(pc1); cudaFree(glu); cudaFree(gct); cudaFree(dw);
-    cudaFree(swt); cudaFree(pc2);  // scratch only; weights cached
+    self.scratch_release(xn, bTC);
+    self.scratch_release(pc1, bT2C);
+    self.scratch_release(glu, bTC);
+    self.scratch_release(gct, bCT);
+    self.scratch_release(dw, bCT);
+    self.scratch_release(swt, bTC);
+    self.scratch_release(pc2, bTC);  // scratch only; weights cached
     return true;
 }
 
@@ -258,23 +300,30 @@ std::vector<float> DiarizenConformerHead::run_(const float* feat, int T,
     const int C = DiarizenConformerArch::kFeatDim;
     const int NC = DiarizenConformerArch::kNumClasses;
 
-    float* d_x = nullptr;
-    if (cudaMalloc(&d_x, (size_t)T * C * sizeof(float)) != cudaSuccess) return {};
-    cudaMemcpy(d_x, feat, (size_t)T * C * sizeof(float), cudaMemcpyHostToDevice);
+    const std::size_t bytes_x = (std::size_t)T * C * sizeof(float);
+    float* d_x = static_cast<float*>(scratch_acquire(bytes_x));
+    if (!d_x) return {};
+    cudaMemcpy(d_x, feat, bytes_x, cudaMemcpyHostToDevice);
 
-    cublasHandle_t blas = nullptr;
-    if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS) {
-        cudaFree(d_x);
-        return {};
+    // Cached cublas handle: created once and reused for every chunk, so the
+    // seg loop no longer pays a cublasCreate/Destroy (and its implicit device
+    // sync) per chunk. TF32 math mode is reasserted each call (cheap).
+    if (!blas_) {
+        cublasHandle_t h = nullptr;
+        if (cublasCreate(&h) != CUBLAS_STATUS_SUCCESS) {
+            scratch_release(d_x, bytes_x);
+            return {};
+        }
+        blas_ = h;
     }
+    cublasHandle_t blas = static_cast<cublasHandle_t>(blas_);
     // Route dense GEMMs through TF32 tensor cores (Ampere sm87). ResNet34 in
     // this same pipeline already runs TF32 convs, so the precision regime is
     // established; ~3-4x over fp32 ampere_sgemm on the linear layers.
     diarizen_set_gemm_math_(blas);
     for (int l = 0; l < DiarizenConformerArch::kNumLayer; ++l) {
         if (!run_block_(l, d_x, T, blas)) {
-            cublasDestroy(blas);
-            cudaFree(d_x);
+            scratch_release(d_x, bytes_x);
             return {};
         }
     }
@@ -282,33 +331,32 @@ std::vector<float> DiarizenConformerHead::run_(const float* feat, int T,
     int out_dim = C;
     float* d_out = d_x;
     float* d_logits = nullptr;
+    const std::size_t bytes_logits = (std::size_t)T * NC * sizeof(float);
     if (stage >= 1) {
         float* cw = fetch_f32(*this, "classifier.weight", nullptr);
         float* cb = fetch_f32(*this, "classifier.bias", nullptr);
         if (!cw || !cb) {
-            cublasDestroy(blas);
-            cudaFree(d_x);
+            scratch_release(d_x, bytes_x);
             return {};
         }
-        cudaMalloc(&d_logits, (size_t)T * NC * sizeof(float));
+        d_logits = static_cast<float*>(scratch_acquire(bytes_logits));
         clinear_(blas, d_x, cw, cb, d_logits, T, NC, C);  // cw/cb cached
         out_dim = NC;
         d_out = d_logits;
         if (stage >= 2)
             logsoftmax_rows_kernel<<<T, 1>>>(d_logits, T, NC);
     }
-    cublasDestroy(blas);
 
     if (cudaDeviceSynchronize() != cudaSuccess) {
-        cudaFree(d_x);
-        if (d_logits) cudaFree(d_logits);
+        scratch_release(d_x, bytes_x);
+        if (d_logits) scratch_release(d_logits, bytes_logits);
         return {};
     }
     std::vector<float> host((size_t)T * out_dim);
     cudaMemcpy(host.data(), d_out, host.size() * sizeof(float),
                cudaMemcpyDeviceToHost);
-    cudaFree(d_x);
-    if (d_logits) cudaFree(d_logits);
+    scratch_release(d_x, bytes_x);
+    if (d_logits) scratch_release(d_logits, bytes_logits);
     return host;
 }
 

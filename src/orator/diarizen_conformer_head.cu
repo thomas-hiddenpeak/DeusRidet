@@ -55,6 +55,13 @@ void DiarizenConformerHead::release_() {
     }
     for (auto& kv : f32_cache_) cudaFree(kv.second);
     f32_cache_.clear();
+    for (auto& kv : scratch_pool_)
+        for (void* p : kv.second) cudaFree(p);
+    scratch_pool_.clear();
+    if (blas_) {
+        cublasDestroy(static_cast<cublasHandle_t>(blas_));
+        blas_ = nullptr;
+    }
     arena_bytes_ = 0;
     tensors_.clear();
     loaded_ = false;
