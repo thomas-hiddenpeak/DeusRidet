@@ -27,6 +27,7 @@ int main(int argc, char** argv) {
             "usage: %s <plda_dir> <mode> <out.bin> [args...]\n"
             "  --fea  <train_emb.bin> <N> <xdim>\n"
             "  --ahc  <train_emb.bin> <N> <xdim>\n"
+            "  --vbx  <train_emb.bin> <N> <xdim>\n"
             "  --hard <emb.bin> <C> <S> <dim> <seg.bin> <F>\n", argv[0]);
         return 2;
     }
@@ -57,6 +58,18 @@ int main(int argc, char** argv) {
         std::vector<std::int32_t> a(ahc.begin(), ahc.end());
         std::fwrite(a.data(), sizeof(std::int32_t), a.size(), o);
         std::fprintf(stderr, "ahc N=%d\n", N);
+    } else if (mode == "--vbx") {
+        const int N = std::atoi(argv[5]);
+        const int xdim = std::atoi(argv[6]);
+        auto emb = read_f32(argv[4], (std::size_t)N * xdim);
+        std::vector<double> gamma, pi;
+        int K0 = 0;
+        if (!clu.debug_vbx(emb.data(), N, xdim, gamma, K0, pi)) return 1;
+        std::int32_t hdr[2] = {(std::int32_t)N, (std::int32_t)K0};
+        std::fwrite(hdr, sizeof(std::int32_t), 2, o);
+        std::fwrite(gamma.data(), sizeof(double), gamma.size(), o);
+        std::fwrite(pi.data(), sizeof(double), pi.size(), o);
+        std::fprintf(stderr, "vbx N=%d K0=%d\n", N, K0);
     } else if (mode == "--hard") {
         const int C = std::atoi(argv[5]);
         const int S = std::atoi(argv[6]);

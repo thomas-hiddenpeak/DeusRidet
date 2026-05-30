@@ -73,6 +73,11 @@ class DiarizenClustering {
     // AHC labels (0-based, renumbered) for a [N, xdim] block.
     bool debug_ahc(const float* train_emb, int n, int xdim,
                    std::vector<int>& ahc_out);
+    // VBx EM responsibilities gamma [N, K0] (row-major) + priors pi [K0] for a
+    // [N, xdim] block. K0 = AHC cluster count.
+    bool debug_vbx(const float* train_emb, int n, int xdim,
+                   std::vector<double>& gamma_out, int& K0,
+                   std::vector<double>& pi_out);
 
     const DiarizenClusteringConfig& config() const { return cfg_; }
     DiarizenClusteringConfig& mutable_config() { return cfg_; }
@@ -88,6 +93,11 @@ class DiarizenClustering {
     // centroid-linkage + fcluster(distance, threshold) -> 0-based labels.
     void agglomerative_(const std::vector<double>& normed, int n, int dim,
                         std::vector<int>& labels) const;
+    // VBx Bayesian-HMM EM, GMM branch (loopProb=0). fea [N, pdim], ahc labels
+    // -> gamma [N, K0] + pi [K0]. Phi = plda_psi[:pdim].
+    void vbx_em_(const std::vector<double>& fea, int N, int pdim,
+                 const std::vector<int>& ahc, int K0,
+                 std::vector<double>& gamma, std::vector<double>& pi) const;
 };
 
 }  // namespace orator

@@ -167,9 +167,147 @@ bool DiarizenClustering::debug_ahc(const float* train_emb, int n, int xdim,
     return true;
 }
 
-bool DiarizenClustering::cluster(const float*, int, int, int, const float*, int,
-                                 std::vector<std::int8_t>&) {
-    return false;  // TODO(P2b-4)
+// VBx Bayesian-HMM EM, GMM branch (loopProb=0). Reproduces diarizen
+// VBx()/cluster_vbx() bit-for-bit. fea [N,pdim], ahc 0-based labels, K0 =
+// ahc.max()+1. Phi = plda_psi[:pdim]. Outputs gamma [N*K0], pi [K0].
+void DiarizenClustering::vbx_em_(const std::vector<double>& fea, int N,
+                                 int pdim, const std::vector<int>& ahc, int K0,
+                                 std::vector<double>& gamma,
+                                 std::vector<double>& pi) const {
+    const double Fa = cfg_.Fa, Fb = cfg_.Fb;
+    const double r = Fa / Fb;
+    const double* Phi = priors_.plda_psi.data();  // [pdim] descending
+    const double TWO_PI = 2.0 * 3.14159265358979323846;
+
+    // qinit one-hot -> softmax(* init_smoothing) over K0 columns.
+    gamma.assign(static_cast<std::size_t>(N) * K0, 0.0);
+    const double sm = cfg_.init_smoothing;
+    for (int i = 0; i < N; ++i) {
+        const double denom = std::exp(sm) + (K0 - 1) * 1.0;  // exp(0)=1
+        double* g = gamma.data() + static_cast<std::size_t>(i) * K0;
+        for (int k = 0; k < K0; ++k) g[k] = 1.0 / denom;
+        g[ahc[i]] = std::exp(sm) / denom;
+    }
+    pi.assign(K0, 1.0 / K0);  // VBx int-pi init (overwritten each iter)
+
+    // Per-frame constant G[i] and rho[i,d] = fea[i,d]*sqrt(Phi[d]).
+    std::vector<double> V(pdim), rho(static_cast<std::size_t>(N) * pdim);
+    for (int d = 0; d < pdim; ++d) V[d] = std::sqrt(Phi[d]);
+    std::vector<double> G(N);
+    for (int i = 0; i < N; ++i) {
+        const double* x = fea.data() + static_cast<std::size_t>(i) * pdim;
+        double* rr = rho.data() + static_cast<std::size_t>(i) * pdim;
+        double sq = 0.0;
+        for (int d = 0; d < pdim; ++d) { sq += x[d] * x[d]; rr[d] = x[d] * V[d]; }
+        G[i] = -0.5 * (sq + pdim * std::log(TWO_PI));
+    }
+
+    std::vector<double> invL(static_cast<std::size_t>(K0) * pdim);
+    std::vector<double> alpha(static_cast<std::size_t>(K0) * pdim);
+    std::vector<double> Nk(K0), log_p(static_cast<std::size_t>(N) * K0);
+    double prev_elbo = 0.0;
+    for (int iter = 0; iter < cfg_.max_iters; ++iter) {
+        // Nk = gamma.sum(0).
+        std::fill(Nk.begin(), Nk.end(), 0.0);
+        for (int i = 0; i < N; ++i) {
+            const double* g = gamma.data() + static_cast<std::size_t>(i) * K0;
+            for (int k = 0; k < K0; ++k) Nk[k] += g[k];
+        }
+        // gtr[k,d] = sum_i gamma[i,k]*rho[i,d].
+        std::vector<double> gtr(static_cast<std::size_t>(K0) * pdim, 0.0);
+        for (int i = 0; i < N; ++i) {
+            const double* g = gamma.data() + static_cast<std::size_t>(i) * K0;
+            const double* rr = rho.data() + static_cast<std::size_t>(i) * pdim;
+            for (int k = 0; k < K0; ++k) {
+                double* gt = gtr.data() + static_cast<std::size_t>(k) * pdim;
+                const double gk = g[k];
+                for (int d = 0; d < pdim; ++d) gt[d] += gk * rr[d];
+            }
+        }
+        // invL[k,d] = 1/(1 + r*Nk[k]*Phi[d]); alpha = r*invL*gtr.
+        for (int k = 0; k < K0; ++k) {
+            double* iL = invL.data() + static_cast<std::size_t>(k) * pdim;
+            double* al = alpha.data() + static_cast<std::size_t>(k) * pdim;
+            const double* gt = gtr.data() + static_cast<std::size_t>(k) * pdim;
+            for (int d = 0; d < pdim; ++d) {
+                iL[d] = 1.0 / (1.0 + r * Nk[k] * Phi[d]);
+                al[d] = r * iL[d] * gt[d];
+            }
+        }
+        // beta[k] = sum_d (invL[k,d]+alpha[k,d]^2)*Phi[d].
+        std::vector<double> beta(K0, 0.0);
+        for (int k = 0; k < K0; ++k) {
+            const double* iL = invL.data() + static_cast<std::size_t>(k) * pdim;
+            const double* al = alpha.data() + static_cast<std::size_t>(k) * pdim;
+            double b = 0.0;
+            for (int d = 0; d < pdim; ++d) b += (iL[d] + al[d] * al[d]) * Phi[d];
+            beta[k] = b;
+        }
+        // log_p_[i,k] = Fa*(rho[i]·alpha[k] - 0.5*beta[k] + G[i]).
+        for (int i = 0; i < N; ++i) {
+            const double* rr = rho.data() + static_cast<std::size_t>(i) * pdim;
+            double* lp = log_p.data() + static_cast<std::size_t>(i) * K0;
+            for (int k = 0; k < K0; ++k) {
+                const double* al =
+                    alpha.data() + static_cast<std::size_t>(k) * pdim;
+                double dot = 0.0;
+                for (int d = 0; d < pdim; ++d) dot += rr[d] * al[d];
+                lp[k] = Fa * (dot - 0.5 * beta[k] + G[i]);
+            }
+        }
+        // GMM update. lpi[k]=log(pi[k]+1e-8). logsumexp over k.
+        std::vector<double> lpi(K0);
+        for (int k = 0; k < K0; ++k) lpi[k] = std::log(pi[k] + 1e-8);
+        double log_pX = 0.0;
+        for (int i = 0; i < N; ++i) {
+            double* lp = log_p.data() + static_cast<std::size_t>(i) * K0;
+            double mx = -std::numeric_limits<double>::infinity();
+            for (int k = 0; k < K0; ++k) {
+                lp[k] += lpi[k];
+                if (lp[k] > mx) mx = lp[k];
+            }
+            double se = 0.0;
+            for (int k = 0; k < K0; ++k) se += std::exp(lp[k] - mx);
+            const double lse = mx + std::log(se);
+            log_pX += lse;
+            double* g = gamma.data() + static_cast<std::size_t>(i) * K0;
+            for (int k = 0; k < K0; ++k) g[k] = std::exp(lp[k] - lse);
+        }
+        // pi = sum(gamma,0); pi /= pi.sum().
+        std::fill(pi.begin(), pi.end(), 0.0);
+        for (int i = 0; i < N; ++i) {
+            const double* g = gamma.data() + static_cast<std::size_t>(i) * K0;
+            for (int k = 0; k < K0; ++k) pi[k] += g[k];
+        }
+        double psum = 0.0;
+        for (int k = 0; k < K0; ++k) psum += pi[k];
+        for (int k = 0; k < K0; ++k) pi[k] /= psum;
+        // ELBO = log_pX + Fb*0.5*sum_{k,d}(log(invL)-invL-alpha^2+1).
+        double reg = 0.0;
+        for (int k = 0; k < K0; ++k) {
+            const double* iL = invL.data() + static_cast<std::size_t>(k) * pdim;
+            const double* al = alpha.data() + static_cast<std::size_t>(k) * pdim;
+            for (int d = 0; d < pdim; ++d)
+                reg += std::log(iL[d]) - iL[d] - al[d] * al[d] + 1.0;
+        }
+        const double elbo = log_pX + Fb * 0.5 * reg;
+        if (iter > 0 && (elbo - prev_elbo) < cfg_.vbx_epsilon) break;
+        prev_elbo = elbo;
+    }
+}
+
+bool DiarizenClustering::debug_vbx(const float* train_emb, int n, int xdim,
+                                   std::vector<double>& gamma_out, int& K0,
+                                   std::vector<double>& pi_out) {
+    if (!priors_.loaded) return false;
+    std::vector<double> fea;
+    compute_fea_(train_emb, n, xdim, fea);  // [n, pdim]
+    std::vector<int> ahc;
+    if (!debug_ahc(train_emb, n, xdim, ahc)) return false;
+    K0 = 0;
+    for (int v : ahc) K0 = std::max(K0, v + 1);
+    vbx_em_(fea, n, priors_.pdim, ahc, K0, gamma_out, pi_out);
+    return true;
 }
 
 }  // namespace orator

@@ -33,7 +33,7 @@ def main() -> int:
     ap.add_argument("--plda", default="/home/rm01/models/dev/diarizen_v2",
                     help="dir containing xvec_transform.npz and plda.npz")
     ap.add_argument("--bin", default="build/test_diarizen_clustering_biteq")
-    ap.add_argument("--stage", default="fea", choices=("fea", "ahc", "hard"))
+    ap.add_argument("--stage", default="fea", choices=("fea", "ahc", "vbx", "hard"))
     args = ap.parse_args()
 
     d = np.load(args.npz)
@@ -77,6 +77,31 @@ def main() -> int:
               f"partition_identical={part_match} "
               f"K_got={int(got.max())+1 if got.size else 0} K_ref={int(ref.max())+1}")
         ok = exact == 1.0
+
+    elif args.stage == "vbx":
+        te = d["train_emb"].astype(np.float32)
+        N, X = te.shape
+        with tempfile.TemporaryDirectory() as td:
+            wp = os.path.join(td, "te.bin")
+            te.tofile(wp)
+            raw = run(args.bin, args.plda, "--vbx", [wp, N, X])
+        hdr = np.frombuffer(raw[:8], dtype=np.int32)
+        n, K0 = int(hdr[0]), int(hdr[1])
+        body = np.frombuffer(raw[8:], dtype=np.float64)
+        gamma = body[: n * K0].reshape(n, K0)
+        pi = body[n * K0 : n * K0 + K0]
+        g_ref = d["gamma"].astype(np.float64)
+        p_ref = d["pi"].astype(np.float64)
+        g_max = float(np.max(np.abs(gamma - g_ref)))
+        p_max = float(np.max(np.abs(pi - p_ref)))
+        row_cos = float(np.mean([
+            np.dot(gamma[i], g_ref[i]) /
+            (np.linalg.norm(gamma[i]) * np.linalg.norm(g_ref[i]) + 1e-12)
+            for i in range(n)]))
+        print(f"[vbx] N={n} K0={K0} K0_ref={g_ref.shape[1]} "
+              f"gamma_max_abs={g_max:.4e} pi_max_abs={p_max:.4e} "
+              f"mean_row_cosine={row_cos:.6f}")
+        ok = g_max < 1e-6 and p_max < 1e-6 and K0 == g_ref.shape[1]
 
     else:  # hard
         emb = d["embeddings"].astype(np.float32)
