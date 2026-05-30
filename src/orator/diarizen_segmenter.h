@@ -63,6 +63,12 @@ public:
 
     bool is_loaded() const;
 
+    /// Bind a CUDA stream onto both sub-models (nullptr = default stream).
+    void set_stream(cudaStream_t s) {
+        wavlm_.set_stream(s);
+        conformer_.set_stream(s);
+    }
+
     /// Run the full sliding-window segmentation over a 16 kHz mono waveform.
     /// `apply_median` toggles the post-decode median filter (default true,
     /// matching the live pipeline). Returns an empty result on error.

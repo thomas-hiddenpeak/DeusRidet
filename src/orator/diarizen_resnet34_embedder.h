@@ -15,6 +15,7 @@
 
 #include <cublas_v2.h>
 #include <cudnn.h>
+#include <cuda_runtime.h>
 
 namespace deusridet {
 namespace orator {
@@ -70,6 +71,13 @@ public:
     // converted to fp32 on device and BatchNorm is folded.
     bool load(const std::string& safetensors_path);
     bool is_loaded() const { return loaded_; }
+
+    // Bind this embedder's compute to an externally-owned CUDA stream (e.g. a
+    // Vires Background priority stream). Binds the cached cuBLAS/cuDNN handles
+    // and routes every hot-path kernel + async copy onto it. Must be called
+    // after load(). Passing nullptr (the default) keeps the legacy default
+    // stream, so an unwired embedder is bit- and behaviour-identical to before.
+    void set_stream(cudaStream_t s);
 
     // Extract a 256-d embedding for one (chunk, speaker) pair.
     //   wave   : [n_samples] float at [-1, 1] scale (will be * 32768 for fbank)
@@ -143,6 +151,7 @@ private:
     bool loaded_ = false;
     cudnnHandle_t cudnn_ = nullptr;
     cublasHandle_t blas_ = nullptr;
+    cudaStream_t stream_ = nullptr;  // bound via set_stream(); nullptr = default
     std::unordered_map<std::uint64_t, ConvPlan> conv_cache_;
 
     // Device parameter buffers (owned).

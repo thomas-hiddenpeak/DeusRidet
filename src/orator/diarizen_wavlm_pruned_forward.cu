@@ -217,7 +217,13 @@ bool DiarizenWavlmPruned::ensure_handles_() {
         return false;
     }
     cudnn_ = h;
+    cudnnSetStream(h, stream_);  // route conv forward onto the bound stream
     return true;
+}
+
+void DiarizenWavlmPruned::set_stream(cudaStream_t s) {
+    stream_ = s;
+    if (cudnn_) cudnnSetStream(static_cast<cudnnHandle_t>(cudnn_), s);
 }
 
 // --------------------------------------------------------------------------
@@ -317,8 +323,8 @@ float* DiarizenWavlmPruned::run_cnn_(const float* pcm, int n_samples,
                   "malloc out"))
         return fail("malloc out", d_pcm, d_a, d_b, d_w, nullptr);
 
-    if (!cuda_ck_(cudaMemcpy(d_pcm, pcm, (size_t)n_samples * sizeof(float),
-                             cudaMemcpyHostToDevice),
+    if (!cuda_ck_(cudaMemcpyAsync(d_pcm, pcm, (size_t)n_samples * sizeof(float),
+                             cudaMemcpyHostToDevice, stream_),
                   "memcpy pcm"))
         return fail("memcpy pcm", d_pcm, d_a, d_b, d_w, d_out);
 
@@ -329,9 +335,9 @@ float* DiarizenWavlmPruned::run_cnn_(const float* pcm, int n_samples,
         float* d_stats = nullptr;
         if (!cuda_ck_(cudaMalloc(&d_stats, 2 * sizeof(float)), "malloc stats"))
             return fail("malloc stats", d_pcm, d_a, d_b, d_w, d_out);
-        waveform_stats_kernel<<<1, kBlock>>>(d_pcm, n_samples, d_stats);
-        normalize_waveform_kernel<<<div_ceil_(n_samples, kBlock), kBlock>>>(
-            d_pcm, n_samples, d_stats);
+        waveform_stats_kernel<<<1, kBlock, 0, stream_>>>(d_pcm, n_samples, d_stats);
+        normalize_waveform_kernel<<<div_ceil_(n_samples, kBlock), kBlock, 0,
+                                   stream_>>>(d_pcm, n_samples, d_stats);
         cudaFree(d_stats);
     }
 
@@ -355,7 +361,7 @@ float* DiarizenWavlmPruned::run_cnn_(const float* pcm, int n_samples,
 
         // Stage conv weight to fp32.
         const int wn = Co * Ci * K;
-        half_to_float_kernel<<<div_ceil_(wn, kBlock), kBlock>>>(
+        half_to_float_kernel<<<div_ceil_(wn, kBlock), kBlock, 0, stream_>>>(
             w_conv[i]->data, d_w, wn);
 
         cudnnSetTensor4dDescriptor(in_d, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT,
@@ -409,13 +415,13 @@ float* DiarizenWavlmPruned::run_cnn_(const float* pcm, int n_samples,
         // tiny local fp32 buffer instead.
         float* ln_gb = nullptr;
         cudaMalloc(&ln_gb, (size_t)2 * Co * sizeof(float));
-        half_to_float_kernel<<<div_ceil_(Co, kBlock), kBlock>>>(
+        half_to_float_kernel<<<div_ceil_(Co, kBlock), kBlock, 0, stream_>>>(
             w_lng[i]->data, ln_gb, Co);
-        half_to_float_kernel<<<div_ceil_(Co, kBlock), kBlock>>>(
+        half_to_float_kernel<<<div_ceil_(Co, kBlock), kBlock, 0, stream_>>>(
             w_lnb[i]->data, ln_gb + Co, Co);
-        layer_norm_channels_kernel<<<div_ceil_(To, kBlock), kBlock>>>(
+        layer_norm_channels_kernel<<<div_ceil_(To, kBlock), kBlock, 0, stream_>>>(
             dst_act, ln_gb, ln_gb + Co, Co, To);
-        gelu_exact_kernel<<<div_ceil_(Co * To, kBlock), kBlock>>>(dst_act,
+        gelu_exact_kernel<<<div_ceil_(Co * To, kBlock), kBlock, 0, stream_>>>(dst_act,
                                                                   Co * To);
         cudaFree(ln_gb);
 
@@ -437,13 +443,13 @@ float* DiarizenWavlmPruned::run_cnn_(const float* pcm, int n_samples,
     const int Cf = cout[kCnn - 1];
     float* d_dummy = nullptr;
     cudaMalloc(&d_dummy, (size_t)Cf * sizeof(float));
-    half_to_float_kernel<<<div_ceil_(Cf, kBlock), kBlock>>>(dummy->data,
+    half_to_float_kernel<<<div_ceil_(Cf, kBlock), kBlock, 0, stream_>>>(dummy->data,
                                                             d_dummy, Cf);
-    transpose_scale_kernel<<<div_ceil_(Cf * T_final, kBlock), kBlock>>>(
+    transpose_scale_kernel<<<div_ceil_(Cf * T_final, kBlock), kBlock, 0, stream_>>>(
         cur, d_out, d_dummy, Cf, T_final);
     cudaFree(d_dummy);
 
-    if (!cuda_ck_(cudaDeviceSynchronize(), "cnn sync"))
+    if (!cuda_ck_(cudaStreamSynchronize(stream_), "cnn sync"))
         return fail("sync", d_pcm, d_a, d_b, d_w, d_out);
 
     // Free all scratch except d_out, which is handed back to the caller.
@@ -467,8 +473,9 @@ DiarizenWavlmPruned::debug_cnn_features(const float* pcm, int n_samples,
     if (!d_out) return {};
     const int Cf = DiarizenWavlmPrunedArch::kFeatProjInDim;  // 211
     std::vector<float> host((size_t)T * Cf);
-    cudaMemcpy(host.data(), d_out, host.size() * sizeof(float),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(host.data(), d_out, host.size() * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream_);
+    cudaStreamSynchronize(stream_);
     cudaFree(d_out);
     T_out = T;
     return host;
@@ -517,19 +524,19 @@ DiarizenWavlmPruned::run_frontend_(const float* pcm, int n_samples, int& T_out) 
     // ---- feature_projection: LayerNorm(211) over features ----------------
     float* d_lngb = nullptr;
     cudaMalloc(&d_lngb, (size_t)2 * Cin * sizeof(float));
-    half_to_float_kernel<<<div_ceil_(Cin, kBlock), kBlock>>>(fp_lng->data, d_lngb, Cin);
-    half_to_float_kernel<<<div_ceil_(Cin, kBlock), kBlock>>>(fp_lnb->data, d_lngb + Cin, Cin);
-    row_layer_norm_to_kernel<<<T, kBlock>>>(d_cnn, d_cnn, d_lngb, d_lngb + Cin, T, Cin);
+    half_to_float_kernel<<<div_ceil_(Cin, kBlock), kBlock, 0, stream_>>>(fp_lng->data, d_lngb, Cin);
+    half_to_float_kernel<<<div_ceil_(Cin, kBlock), kBlock, 0, stream_>>>(fp_lnb->data, d_lngb + Cin, Cin);
+    row_layer_norm_to_kernel<<<T, kBlock, 0, stream_>>>(d_cnn, d_cnn, d_lngb, d_lngb + Cin, T, Cin);
     cudaFree(d_lngb);
 
     // ---- feature_projection: Linear 211 -> 1024 (+bias) ------------------
     float* d_projW = nullptr;  // [1024,211] fp32
     cudaMalloc(&d_projW, (size_t)Cout * Cin * sizeof(float));
-    half_to_float_kernel<<<div_ceil_(Cout * Cin, kBlock), kBlock>>>(
+    half_to_float_kernel<<<div_ceil_(Cout * Cin, kBlock), kBlock, 0, stream_>>>(
         fp_w->data, d_projW, Cout * Cin);
     float* d_projB = nullptr;
     cudaMalloc(&d_projB, (size_t)Cout * sizeof(float));
-    half_to_float_kernel<<<div_ceil_(Cout, kBlock), kBlock>>>(fp_b->data, d_projB, Cout);
+    half_to_float_kernel<<<div_ceil_(Cout, kBlock), kBlock, 0, stream_>>>(fp_b->data, d_projB, Cout);
 
     float* d_hidden = nullptr;  // [T,1024] frame-major
     cudaMalloc(&d_hidden, (size_t)T * Cout * sizeof(float));
@@ -538,13 +545,14 @@ DiarizenWavlmPruned::run_frontend_(const float* pcm, int n_samples, int& T_out) 
     if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS)
         return bail("cublasCreate", {d_cnn, d_projW, d_projB, d_hidden});
     diarizen_set_gemm_math_(blas);  // tensor-core GEMM (env-gated)
+    cublasSetStream(blas, stream_);
 
     // Y[T,1024] = X[T,211] * W^T, W is [1024,211]. Column-major mapping:
     // C(1024 x T) = op(W)^T (1024 x 211) * X_colmajor(211 x T).
     const float alpha = 1.0f, beta = 0.0f;
     cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, Cout, T, Cin, &alpha,
                 d_projW, Cin, d_cnn, Cin, &beta, d_hidden, Cout);
-    bias_add_rows_kernel<<<div_ceil_(T * Cout, kBlock), kBlock>>>(d_hidden, d_projB, T, Cout);
+    bias_add_rows_kernel<<<div_ceil_(T * Cout, kBlock), kBlock, 0, stream_>>>(d_hidden, d_projB, T, Cout);
     cublasDestroy(blas);
     cudaFree(d_cnn);
     cudaFree(d_projW);
@@ -554,23 +562,23 @@ DiarizenWavlmPruned::run_frontend_(const float* pcm, int n_samples, int& T_out) 
     // Transpose hidden [T,1024] -> channel-major [1024,T] for conv input.
     float* d_ct = nullptr;
     cudaMalloc(&d_ct, (size_t)Cout * T * sizeof(float));
-    transpose_TC_to_CT_kernel<<<div_ceil_(T * Cout, kBlock), kBlock>>>(
+    transpose_TC_to_CT_kernel<<<div_ceil_(T * Cout, kBlock), kBlock, 0, stream_>>>(
         d_hidden, d_ct, T, Cout);
 
     // Reconstruct weight_norm weight W = g * v / ||v||_(out,in) per k.
     const long vnum = (long)Cout * kPosCinG * kPosK;
     float* d_v = nullptr;
     cudaMalloc(&d_v, vnum * sizeof(float));
-    half_to_float_kernel<<<div_ceil_((int)vnum, kBlock), kBlock>>>(pc_v->data, d_v, (int)vnum);
+    half_to_float_kernel<<<div_ceil_((int)vnum, kBlock), kBlock, 0, stream_>>>(pc_v->data, d_v, (int)vnum);
     float* d_g = nullptr;
     cudaMalloc(&d_g, (size_t)kPosK * sizeof(float));
-    half_to_float_kernel<<<div_ceil_(kPosK, kBlock), kBlock>>>(pc_g->data, d_g, kPosK);
+    half_to_float_kernel<<<div_ceil_(kPosK, kBlock), kBlock, 0, stream_>>>(pc_g->data, d_g, kPosK);
     float* d_norm = nullptr;
     cudaMalloc(&d_norm, (size_t)kPosK * sizeof(float));
-    posconv_norm_kernel<<<kPosK, kBlock>>>(d_v, Cout, kPosCinG, kPosK, d_norm);
+    posconv_norm_kernel<<<kPosK, kBlock, 0, stream_>>>(d_v, Cout, kPosCinG, kPosK, d_norm);
     float* d_pcW = nullptr;
     cudaMalloc(&d_pcW, vnum * sizeof(float));
-    posconv_weight_kernel<<<div_ceil_((int)vnum, kBlock), kBlock>>>(
+    posconv_weight_kernel<<<div_ceil_((int)vnum, kBlock), kBlock, 0, stream_>>>(
         d_v, d_g, d_norm, Cout, kPosCinG, kPosK, d_pcW);
     cudaFree(d_v);
     cudaFree(d_g);
@@ -625,18 +633,18 @@ DiarizenWavlmPruned::run_frontend_(const float* pcm, int n_samples, int& T_out) 
     // Bias + exact GELU on the full [1024, T+1] conv output (pre-trim).
     float* d_convB = nullptr;
     cudaMalloc(&d_convB, (size_t)Cout * sizeof(float));
-    half_to_float_kernel<<<div_ceil_(Cout, kBlock), kBlock>>>(pc_b->data, d_convB, Cout);
-    bias_add_channels_kernel<<<div_ceil_(Cout * T_conv, kBlock), kBlock>>>(
+    half_to_float_kernel<<<div_ceil_(Cout, kBlock), kBlock, 0, stream_>>>(pc_b->data, d_convB, Cout);
+    bias_add_channels_kernel<<<div_ceil_(Cout * T_conv, kBlock), kBlock, 0, stream_>>>(
         d_conv, d_convB, Cout, T_conv);
-    gelu_exact_kernel<<<div_ceil_(Cout * T_conv, kBlock), kBlock>>>(d_conv, Cout * T_conv);
+    gelu_exact_kernel<<<div_ceil_(Cout * T_conv, kBlock), kBlock, 0, stream_>>>(d_conv, Cout * T_conv);
     cudaFree(d_convB);
 
     // Residual: hidden += pos_conv^T (trimmed to first T of T+1 frames).
-    transpose_CT_to_TC_add_kernel<<<div_ceil_(Cout * T, kBlock), kBlock>>>(
+    transpose_CT_to_TC_add_kernel<<<div_ceil_(Cout * T, kBlock), kBlock, 0, stream_>>>(
         d_conv, d_hidden, Cout, T, T_conv);
     cudaFree(d_conv);
 
-    if (!cuda_ck_(cudaDeviceSynchronize(), "tap0 sync"))
+    if (!cuda_ck_(cudaStreamSynchronize(stream_), "tap0 sync"))
         return bail("sync", {d_hidden});
 
     T_out = T;
@@ -651,8 +659,9 @@ DiarizenWavlmPruned::debug_tap0(const float* pcm, int n_samples, int& T_out) {
     if (!d) return {};
     const int Cout = DiarizenWavlmPrunedArch::kHiddenDim;
     std::vector<float> host((size_t)T * Cout);
-    cudaMemcpy(host.data(), d, host.size() * sizeof(float),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(host.data(), d, host.size() * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream_);
+    cudaStreamSynchronize(stream_);
     cudaFree(d);
     T_out = T;
     return host;

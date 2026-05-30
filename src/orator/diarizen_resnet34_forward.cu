@@ -91,29 +91,26 @@ void DiarizenResnet34Embedder::run_block_(const Resnet34Block& blk, float* d_in,
     int h1, w1;
     conv2d_(d_in, d_bufC_, blk.in_planes, blk.planes, H, W, 3, blk.stride, 1,
             blk.conv1_w, h1, w1);
-    r34_bn_relu<<<grd(blk.planes * h1 * w1), kBlk>>>(d_bufC_, blk.bn1_scale,
-                                                     blk.bn1_bias, blk.planes,
-                                                     h1 * w1, 1);
+    r34_bn_relu<<<grd(blk.planes * h1 * w1), kBlk, 0, stream_>>>(
+        d_bufC_, blk.bn1_scale, blk.bn1_bias, blk.planes, h1 * w1, 1);
     int h2, w2;
     conv2d_(d_bufC_, d_out, blk.planes, blk.planes, h1, w1, 3, 1, 1, blk.conv2_w,
             h2, w2);
-    r34_bn_relu<<<grd(blk.planes * h2 * w2), kBlk>>>(d_out, blk.bn2_scale,
-                                                     blk.bn2_bias, blk.planes,
-                                                     h2 * w2, 0);
+    r34_bn_relu<<<grd(blk.planes * h2 * w2), kBlk, 0, stream_>>>(
+        d_out, blk.bn2_scale, blk.bn2_bias, blk.planes, h2 * w2, 0);
     const float* d_sc;
     if (blk.has_shortcut) {
         int hs, ws;
         conv2d_(d_in, d_bufD_, blk.in_planes, blk.planes, H, W, 1, blk.stride, 0,
                 blk.sc_w, hs, ws);
-        r34_bn_relu<<<grd(blk.planes * hs * ws), kBlk>>>(d_bufD_, blk.sc_scale,
-                                                         blk.sc_bias, blk.planes,
-                                                         hs * ws, 0);
+        r34_bn_relu<<<grd(blk.planes * hs * ws), kBlk, 0, stream_>>>(
+            d_bufD_, blk.sc_scale, blk.sc_bias, blk.planes, hs * ws, 0);
         d_sc = d_bufD_;
     } else {
         d_sc = d_in;  // identity (in_planes == planes, stride 1)
     }
     int n = blk.planes * h2 * w2;
-    r34_add_relu<<<grd(n), kBlk>>>(d_out, d_sc, n);
+    r34_add_relu<<<grd(n), kBlk, 0, stream_>>>(d_out, d_sc, n);
     H_out = h2;
     W_out = w2;
 }
@@ -125,8 +122,9 @@ bool DiarizenResnet34Embedder::debug_fbank(const float* wave, int n_samples,
     int T = compute_fbank_(wave, n_samples, d_fbank_);
     if (T <= 0) return false;
     out.resize((size_t)T * DiarizenResnet34Arch::kNumMel);
-    cudaMemcpy(out.data(), d_fbank_, out.size() * sizeof(float),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(out.data(), d_fbank_, out.size() * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream_);
+    cudaStreamSynchronize(stream_);
     out_frames = T;
     return true;
 }
@@ -149,16 +147,15 @@ bool DiarizenResnet34Embedder::embed_backbone(const float* wave, int n_samples) 
     if (T <= 0) return false;
 
     // Lay fbank [T,80] out as conv input [1,1,80,T] (freq=H, time=W).
-    r34_transpose_TM_to_MT<<<grd(T * A::kNumMel), kBlk>>>(d_fbank_, d_bufA_, T,
-                                                          A::kNumMel);
+    r34_transpose_TM_to_MT<<<grd(T * A::kNumMel), kBlk, 0, stream_>>>(
+        d_fbank_, d_bufA_, T, A::kNumMel);
 
     // Stem conv1 (3x3, s1, p1) -> [32, 80, T], bn1 + relu.
     int H, W;
     conv2d_(d_bufA_, d_bufB_, 1, A::kBaseWidth, A::kNumMel, T, 3, 1, 1, conv1_w_,
             H, W);
-    r34_bn_relu<<<grd(A::kBaseWidth * H * W), kBlk>>>(d_bufB_, bn1_scale_,
-                                                      bn1_bias_, A::kBaseWidth,
-                                                      H * W, 1);
+    r34_bn_relu<<<grd(A::kBaseWidth * H * W), kBlk, 0, stream_>>>(
+        d_bufB_, bn1_scale_, bn1_bias_, A::kBaseWidth, H * W, 1);
     float* cur = d_bufB_;
     float* alt = d_bufA_;
     for (const auto& blk : blocks_) {
@@ -172,8 +169,8 @@ bool DiarizenResnet34Embedder::embed_backbone(const float* wave, int n_samples) 
     const int rows = A::kStatsDim;  // 2560
     const int Tp = W;               // pooling time axis
     backbone_Tp_ = Tp;
-    cudaMemcpy(d_backbone_, cur, (size_t)rows * Tp * sizeof(float),
-               cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(d_backbone_, cur, (size_t)rows * Tp * sizeof(float),
+                    cudaMemcpyDeviceToDevice, stream_);
     return true;
 }
 
@@ -191,27 +188,32 @@ bool DiarizenResnet34Embedder::embed_pool(const float* mask, int num_frames,
     float* d_w = d_bufD_;
     if (mask) {
         // Upload mask to the head of d_bufC_ scratch, then resample.
-        cudaMemcpy(d_bufC_, mask, num_frames * sizeof(float),
-                   cudaMemcpyHostToDevice);
-        r34_interp_nearest<<<grd(Tp), kBlk>>>(d_bufC_, num_frames, d_w, Tp);
+        cudaMemcpyAsync(d_bufC_, mask, num_frames * sizeof(float),
+                        cudaMemcpyHostToDevice, stream_);
+        r34_interp_nearest<<<grd(Tp), kBlk, 0, stream_>>>(d_bufC_, num_frames,
+                                                          d_w, Tp);
     } else {
         std::vector<float> ones(Tp, 1.0f);
-        cudaMemcpy(d_w, ones.data(), Tp * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(d_w, ones.data(), Tp * sizeof(float),
+                        cudaMemcpyHostToDevice, stream_);
+        // ones[] is a function-local staging buffer; the async H2D above must
+        // finish before it is reclaimed.
+        cudaStreamSynchronize(stream_);
     }
 
     // Weighted statistics pooling -> d_pool_ [5120] (mean|std).
-    r34_stats_pool<<<grd(rows), kBlk>>>(cur, d_w, d_pool_, rows, Tp);
+    r34_stats_pool<<<grd(rows), kBlk, 0, stream_>>>(cur, d_w, d_pool_, rows, Tp);
 
     // seg_1 projection: out[256] = W[256,5120] @ pool[5120] + bias.
     float* d_out = d_bufA_;  // reuse
-    cudaMemcpy(d_out, seg1_b_, A::kEmbedDim * sizeof(float),
-               cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(d_out, seg1_b_, A::kEmbedDim * sizeof(float),
+                    cudaMemcpyDeviceToDevice, stream_);
     float one = 1.0f;
     cublasSgemv(blas_, CUBLAS_OP_T, A::kPoolDim, A::kEmbedDim, &one, seg1_w_,
                 A::kPoolDim, d_pool_, 1, &one, d_out, 1);
-    cudaMemcpy(out_embed, d_out, A::kEmbedDim * sizeof(float),
-               cudaMemcpyDeviceToHost);
-    cudaDeviceSynchronize();
+    cudaMemcpyAsync(out_embed, d_out, A::kEmbedDim * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream_);
+    cudaStreamSynchronize(stream_);
     return true;
 }
 

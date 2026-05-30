@@ -46,8 +46,8 @@ float* DiarizenConformerHead::weight_f32(const std::string& name) const {
     }
     float* d = nullptr;
     if (cudaMalloc(&d, v->numel * sizeof(float)) != cudaSuccess) return nullptr;
-    half_to_float_kernel<<<div_ceil_((int)v->numel, kBlock), kBlock>>>(
-        v->data, d, (int)v->numel);
+    half_to_float_kernel<<<div_ceil_((int)v->numel, kBlock), kBlock, 0,
+                          stream_>>>(v->data, d, (int)v->numel);
     f32_cache_.emplace(name, d);
     return d;
 }
@@ -104,9 +104,15 @@ void clinear_(cublasHandle_t blas, const float* d_X, const float* d_W,
     const float alpha = 1.0f, beta = 0.0f;
     cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, M, T, K, &alpha, d_W, K, d_X, K,
                 &beta, d_Y, M);
-    if (d_bias)
-        bias_add_rows_kernel<<<div_ceil_(T * M, kBlock), kBlock>>>(d_Y, d_bias,
-                                                                   T, M);
+    if (d_bias) {
+        // The GEMM above already ran on the handle's bound stream; launch the
+        // bias add on the same stream so the two stay ordered without a
+        // default-stream barrier against perception.
+        cudaStream_t s = nullptr;
+        cublasGetStream(blas, &s);
+        bias_add_rows_kernel<<<div_ceil_(T * M, kBlock), kBlock, 0, s>>>(
+            d_Y, d_bias, T, M);
+    }
 }
 
 // Macaron FFN: x += 0.5 * w_2(swish(w_1(ln_norm(x)))).
@@ -135,12 +141,13 @@ bool ffn_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
     xn = static_cast<float*>(self.scratch_acquire(bTC));
     h1 = static_cast<float*>(self.scratch_acquire(bTFF));
     h2 = static_cast<float*>(self.scratch_acquire(bTC));
-    row_layer_norm_to_kernel<<<T, kBlock>>>(d_x, xn, lnw, lnb, T, C);
+    cudaStream_t st = self.stream();
+    row_layer_norm_to_kernel<<<T, kBlock, 0, st>>>(d_x, xn, lnw, lnb, T, C);
     clinear_(blas, xn, w1, b1, h1, T, FF, C);
-    swish_kernel<<<div_ceil_(T * FF, kBlock), kBlock>>>(h1, (long)T * FF);
+    swish_kernel<<<div_ceil_(T * FF, kBlock), kBlock, 0, st>>>(h1, (long)T * FF);
     clinear_(blas, h1, w2, b2, h2, T, C, FF);
-    scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, h2, 0.5f,
-                                                            (long)T * C);
+    scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock, 0, st>>>(
+        d_x, h2, 0.5f, (long)T * C);
     self.scratch_release(xn, bTC);
     self.scratch_release(h1, bTFF);
     self.scratch_release(h2, bTC);  // scratch only; weights cached
@@ -176,7 +183,8 @@ bool mha_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
     S = static_cast<float*>(self.scratch_acquire(bS));
     ctx = static_cast<float*>(self.scratch_acquire(bTC));
     o = static_cast<float*>(self.scratch_acquire(bTC));
-    row_layer_norm_to_kernel<<<T, kBlock>>>(d_x, xn, lnw, lnb, T, C);
+    cudaStream_t st = self.stream();
+    row_layer_norm_to_kernel<<<T, kBlock, 0, st>>>(d_x, xn, lnw, lnb, T, C);
     clinear_(blas, xn, wq, bq, Q, T, C, C);
     clinear_(blas, xn, wk, bk, K, T, C, C);
     clinear_(blas, xn, wv, bv, V, T, C, C);
@@ -190,7 +198,7 @@ bool mha_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
         K, nh * dk, dk,                    // A = per-head K, lda, strideA
         Q, nh * dk, dk,                    // B = per-head Q, ldb, strideB
         &zero, S, T, (long long)T * T, nh);
-    softmax_rows_kernel_c<<<nh * T, 256>>>(S, T);
+    softmax_rows_kernel_c<<<nh * T, 256, 0, st>>>(S, T);
     // Context via batched GEMM: ctx_j[q,d] = sum_k S_j[q,k] · V_j[k,d].
     cublasSgemmStridedBatched(
         blas, CUBLAS_OP_N, CUBLAS_OP_N, dk, T, T, &one,
@@ -198,8 +206,8 @@ bool mha_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
         S, T, (long long)T * T,            // B = per-head S, ldb, strideB
         &zero, ctx, nh * dk, dk, nh);
     clinear_(blas, ctx, wo, bo, o, T, C, C);
-    scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, o, 1.0f,
-                                                            (long)T * C);
+    scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock, 0, st>>>(
+        d_x, o, 1.0f, (long)T * C);
     self.scratch_release(xn, bTC);
     self.scratch_release(Q, bTC);
     self.scratch_release(K, bTC);
@@ -242,23 +250,24 @@ bool conv_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
     dw = static_cast<float*>(self.scratch_acquire(bCT));
     swt = static_cast<float*>(self.scratch_acquire(bTC));
     pc2 = static_cast<float*>(self.scratch_acquire(bTC));
-    row_layer_norm_to_kernel<<<T, kBlock>>>(d_x, xn, lnw, lnb, T, C);
+    cudaStream_t st = self.stream();
+    row_layer_norm_to_kernel<<<T, kBlock, 0, st>>>(d_x, xn, lnw, lnb, T, C);
     // pointwise_conv1 (1x1) == per-frame linear C -> 2C.
     clinear_(blas, xn, pw1, pb1, pc1, T, 2 * C, C);
-    glu_tc_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(pc1, glu, T, C);
-    transpose_tc_to_ct_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(glu, gct, T,
-                                                                    C);
-    depthwise_conv1d_kernel<<<div_ceil_(C * T, kBlock), kBlock>>>(gct, dww, dwb,
-                                                                  dw, C, T, K);
-    batchnorm_ct_kernel<<<div_ceil_(C * T, kBlock), kBlock>>>(dw, bnw, bnb, bnm,
-                                                              bnv, C, T, 1e-5f);
-    swish_kernel<<<div_ceil_(C * T, kBlock), kBlock>>>(dw, (long)C * T);
-    transpose_ct_to_tc_kernel<<<div_ceil_(C * T, kBlock), kBlock>>>(dw, swt, C,
-                                                                    T);
+    glu_tc_kernel<<<div_ceil_(T * C, kBlock), kBlock, 0, st>>>(pc1, glu, T, C);
+    transpose_tc_to_ct_kernel<<<div_ceil_(T * C, kBlock), kBlock, 0, st>>>(
+        glu, gct, T, C);
+    depthwise_conv1d_kernel<<<div_ceil_(C * T, kBlock), kBlock, 0, st>>>(
+        gct, dww, dwb, dw, C, T, K);
+    batchnorm_ct_kernel<<<div_ceil_(C * T, kBlock), kBlock, 0, st>>>(
+        dw, bnw, bnb, bnm, bnv, C, T, 1e-5f);
+    swish_kernel<<<div_ceil_(C * T, kBlock), kBlock, 0, st>>>(dw, (long)C * T);
+    transpose_ct_to_tc_kernel<<<div_ceil_(C * T, kBlock), kBlock, 0, st>>>(
+        dw, swt, C, T);
     // pointwise_conv2 (1x1) == per-frame linear C -> C.
     clinear_(blas, swt, pw2, pb2, pc2, T, C, C);
-    scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, pc2, 1.0f,
-                                                            (long)T * C);
+    scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock, 0, st>>>(
+        d_x, pc2, 1.0f, (long)T * C);
     self.scratch_release(xn, bTC);
     self.scratch_release(pc1, bT2C);
     self.scratch_release(glu, bTC);
@@ -270,6 +279,11 @@ bool conv_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
 }
 
 }  // namespace
+
+void DiarizenConformerHead::set_stream(cudaStream_t s) {
+    stream_ = s;
+    if (blas_) cublasSetStream(static_cast<cublasHandle_t>(blas_), s);
+}
 
 bool DiarizenConformerHead::run_block_(int layer, float* d_x, int T,
                                        void* cublas) {
@@ -289,7 +303,7 @@ bool DiarizenConformerHead::run_block_(int layer, float* d_x, int T,
         float* w = weight_f32(nw);
         float* b = weight_f32(nb);
         if (!w || !b) return false;
-        row_layer_norm_to_kernel<<<T, kBlock>>>(d_x, d_x, w, b, T, C);
+        row_layer_norm_to_kernel<<<T, kBlock, 0, stream_>>>(d_x, d_x, w, b, T, C);
     }
     return true;
 }
@@ -303,7 +317,7 @@ std::vector<float> DiarizenConformerHead::run_(const float* feat, int T,
     const std::size_t bytes_x = (std::size_t)T * C * sizeof(float);
     float* d_x = static_cast<float*>(scratch_acquire(bytes_x));
     if (!d_x) return {};
-    cudaMemcpy(d_x, feat, bytes_x, cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(d_x, feat, bytes_x, cudaMemcpyHostToDevice, stream_);
 
     // Cached cublas handle: created once and reused for every chunk, so the
     // seg loop no longer pays a cublasCreate/Destroy (and its implicit device
@@ -321,6 +335,10 @@ std::vector<float> DiarizenConformerHead::run_(const float* feat, int T,
     // this same pipeline already runs TF32 convs, so the precision regime is
     // established; ~3-4x over fp32 ampere_sgemm on the linear layers.
     diarizen_set_gemm_math_(blas);
+    // Bind the handle to this head's stream so every GEMM (and the bias adds
+    // that read the bound stream via cublasGetStream) stays off the legacy
+    // default stream. No-op when stream_ is nullptr.
+    cublasSetStream(blas, stream_);
     for (int l = 0; l < DiarizenConformerArch::kNumLayer; ++l) {
         if (!run_block_(l, d_x, T, blas)) {
             scratch_release(d_x, bytes_x);
@@ -344,17 +362,18 @@ std::vector<float> DiarizenConformerHead::run_(const float* feat, int T,
         out_dim = NC;
         d_out = d_logits;
         if (stage >= 2)
-            logsoftmax_rows_kernel<<<T, 1>>>(d_logits, T, NC);
+            logsoftmax_rows_kernel<<<T, 1, 0, stream_>>>(d_logits, T, NC);
     }
 
-    if (cudaDeviceSynchronize() != cudaSuccess) {
+    if (cudaStreamSynchronize(stream_) != cudaSuccess) {
         scratch_release(d_x, bytes_x);
         if (d_logits) scratch_release(d_logits, bytes_logits);
         return {};
     }
     std::vector<float> host((size_t)T * out_dim);
-    cudaMemcpy(host.data(), d_out, host.size() * sizeof(float),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(host.data(), d_out, host.size() * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream_);
+    cudaStreamSynchronize(stream_);
     scratch_release(d_x, bytes_x);
     if (d_logits) scratch_release(d_logits, bytes_logits);
     return host;

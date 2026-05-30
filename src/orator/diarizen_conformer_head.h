@@ -24,6 +24,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <cuda_runtime.h>
+
 #include <cuda_fp16.h>
 
 namespace deusridet {
@@ -72,6 +74,14 @@ public:
     bool is_loaded() const { return loaded_; }
     std::size_t arena_bytes() const { return arena_bytes_; }
     std::size_t tensor_count() const { return tensors_.size(); }
+
+    /// Bind this head's compute to an externally-owned CUDA stream (e.g. a
+    /// Vires Background priority stream). Binds the lazy cuBLAS handle and
+    /// routes every hot-path kernel + async copy onto it. Passing nullptr (the
+    /// default) keeps the legacy default stream, so an unwired head is bit- and
+    /// behaviour-identical to before.
+    void set_stream(cudaStream_t s);
+    cudaStream_t stream() const { return stream_; }
 
     /// Look up a tensor by its safetensors name. Returns nullptr-bearing view
     /// if absent. Stable for the object lifetime.
@@ -124,6 +134,7 @@ private:
     mutable std::unordered_map<std::string, float*> f32_cache_;  ///< owned, GPU
     mutable std::unordered_map<std::size_t, std::vector<void*>> scratch_pool_;
     mutable void* blas_ = nullptr;  ///< cached cublasHandle_t (lazy, owned)
+    cudaStream_t stream_ = nullptr;  ///< bound via set_stream(); nullptr=default
 };
 
 }  // namespace orator

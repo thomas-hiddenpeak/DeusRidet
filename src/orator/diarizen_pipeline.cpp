@@ -15,6 +15,7 @@
 #include "diarizen_clustering.h"
 #include "diarizen_resnet34_embedder.h"
 #include "diarizen_segmenter.h"
+#include "../vires/vires_facade.h"
 
 namespace deusridet {
 namespace orator {
@@ -36,6 +37,7 @@ struct DiarizenPipeline::Impl {
     DiarizenClustering        clustering;
     bool                      loaded = false;
     std::string               err;
+    vires::ConsumerId         vires_id = vires::kInvalidConsumer;
 
     // Crop chunk c from `wave` into `out` (length kWindowSamples), zero-padded
     // (pyannote Audio.crop mode="pad"). start = c * kStepSamples.
@@ -283,6 +285,16 @@ bool DiarizenPipeline::load(const DiarizenPipelineConfig& cfg) {
         return false;
     }
     impl_->loaded = true;
+    // Vires: route the entire native DiariZen forward path onto a Background
+    // priority stream so it never barriers live foreground perception on the
+    // Tegra default stream. Bit-equal (same kernels, same order); stream choice
+    // only changes scheduling priority. Degrades to the default stream if the
+    // arbiter hands back nullptr.
+    impl_->vires_id = vires::Arbiter::instance().register_consumer(
+        "diarizen", vires::Priority::Background);
+    cudaStream_t st = vires::Arbiter::instance().stream(impl_->vires_id);
+    impl_->segmenter.set_stream(st);
+    impl_->embedder.set_stream(st);
     LOG_INFO("DiarizenPipeline", "loaded all native stages");
     return true;
 }

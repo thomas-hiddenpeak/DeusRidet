@@ -56,8 +56,8 @@ float* DiarizenWavlmPruned::weight_f32(const std::string& name,
     if (it != f32_cache_.end()) return it->second;
     float* d = nullptr;
     if (cudaMalloc(&d, v->numel * sizeof(float)) != cudaSuccess) return nullptr;
-    half_to_float_kernel<<<div_ceil_((int)v->numel, kBlock), kBlock>>>(
-        v->data, d, (int)v->numel);
+    half_to_float_kernel<<<div_ceil_((int)v->numel, kBlock), kBlock, 0,
+                          stream_>>>(v->data, d, (int)v->numel);
     f32_cache_.emplace(name, d);
     return d;
 }
@@ -255,12 +255,13 @@ float* DiarizenWavlmPruned::compute_position_bias_(int T) {
     const std::size_t bytes_emb = (std::size_t)en * sizeof(float);
     float* d_emb = static_cast<float*>(scratch_acquire(bytes_emb));
     if (!d_emb) return nullptr;
-    half_to_float_kernel<<<div_ceil_(en, kBlock), kBlock>>>(emb->data, d_emb, en);
+    half_to_float_kernel<<<div_ceil_(en, kBlock), kBlock, 0, stream_>>>(
+        emb->data, d_emb, en);
 
     const std::size_t bytes_bucket = bucket.size() * sizeof(int);
     int* d_bucket = static_cast<int*>(scratch_acquire(bytes_bucket));
-    cudaMemcpy(d_bucket, bucket.data(), bucket.size() * sizeof(int),
-               cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(d_bucket, bucket.data(), bucket.size() * sizeof(int),
+                    cudaMemcpyHostToDevice, stream_);
 
     const std::size_t bytes_bias = (std::size_t)16 * T * T * sizeof(float);
     float* d_bias = static_cast<float*>(scratch_acquire(bytes_bias));
@@ -270,8 +271,8 @@ float* DiarizenWavlmPruned::compute_position_bias_(int T) {
         return nullptr;
     }
     long tot = (long)16 * T * T;
-    gather_pos_bias_kernel<<<(int)((tot + kBlock - 1) / kBlock), kBlock>>>(
-        d_bucket, d_emb, d_bias, T);
+    gather_pos_bias_kernel<<<(int)((tot + kBlock - 1) / kBlock), kBlock, 0,
+                            stream_>>>(d_bucket, d_emb, d_bias, T);
     scratch_release(d_emb, bytes_emb);
     scratch_release(d_bucket, bytes_bucket);
     return d_bias;
@@ -296,9 +297,14 @@ void linear_(cublasHandle_t blas, const float* d_X, const float* d_W,
     const float alpha = 1.0f, beta = 0.0f;
     cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, M, T, K, &alpha, d_W, K, d_X, K,
                 &beta, d_Y, M);
-    if (d_bias)
-        bias_add_rows_kernel<<<div_ceil_(T * M, kBlock), kBlock>>>(d_Y, d_bias,
-                                                                   T, M);
+    if (d_bias) {
+        // Same stream as the GEMM (read off the handle) so the bias add stays
+        // ordered without a default-stream barrier against perception.
+        cudaStream_t s = nullptr;
+        cublasGetStream(blas, &s);
+        bias_add_rows_kernel<<<div_ceil_(T * M, kBlock), kBlock, 0, s>>>(
+            d_Y, d_bias, T, M);
+    }
 }
 
 // Fetch a top-level tensor by exact name into a cached fp32 device buffer
@@ -365,7 +371,7 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
         const std::size_t bytes_BTH = (std::size_t)BT * H * sizeof(float);
         const std::size_t bytes_BTinner = (std::size_t)BT * inner * sizeof(float);
         float* xn = static_cast<float*>(scratch_acquire(bytes_BTH));
-        row_layer_norm_to_kernel<<<BT, kBlock>>>(d_hidden, xn, ln_w, ln_b, BT, H);
+        row_layer_norm_to_kernel<<<BT, kBlock, 0, stream_>>>(d_hidden, xn, ln_w, ln_b, BT, H);
 
         // Dense Q/K/V projections fuse across chunks: [B*T, inner] tall GEMMs.
         float* Q = static_cast<float*>(scratch_acquire(bytes_BTinner));
@@ -378,8 +384,8 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
         // remaining_heads -> device (shared across the chunk loop).
         const std::size_t bytes_rh = (std::size_t)nh * sizeof(int);
         int* d_rh = static_cast<int*>(scratch_acquire(bytes_rh));
-        cudaMemcpy(d_rh, remaining_heads_[layer].data(), nh * sizeof(int),
-                   cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(d_rh, remaining_heads_[layer].data(), nh * sizeof(int),
+                        cudaMemcpyHostToDevice, stream_);
 
         const std::size_t bytes_gate = (std::size_t)16 * T * sizeof(float);
         float* gate = static_cast<float*>(scratch_acquire(bytes_gate));
@@ -400,7 +406,7 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
             float* V_c = V + (std::size_t)c * T * inner;
             float* ctx_c = ctx + (std::size_t)c * T * inner;
 
-            gru_gate_kernel<<<div_ceil_(16 * T, kBlock), kBlock>>>(
+            gru_gate_kernel<<<div_ceil_(16 * T, kBlock), kBlock, 0, stream_>>>(
                 xn_c, Wg, bg, cst, gate, T);
             cublasSgemmStridedBatched(
                 blas, CUBLAS_OP_T, CUBLAS_OP_N, T, T, 64, &scaling,
@@ -408,9 +414,9 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
                 Q_c, nh * 64, 64,
                 &zero, S, T, (long long)T * T, nh);
             long stot = (long)nh * T * T;
-            attn_bias_kernel<<<(int)((stot + kBlock - 1) / kBlock), kBlock>>>(
-                d_rh, gate, d_pos_bias, S, T, nh);
-            softmax_rows_kernel<<<nh * T, 256>>>(S, T);
+            attn_bias_kernel<<<(int)((stot + kBlock - 1) / kBlock), kBlock, 0,
+                              stream_>>>(d_rh, gate, d_pos_bias, S, T, nh);
+            softmax_rows_kernel<<<nh * T, 256, 0, stream_>>>(S, T);
             cublasSgemmStridedBatched(
                 blas, CUBLAS_OP_N, CUBLAS_OP_N, 64, T, T, &one,
                 V_c, nh * 64, 64,
@@ -421,7 +427,7 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
         // out_proj then residual add fuse across chunks: [B*T, H].
         float* attn_out = static_cast<float*>(scratch_acquire(bytes_BTH));
         linear_(blas, ctx, Wo, bo, attn_out, BT, H, inner);
-        add_inplace_kernel<<<div_ceil_(BT * H, kBlock), kBlock>>>(
+        add_inplace_kernel<<<div_ceil_(BT * H, kBlock), kBlock, 0, stream_>>>(
             d_hidden, attn_out, (long)BT * H);
 
         scratch_release(xn, bytes_BTH);
@@ -442,7 +448,7 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
     float* fln_b = layer_f32(*this, layer, "final_layer_norm.bias", nullptr);
     if (!fln_w || !fln_b) return false;
     float* fn = static_cast<float*>(scratch_acquire((std::size_t)BT * H * sizeof(float)));
-    row_layer_norm_to_kernel<<<BT, kBlock>>>(d_hidden, fn, fln_w, fln_b, BT, H);
+    row_layer_norm_to_kernel<<<BT, kBlock, 0, stream_>>>(d_hidden, fn, fln_w, fln_b, BT, H);
     // fln_w/fln_b are cache-owned; not freed here.
 
     float* Wi = layer_f32(*this, layer, "feed_forward.intermediate_dense.weight", nullptr);
@@ -455,10 +461,10 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
     const std::size_t bytes_BTffn = (std::size_t)BT * ffn * sizeof(float);
     float* inter = static_cast<float*>(scratch_acquire(bytes_BTffn));
     linear_(blas, fn, Wi, bi, inter, BT, ffn, H);
-    gelu_exact_kernel<<<div_ceil_(BT * ffn, kBlock), kBlock>>>(inter, BT * ffn);
+    gelu_exact_kernel<<<div_ceil_(BT * ffn, kBlock), kBlock, 0, stream_>>>(inter, BT * ffn);
     float* ff = static_cast<float*>(scratch_acquire(bytes_BTH_ff));
     linear_(blas, inter, Wo2, bo2, ff, BT, H, ffn);
-    add_inplace_kernel<<<div_ceil_(BT * H, kBlock), kBlock>>>(d_hidden, ff,
+    add_inplace_kernel<<<div_ceil_(BT * H, kBlock), kBlock, 0, stream_>>>(d_hidden, ff,
                                                               (long)BT * H);
     scratch_release(fn, bytes_BTH_ff);
     scratch_release(inter, bytes_BTffn);
@@ -490,6 +496,7 @@ std::vector<float> DiarizenWavlmPruned::debug_layers(const float* pcm,
             return {};
         }
         diarizen_set_gemm_math_(blas);  // tensor-core GEMM (env-gated)
+        cublasSetStream(blas, stream_);
         for (int l = 0; l < up_to_layer && l < DiarizenWavlmPrunedArch::kTransformerLayers; ++l) {
             if (!run_encoder_layer_(l, d_hidden, 1, T, d_pos_bias, blas)) {
                 cublasDestroy(blas);
@@ -502,13 +509,14 @@ std::vector<float> DiarizenWavlmPruned::debug_layers(const float* pcm,
         scratch_release(d_pos_bias, bytes_pos);
     }
 
-    if (cudaDeviceSynchronize() != cudaSuccess) {
+    if (cudaStreamSynchronize(stream_) != cudaSuccess) {
         cudaFree(d_hidden);
         return {};
     }
     std::vector<float> host((size_t)T * H);
-    cudaMemcpy(host.data(), d_hidden, host.size() * sizeof(float),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(host.data(), d_hidden, host.size() * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream_);
+    cudaStreamSynchronize(stream_);
     cudaFree(d_hidden);
     T_out = T;
     return host;
@@ -531,7 +539,8 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail(const float* pcm,
         cudaFree(d_hidden);
         return {};
     }
-    cudaMemcpy(d_taps, d_hidden, TH * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(d_taps, d_hidden, TH * sizeof(float), cudaMemcpyDeviceToDevice,
+                    stream_);
 
     const std::size_t bytes_pos = (std::size_t)16 * T * T * sizeof(float);
     float* d_pos_bias = compute_position_bias_(T);
@@ -542,6 +551,7 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail(const float* pcm,
         return {};
     }
     diarizen_set_gemm_math_(blas);  // tensor-core GEMM (env-gated)
+    cublasSetStream(blas, stream_);
     for (int l = 0; l < DiarizenWavlmPrunedArch::kTransformerLayers; ++l) {
         if (!run_encoder_layer_(l, d_hidden, 1, T, d_pos_bias, blas)) {
             cublasDestroy(blas); cudaFree(d_hidden);
@@ -549,8 +559,8 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail(const float* pcm,
             scratch_release(d_pos_bias, bytes_pos);
             return {};
         }
-        cudaMemcpy(d_taps + (long)(l + 1) * TH, d_hidden, TH * sizeof(float),
-                   cudaMemcpyDeviceToDevice);
+        cudaMemcpyAsync(d_taps + (long)(l + 1) * TH, d_hidden, TH * sizeof(float),
+                        cudaMemcpyDeviceToDevice, stream_);
     }
     scratch_release(d_pos_bias, bytes_pos);
     cudaFree(d_hidden);
@@ -563,7 +573,7 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail(const float* pcm,
         if (d_sum) scratch_release(d_sum, (std::size_t)TH * sizeof(float));
         return {};
     }
-    weighted_sum_kernel<<<div_ceil_((int)TH, kBlock), kBlock>>>(d_taps, d_ws,
+    weighted_sum_kernel<<<div_ceil_((int)TH, kBlock), kBlock, 0, stream_>>>(d_taps, d_ws,
                                                                 d_sum, TH);
     scratch_release(d_taps, bytes_taps);
     // d_ws is cache-owned; not freed here.
@@ -592,16 +602,17 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail(const float* pcm,
         scratch_release(d_proj, bytes_proj);
         return {};
     }
-    row_layer_norm_to_kernel<<<T, kBlock>>>(d_proj, d_proj, d_lw, d_lb, T, D);
+    row_layer_norm_to_kernel<<<T, kBlock, 0, stream_>>>(d_proj, d_proj, d_lw, d_lb, T, D);
     // d_lw/d_lb are cache-owned; not freed here.
 
-    if (cudaDeviceSynchronize() != cudaSuccess) {
+    if (cudaStreamSynchronize(stream_) != cudaSuccess) {
         scratch_release(d_proj, bytes_proj);
         return {};
     }
     std::vector<float> host((size_t)T * D);
-    cudaMemcpy(host.data(), d_proj, host.size() * sizeof(float),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(host.data(), d_proj, host.size() * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream_);
+    cudaStreamSynchronize(stream_);
     scratch_release(d_proj, bytes_proj);
     T_out = T;
     return host;
@@ -631,9 +642,9 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail_batch(
             LOG_ERROR(kLog, "batch chunk %d frame mismatch %d!=%d", c, Tc, T);
             cudaFree(hc); cudaFree(d_batch); return {};
         }
-        cudaMemcpy(d_batch + (std::size_t)c * T * H, hc,
-                   (std::size_t)T * H * sizeof(float),
-                   cudaMemcpyDeviceToDevice);
+        cudaMemcpyAsync(d_batch + (std::size_t)c * T * H, hc,
+                        (std::size_t)T * H * sizeof(float),
+                        cudaMemcpyDeviceToDevice, stream_);
         cudaFree(hc);
     }
     const long BTH = (long)B * T * H;
@@ -654,9 +665,10 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail_batch(
         return {};
     }
     diarizen_set_gemm_math_(blas);
-    cudaMemset(d_sum, 0, bytes_sum);
+    cublasSetStream(blas, stream_);
+    cudaMemsetAsync(d_sum, 0, bytes_sum, stream_);
     const int accB = div_ceil_((int)BTH, kBlock);
-    weighted_acc_kernel<<<accB, kBlock>>>(d_sum, d_batch, d_ws, 0, BTH);  // tap0
+    weighted_acc_kernel<<<accB, kBlock, 0, stream_>>>(d_sum, d_batch, d_ws, 0, BTH);  // tap0
     for (int l = 0; l < DiarizenWavlmPrunedArch::kTransformerLayers; ++l) {
         if (!run_encoder_layer_(l, d_batch, B, T, d_pos_bias, blas)) {
             cublasDestroy(blas); cudaFree(d_batch);
@@ -664,7 +676,7 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail_batch(
             scratch_release(d_pos_bias, (std::size_t)16 * T * T * sizeof(float));
             return {};
         }
-        weighted_acc_kernel<<<accB, kBlock>>>(d_sum, d_batch, d_ws, l + 1, BTH);
+        weighted_acc_kernel<<<accB, kBlock, 0, stream_>>>(d_sum, d_batch, d_ws, l + 1, BTH);
     }
     scratch_release(d_pos_bias, (std::size_t)16 * T * T * sizeof(float));
     cudaFree(d_batch);
@@ -686,14 +698,15 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail_batch(
     float* d_lw = top_f32(*this, "lnorm.weight", nullptr);
     float* d_lb = top_f32(*this, "lnorm.bias", nullptr);
     if (!d_lw || !d_lb) { scratch_release(d_proj, bytes_proj); return {}; }
-    row_layer_norm_to_kernel<<<B * T, kBlock>>>(d_proj, d_proj, d_lw, d_lb,
+    row_layer_norm_to_kernel<<<B * T, kBlock, 0, stream_>>>(d_proj, d_proj, d_lw, d_lb,
                                                 B * T, D);
-    if (cudaDeviceSynchronize() != cudaSuccess) {
+    if (cudaStreamSynchronize(stream_) != cudaSuccess) {
         scratch_release(d_proj, bytes_proj); return {};
     }
     std::vector<float> host((std::size_t)B * T * D);
-    cudaMemcpy(host.data(), d_proj, host.size() * sizeof(float),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpyAsync(host.data(), d_proj, host.size() * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream_);
+    cudaStreamSynchronize(stream_);
     scratch_release(d_proj, bytes_proj);
     T_out = T;
     return host;

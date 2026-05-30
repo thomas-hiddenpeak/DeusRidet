@@ -28,6 +28,7 @@
 #include <vector>
 
 #include <cuda_fp16.h>
+#include <cuda_runtime.h>
 
 namespace deusridet {
 namespace orator {
@@ -105,6 +106,15 @@ public:
     bool load(const std::string& safetensors_path);
 
     bool is_loaded() const { return loaded_; }
+
+    /// Bind this encoder's compute to an externally-owned CUDA stream (e.g. a
+    /// Vires Background priority stream). Binds the lazy cuDNN handle and
+    /// routes every hot-path kernel + async copy onto it. Each per-call cuBLAS
+    /// handle is bound to the same stream at creation. Passing nullptr (the
+    /// default) keeps the legacy default stream, so an unwired encoder is bit-
+    /// and behaviour-identical to before.
+    void set_stream(cudaStream_t s);
+    cudaStream_t stream() const { return stream_; }
 
     /// Bytes allocated on the GPU (single contiguous arena).
     std::size_t arena_bytes() const { return arena_bytes_; }
@@ -233,6 +243,7 @@ private:
     void* cudnn_  = nullptr;   ///< cudnnHandle_t
     void* cudnn_ws_ = nullptr; ///< conv workspace (GPU), grown on demand
     std::size_t cudnn_ws_bytes_ = 0;
+    cudaStream_t stream_ = nullptr;  ///< bound via set_stream(); nullptr=default
 
     bool ensure_handles_();
     void release_();

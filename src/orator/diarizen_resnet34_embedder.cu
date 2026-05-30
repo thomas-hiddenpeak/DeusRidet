@@ -226,13 +226,18 @@ int DiarizenResnet34Embedder::compute_fbank_(const float* wave, int n_samples,
     }
     std::vector<float> scaled(n_samples);
     for (int i = 0; i < n_samples; ++i) scaled[i] = wave[i] * 32768.0f;
-    cudaMemcpy(d_wave_, scaled.data(), n_samples * sizeof(float),
-               cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(d_wave_, scaled.data(), n_samples * sizeof(float),
+                    cudaMemcpyHostToDevice, stream_);
+    // The scaled[] host staging buffer is reclaimed at function exit, so the
+    // async H2D must complete before then: synchronise the stream here. (On
+    // the default stream this is equivalent to the old blocking copy.)
+    cudaStreamSynchronize(stream_);
     // Kaldi log floor = FLT_EPSILON.
     launch_povey_fbank(d_wave_, d_window_, d_mel_fb_, d_fbank_TM, T,
-                       /*pcm_offset=*/0, FL, NF, HOP, M, 1.1920929e-07f);
+                       /*pcm_offset=*/0, FL, NF, HOP, M, 1.1920929e-07f,
+                       stream_);
     // CMN: subtract per-mel time mean.
-    r34_cmn<<<grid(M), kBlock>>>(d_fbank_TM, T, M);
+    r34_cmn<<<grid(M), kBlock, 0, stream_>>>(d_fbank_TM, T, M);
     return T;
 }
 
@@ -286,6 +291,12 @@ bool DiarizenResnet34Embedder::load(const std::string& path) {
     LOG_INFO(kRLog, "loaded ResNet34-LM: %zu blocks, %zu param buffers",
              blocks_.size(), owned_.size());
     return true;
+}
+
+void DiarizenResnet34Embedder::set_stream(cudaStream_t s) {
+    stream_ = s;
+    if (cudnn_) cudnnSetStream(cudnn_, s);
+    if (blas_) cublasSetStream(blas_, s);
 }
 
 }  // namespace orator
