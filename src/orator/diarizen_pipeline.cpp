@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "../communis/log.h"
@@ -94,6 +95,102 @@ struct DiarizenPipeline::Impl {
         }
         return true;
     }
+
+    // pyannote reconstruct + speaker_count + to_diarization. seg is the
+    // binarized segmentation [C*F*S]; hard the per-chunk cluster ids [C*S].
+    // Produces count_out [nf] (rounded float) and binary_out [nf*ncl].
+    // CPU-resident: pure frame-bookkeeping (overlap-add over ~C*F*ncl ≈ 1e5
+    // adds, one-shot per diarize call) — orchestration glue between GPU
+    // stages, not a tensor op scaling with the heavy data.
+    bool post_process(const float* seg, const int* hard, int C, int F, int S,
+                      std::vector<float>& count_out,
+                      std::vector<float>& binary_out, int& nf, int& ncl) {
+        // Frame geometry (matches Inference.aggregate / closest_frame).
+        constexpr double kStep = 0.02;   // frames.step (receptive_field)
+        constexpr double kDur  = 0.025;  // frames.duration
+        constexpr double kChStep = 1.6;  // chunk step (seconds)
+        constexpr double kChDur  = 16.0; // chunk duration (seconds)
+        auto closest = [&](double t) {
+            return static_cast<int>(std::nearbyint((t - 0.5 * kDur) / kStep));
+        };
+        nf = closest(kChDur + (C - 1) * kChStep + 0.5 * kDur) + 1;
+        if (nf <= 0) {
+            err = "post_process: non-positive frame count";
+            return false;
+        }
+        // num_clusters = max(hard) + 1.
+        int max_k = -1;
+        for (int i = 0; i < C * S; ++i) max_k = std::max(max_k, hard[i]);
+        ncl = max_k + 1;
+        if (ncl <= 0) {
+            err = "post_process: no active clusters";
+            return false;
+        }
+
+        // --- speaker_count: overlap-add sum-over-speakers, /overlap, rint ----
+        std::vector<float> csum(nf, 0.0f), ccount(nf, 0.0f), cmask(nf, 0.0f);
+        std::vector<float> dout(static_cast<std::size_t>(nf) * ncl, 0.0f);
+        std::vector<float> dmask(static_cast<std::size_t>(nf) * ncl, 0.0f);
+        for (int c = 0; c < C; ++c) {
+            const int sf = closest(c * kChStep + 0.5 * kDur);
+            for (int f = 0; f < F; ++f) {
+                const int g = sf + f;
+                if (g < 0 || g >= nf) continue;
+                const std::size_t base = (static_cast<std::size_t>(c) * F + f) * S;
+                // count: sum over local speakers (mask=1, segmentation binary)
+                float ssum = 0.0f;
+                for (int s = 0; s < S; ++s) ssum += seg[base + s];
+                csum[g] += ssum;
+                ccount[g] += 1.0f;
+                cmask[g] = 1.0f;
+                // reconstruct+aggregate: per cluster k, max over local speakers
+                // in cluster k; NaN (mask 0) where cluster absent in chunk.
+                for (int k = 0; k < ncl; ++k) {
+                    float mx = -std::numeric_limits<float>::infinity();
+                    bool present = false;
+                    for (int s = 0; s < S; ++s) {
+                        if (hard[c * S + s] == k) {
+                            present = true;
+                            mx = std::max(mx, seg[base + s]);
+                        }
+                    }
+                    if (present) {
+                        const std::size_t di =
+                            static_cast<std::size_t>(g) * ncl + k;
+                        dout[di] += mx;  // skip_average: no divide
+                        dmask[di] = 1.0f;
+                    }
+                }
+            }
+        }
+        // count: average, missing->0, rint.
+        count_out.assign(nf, 0.0f);
+        for (int g = 0; g < nf; ++g) {
+            float v = (cmask[g] == 0.0f)
+                          ? 0.0f
+                          : csum[g] / std::max(ccount[g], 1e-12f);
+            count_out[g] = std::nearbyint(v);
+        }
+        // discrete activations: missing->0 (skip_average already applied).
+        for (std::size_t i = 0; i < dout.size(); ++i)
+            if (dmask[i] == 0.0f) dout[i] = 0.0f;
+
+        // --- to_diarization binary: top-count[g] speakers per frame ----------
+        binary_out.assign(static_cast<std::size_t>(nf) * ncl, 0.0f);
+        std::vector<int> order(ncl);
+        for (int g = 0; g < nf; ++g) {
+            for (int k = 0; k < ncl; ++k) order[k] = k;
+            const float* act = &dout[static_cast<std::size_t>(g) * ncl];
+            // np.argsort(-act): ascending by -act == descending by act, ties
+            // keep ascending index order (stable) — matches the fixture.
+            std::stable_sort(order.begin(), order.end(),
+                             [&](int a, int b) { return act[a] > act[b]; });
+            const int cnt = static_cast<int>(count_out[g]);
+            for (int i = 0; i < cnt && i < ncl; ++i)
+                binary_out[static_cast<std::size_t>(g) * ncl + order[i]] = 1.0f;
+        }
+        return true;
+    }
 };
 
 DiarizenPipeline::DiarizenPipeline() : impl_(std::make_unique<Impl>()) {}
@@ -138,6 +235,18 @@ bool DiarizenPipeline::debug_get_embeddings(const float* wave, int n_samples,
                                             std::vector<float>& emb_out) {
     return impl_->get_embeddings(wave, n_samples, seg, num_chunks, num_frames,
                                  num_speakers, emb_out);
+}
+
+bool DiarizenPipeline::debug_post_process(const float* seg, const int* hard,
+                                          int num_chunks, int num_frames,
+                                          int num_speakers,
+                                          std::vector<float>& count_out,
+                                          std::vector<float>& binary_out,
+                                          int& num_out_frames,
+                                          int& num_clusters) {
+    return impl_->post_process(seg, hard, num_chunks, num_frames, num_speakers,
+                               count_out, binary_out, num_out_frames,
+                               num_clusters);
 }
 
 std::vector<DiarizenSegment> DiarizenPipeline::diarize(const float* /*wave*/,

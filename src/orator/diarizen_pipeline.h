@@ -81,6 +81,19 @@ class DiarizenPipeline {
                               const float* seg, int num_chunks, int num_frames,
                               int num_speakers, std::vector<float>& emb_out);
 
+    // @role reconstruct + speaker_count + to_diarization tap. Given the
+    //   binarized segmentation [C*F*S] and the per-chunk hard cluster ids
+    //   [C*S], reproduce pyannote reconstruct (max over local speakers per
+    //   cluster, skip -2), speaker_count (overlap-add sum, rint->uint8) and
+    //   to_diarization (overlap-add skip_average, argsort top-count binary).
+    //   Writes count_out [num_out_frames] (rounded float) and binary_out
+    //   [num_out_frames * num_clusters]. Returns false on error.
+    bool debug_post_process(const float* seg, const int* hard, int num_chunks,
+                            int num_frames, int num_speakers,
+                            std::vector<float>& count_out,
+                            std::vector<float>& binary_out, int& num_out_frames,
+                            int& num_clusters);
+
    private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
