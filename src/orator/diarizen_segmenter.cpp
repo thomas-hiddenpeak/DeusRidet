@@ -12,6 +12,7 @@
 #include "../communis/log.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <vector>
 
 namespace deusridet {
@@ -143,43 +144,64 @@ DiarizenSegmentation DiarizenSegmenter::segment(const float* wave,
     result.num_speakers = nspk;
     result.data.assign((std::size_t)num_chunks * result.num_frames * nspk, 0.0f);
 
-    std::vector<float> chunk(win);
-    for (int c = 0; c < num_chunks; ++c) {
-        // Fill this chunk's window (zero-padded if it runs past the tail).
-        const long start = (long)c * step;
-        for (int i = 0; i < win; ++i) {
-            const long idx = start + i;
-            chunk[i] = (idx < n_samples) ? wave[idx] : 0.0f;
+    // WavLM front-end + encoder runs in batches of `batch` chunks so the dense
+    // transformer linears fuse into tall [B*T, H] GEMMs that fill the GPU,
+    // instead of one batch=1 launch per chunk. Conformer decode stays per chunk
+    // (its head is cheap; batching it is a separate step). The batched tail is
+    // numerically identical to B independent debug_lnorm_tail calls.
+    int batch = 8;
+    if (const char* e = std::getenv("DEUSRIDET_DIARIZEN_BATCH")) {
+        const int v = std::atoi(e);
+        if (v >= 1 && v <= 64) batch = v;
+    }
+    std::vector<float> chunks((std::size_t)batch * win);
+    for (int c0 = 0; c0 < num_chunks; c0 += batch) {
+        const int B = std::min(batch, num_chunks - c0);
+        // Fill B chunk windows (zero-padded past the tail).
+        for (int b = 0; b < B; ++b) {
+            const long start = (long)(c0 + b) * step;
+            float* dst = chunks.data() + (std::size_t)b * win;
+            for (int i = 0; i < win; ++i) {
+                const long idx = start + i;
+                dst[i] = (idx < n_samples) ? wave[idx] : 0.0f;
+            }
         }
 
         int T_lnorm = 0;
         std::vector<float> feat =
-            wavlm_.debug_lnorm_tail(chunk.data(), win, T_lnorm);
+            wavlm_.debug_lnorm_tail_batch(chunks.data(), B, win, T_lnorm);
         if (feat.empty() || T_lnorm <= 0) {
-            LOG_ERROR(kSLog, "WavLM tail failed on chunk %d", c);
+            LOG_ERROR(kSLog, "WavLM batched tail failed at chunk %d", c0);
             return DiarizenSegmentation{};
         }
-        std::vector<float> logits = conformer_.debug_logits(feat.data(), T_lnorm);
-        if (logits.empty()) {
-            LOG_ERROR(kSLog, "Conformer logits failed on chunk %d", c);
-            return DiarizenSegmentation{};
-        }
-        const int T = std::min(T_lnorm, result.num_frames);
-
-        // Powerset decode (soft=False): per frame argmax over 16 classes, then
-        // map through the powerset->multilabel matrix.
-        for (int f = 0; f < T; ++f) {
-            const float* lr = logits.data() +
-                              (std::size_t)f * DiarizenSegmenterArch::kPowersetClasses;
-            int best = 0;
-            float bv = lr[0];
-            for (int k = 1; k < DiarizenSegmenterArch::kPowersetClasses; ++k) {
-                if (lr[k] > bv) { bv = lr[k]; best = k; }
+        const int D = 256;
+        for (int b = 0; b < B; ++b) {
+            const int c = c0 + b;
+            std::vector<float> logits = conformer_.debug_logits(
+                feat.data() + (std::size_t)b * T_lnorm * D, T_lnorm);
+            if (logits.empty()) {
+                LOG_ERROR(kSLog, "Conformer logits failed on chunk %d", c);
+                return DiarizenSegmentation{};
             }
-            const int* mrow = mapping_.data() + (std::size_t)best * nspk;
-            float* dst = result.data.data() +
-                         ((std::size_t)c * result.num_frames + f) * nspk;
-            for (int s = 0; s < nspk; ++s) dst[s] = (float)mrow[s];
+            const int T = std::min(T_lnorm, result.num_frames);
+
+            // Powerset decode (soft=False): per frame argmax over 16 classes,
+            // then map through the powerset->multilabel matrix.
+            for (int f = 0; f < T; ++f) {
+                const float* lr =
+                    logits.data() +
+                    (std::size_t)f * DiarizenSegmenterArch::kPowersetClasses;
+                int best = 0;
+                float bv = lr[0];
+                for (int k = 1; k < DiarizenSegmenterArch::kPowersetClasses;
+                     ++k) {
+                    if (lr[k] > bv) { bv = lr[k]; best = k; }
+                }
+                const int* mrow = mapping_.data() + (std::size_t)best * nspk;
+                float* d = result.data.data() +
+                           ((std::size_t)c * result.num_frames + f) * nspk;
+                for (int s = 0; s < nspk; ++s) d[s] = (float)mrow[s];
+            }
         }
     }
 

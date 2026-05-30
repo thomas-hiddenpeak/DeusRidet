@@ -199,6 +199,16 @@ public:
     std::vector<float> debug_lnorm_tail(const float* pcm, int n_samples,
                                         int& T_out);
 
+    /// Batched tail: process B chunks (each `win_samples` long, contiguous in
+    /// `pcm` as [B, win_samples]) through the WavLM-pruned stack in one pass.
+    /// All chunks share the constant frame count T (=799 for the 256000-sample
+    /// window), so the dense GEMMs fuse into [B*T, .] tall matrices while the
+    /// block-diagonal attention is looped per chunk. Output is [B*T, 256]
+    /// frame-major (chunk-major). Numerically equals B separate
+    /// debug_lnorm_tail() calls (fp32). Returns empty on error; sets T_out.
+    std::vector<float> debug_lnorm_tail_batch(const float* pcm, int B,
+                                              int win_samples, int& T_out);
+
 private:
     bool loaded_ = false;
     void*       arena_  = nullptr;   ///< owned, GPU
@@ -244,7 +254,10 @@ private:
     /// pruned head set. `d_pos_bias` is the shared [16, T, T] relative
     /// position bias (computed once and reused); may be nullptr for layers
     /// whose attention is fully pruned. cublas/cudnn handles are passed in.
-    bool run_encoder_layer_(int layer, float* d_hidden, int T,
+    /// `B` chunks are stacked frame-major in d_hidden [B*T, 1024]: the dense
+    /// sub-layers run over all B*T rows at once; the within-chunk attention is
+    /// looped per chunk. B==1 is the canonical single-chunk path.
+    bool run_encoder_layer_(int layer, float* d_hidden, int B, int T,
                             const float* d_pos_bias, void* cublas);
 
     /// Internal: compute the shared [16, T, T] relative position bias from

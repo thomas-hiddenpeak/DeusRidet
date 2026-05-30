@@ -198,6 +198,20 @@ __global__ void add_inplace_kernel(float* __restrict__ a,
     if (i < n) a[i] += b[i];
 }
 
+// Incremental weighted-tap accumulate: sum[i] += ws[l] * src[i]. Replaces the
+// 25-tap storage + single weighted_sum_kernel with a per-layer accumulate so
+// the [25, B*T, H] tap buffer (GBs when batched) is never materialised. The
+// fp32 addition order (l = 0..24) is identical to the old kernel, so the
+// result is bit-identical.
+__global__ void weighted_acc_kernel(float* __restrict__ sum,        // [TH]
+                                    const float* __restrict__ src,  // [TH]
+                                    const float* __restrict__ ws,   // [25]
+                                    int l, long TH) {
+    long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < TH) sum[i] += ws[l] * src[i];
+}
+
+
 }  // namespace
 
 // --------------------------------------------------------------------------
@@ -311,14 +325,15 @@ __global__ void weighted_sum_kernel(const float* __restrict__ taps,  // [25,T,H]
 
 }  // namespace
 
-bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int T,
-                                             const float* d_pos_bias,
+bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
+                                             int T, const float* d_pos_bias,
                                              void* cublas) {
     auto blas = static_cast<cublasHandle_t>(cublas);
     const int H = DiarizenWavlmPrunedArch::kHiddenDim;  // 1024
     const auto& dims = layer_dims_[layer];
     const int nh = dims.num_heads;
     const int ffn = dims.ffn_inner;
+    const int BT = B * T;  // total stacked rows
 
     // ---- attention sub-block (PRE-NORM; skipped for fully head-pruned
     //      layers, in which case layer_norm is NOT applied either) ---------
@@ -345,89 +360,89 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int T,
         }
 
         // Pre-norm: xn = layer_norm(d_hidden); attention reads xn, residual
-        // stream (d_hidden) is preserved for the post-attention add.
-        const std::size_t bytes_TH = (std::size_t)T * H * sizeof(float);
-        const std::size_t bytes_Tinner = (std::size_t)T * inner * sizeof(float);
-        float* xn = static_cast<float*>(scratch_acquire(bytes_TH));
-        row_layer_norm_to_kernel<<<T, kBlock>>>(d_hidden, xn, ln_w, ln_b, T, H);
+        // stream (d_hidden) is preserved for the post-attention add. All B*T
+        // rows are normalised in one launch (one block per stacked frame).
+        const std::size_t bytes_BTH = (std::size_t)BT * H * sizeof(float);
+        const std::size_t bytes_BTinner = (std::size_t)BT * inner * sizeof(float);
+        float* xn = static_cast<float*>(scratch_acquire(bytes_BTH));
+        row_layer_norm_to_kernel<<<BT, kBlock>>>(d_hidden, xn, ln_w, ln_b, BT, H);
 
-        float* Q = static_cast<float*>(scratch_acquire(bytes_Tinner));
-        float* K = static_cast<float*>(scratch_acquire(bytes_Tinner));
-        float* V = static_cast<float*>(scratch_acquire(bytes_Tinner));
-        linear_(blas, xn, Wq, bq, Q, T, inner, H);
-        linear_(blas, xn, Wk, bk, K, T, inner, H);
-        linear_(blas, xn, Wv, bv, V, T, inner, H);
+        // Dense Q/K/V projections fuse across chunks: [B*T, inner] tall GEMMs.
+        float* Q = static_cast<float*>(scratch_acquire(bytes_BTinner));
+        float* K = static_cast<float*>(scratch_acquire(bytes_BTinner));
+        float* V = static_cast<float*>(scratch_acquire(bytes_BTinner));
+        linear_(blas, xn, Wq, bq, Q, BT, inner, H);
+        linear_(blas, xn, Wk, bk, K, BT, inner, H);
+        linear_(blas, xn, Wv, bv, V, BT, inner, H);
 
-        // Gated relative-position scalar per (head, query) over all 16 heads.
-        const std::size_t bytes_gate = (std::size_t)16 * T * sizeof(float);
-        float* gate = static_cast<float*>(scratch_acquire(bytes_gate));
-        gru_gate_kernel<<<div_ceil_(16 * T, kBlock), kBlock>>>(xn, Wg, bg,
-                                                               cst, gate, T);
-
-        // remaining_heads -> device.
+        // remaining_heads -> device (shared across the chunk loop).
         const std::size_t bytes_rh = (std::size_t)nh * sizeof(int);
         int* d_rh = static_cast<int*>(scratch_acquire(bytes_rh));
         cudaMemcpy(d_rh, remaining_heads_[layer].data(), nh * sizeof(int),
                    cudaMemcpyHostToDevice);
 
+        const std::size_t bytes_gate = (std::size_t)16 * T * sizeof(float);
+        float* gate = static_cast<float*>(scratch_acquire(bytes_gate));
         const std::size_t bytes_S = (std::size_t)nh * T * T * sizeof(float);
         float* S = static_cast<float*>(scratch_acquire(bytes_S));
+        float* ctx = static_cast<float*>(scratch_acquire(bytes_BTinner));
         const float scaling = 0.125f;  // 64^-0.5
         const float zero = 0.0f, one = 1.0f;
-        // Scores via batched GEMM: S_j[q,k] = scaling * (Q_j[q] · K_j[k]).
-        // Per head j, Q_j/K_j are [T,64] sub-blocks of the [T,nh*64] buffers
-        // (row stride nh*64, head offset j*64). cuBLAS is column-major, so a
-        // row-major [T,T] result S_j[q,k] = the column-major (k,q) matrix
-        // K_jᵀ · Q_j: transA=T, transB=N, m=n=T, k=64, lda=ldb=nh*64,
-        // batch stride 64. This replaces the hand-rolled 10M-thread kernel
-        // (was 42.7% of pipeline GPU time) with the tensor-core path.
-        cublasSgemmStridedBatched(
-            blas, CUBLAS_OP_T, CUBLAS_OP_N, T, T, 64, &scaling,
-            K, nh * 64, 64,                  // A = per-head K, lda, strideA
-            Q, nh * 64, 64,                  // B = per-head Q, ldb, strideB
-            &zero, S, T, (long long)T * T, nh);
-        // Gated relative-position bias is the only non-GEMM term.
-        long stot = (long)nh * T * T;
-        attn_bias_kernel<<<(int)((stot + kBlock - 1) / kBlock), kBlock>>>(
-            d_rh, gate, d_pos_bias, S, T, nh);
-        softmax_rows_kernel<<<nh * T, 256>>>(S, T);
 
-        float* ctx = static_cast<float*>(scratch_acquire(bytes_Tinner));
-        // Context via batched GEMM: ctx_j[q,d] = sum_k S_j[q,k] · V_j[k,d].
-        // Row-major ctx_j[q,d] = column-major (d,q) matrix V_jᵀ · S_jᵀ... here
-        // V_j is [T,64] (lda=nh*64) and S_j is the [T,T] col-major (k,q)
-        // buffer: transA=N (V, m=64), transB=N (S, k_inner=T), n=T.
-        cublasSgemmStridedBatched(
-            blas, CUBLAS_OP_N, CUBLAS_OP_N, 64, T, T, &one,
-            V, nh * 64, 64,                  // A = per-head V, lda, strideA
-            S, T, (long long)T * T,          // B = per-head S, ldb, strideB
-            &zero, ctx, nh * 64, 64, nh);
+        // Attention is block-diagonal: chunk c attends only within its own T
+        // frames. Loop chunks; per chunk the Q·Kᵀ scores and S·V context are
+        // tensor-core strided-batched GEMMs over the nh heads (the dense parts
+        // above are already fused over all chunks).
+        for (int c = 0; c < B; ++c) {
+            float* xn_c = xn + (std::size_t)c * T * H;
+            float* Q_c = Q + (std::size_t)c * T * inner;
+            float* K_c = K + (std::size_t)c * T * inner;
+            float* V_c = V + (std::size_t)c * T * inner;
+            float* ctx_c = ctx + (std::size_t)c * T * inner;
 
-        // out_proj then residual add: d_hidden = d_hidden + out_proj(ctx).
-        float* attn_out = static_cast<float*>(scratch_acquire(bytes_TH));
-        linear_(blas, ctx, Wo, bo, attn_out, T, H, inner);
-        add_inplace_kernel<<<div_ceil_(T * H, kBlock), kBlock>>>(
-            d_hidden, attn_out, (long)T * H);
+            gru_gate_kernel<<<div_ceil_(16 * T, kBlock), kBlock>>>(
+                xn_c, Wg, bg, cst, gate, T);
+            cublasSgemmStridedBatched(
+                blas, CUBLAS_OP_T, CUBLAS_OP_N, T, T, 64, &scaling,
+                K_c, nh * 64, 64,
+                Q_c, nh * 64, 64,
+                &zero, S, T, (long long)T * T, nh);
+            long stot = (long)nh * T * T;
+            attn_bias_kernel<<<(int)((stot + kBlock - 1) / kBlock), kBlock>>>(
+                d_rh, gate, d_pos_bias, S, T, nh);
+            softmax_rows_kernel<<<nh * T, 256>>>(S, T);
+            cublasSgemmStridedBatched(
+                blas, CUBLAS_OP_N, CUBLAS_OP_N, 64, T, T, &one,
+                V_c, nh * 64, 64,
+                S, T, (long long)T * T,
+                &zero, ctx_c, nh * 64, 64, nh);
+        }
 
-        scratch_release(xn, bytes_TH);
-        scratch_release(Q, bytes_Tinner);
-        scratch_release(K, bytes_Tinner);
-        scratch_release(V, bytes_Tinner);
-        scratch_release(gate, bytes_gate);
+        // out_proj then residual add fuse across chunks: [B*T, H].
+        float* attn_out = static_cast<float*>(scratch_acquire(bytes_BTH));
+        linear_(blas, ctx, Wo, bo, attn_out, BT, H, inner);
+        add_inplace_kernel<<<div_ceil_(BT * H, kBlock), kBlock>>>(
+            d_hidden, attn_out, (long)BT * H);
+
+        scratch_release(xn, bytes_BTH);
+        scratch_release(Q, bytes_BTinner);
+        scratch_release(K, bytes_BTinner);
+        scratch_release(V, bytes_BTinner);
         scratch_release(d_rh, bytes_rh);
+        scratch_release(gate, bytes_gate);
         scratch_release(S, bytes_S);
-        scratch_release(ctx, bytes_Tinner);
-        scratch_release(attn_out, bytes_TH);
+        scratch_release(ctx, bytes_BTinner);
+        scratch_release(attn_out, bytes_BTH);
         // Wq..ln_b are device-resident in the f32 weight cache; not freed here.
     }
 
     // ---- feed forward (PRE-NORM): x = x + output_dense(gelu(
-    //      intermediate_dense(final_layer_norm(x)))) ----------------------
+    //      intermediate_dense(final_layer_norm(x)))) — fused over B*T rows ---
     float* fln_w = layer_f32(*this, layer, "final_layer_norm.weight", nullptr);
     float* fln_b = layer_f32(*this, layer, "final_layer_norm.bias", nullptr);
     if (!fln_w || !fln_b) return false;
-    float* fn = static_cast<float*>(scratch_acquire((std::size_t)T * H * sizeof(float)));
-    row_layer_norm_to_kernel<<<T, kBlock>>>(d_hidden, fn, fln_w, fln_b, T, H);
+    float* fn = static_cast<float*>(scratch_acquire((std::size_t)BT * H * sizeof(float)));
+    row_layer_norm_to_kernel<<<BT, kBlock>>>(d_hidden, fn, fln_w, fln_b, BT, H);
     // fln_w/fln_b are cache-owned; not freed here.
 
     float* Wi = layer_f32(*this, layer, "feed_forward.intermediate_dense.weight", nullptr);
@@ -436,18 +451,18 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int T,
     float* bo2 = layer_f32(*this, layer, "feed_forward.output_dense.bias", nullptr);
     if (!Wi || !bi || !Wo2 || !bo2) return false;
 
-    const std::size_t bytes_TH_ff = (std::size_t)T * H * sizeof(float);
-    const std::size_t bytes_Tffn = (std::size_t)T * ffn * sizeof(float);
-    float* inter = static_cast<float*>(scratch_acquire(bytes_Tffn));
-    linear_(blas, fn, Wi, bi, inter, T, ffn, H);
-    gelu_exact_kernel<<<div_ceil_(T * ffn, kBlock), kBlock>>>(inter, T * ffn);
-    float* ff = static_cast<float*>(scratch_acquire(bytes_TH_ff));
-    linear_(blas, inter, Wo2, bo2, ff, T, H, ffn);
-    add_inplace_kernel<<<div_ceil_(T * H, kBlock), kBlock>>>(d_hidden, ff,
-                                                             (long)T * H);
-    scratch_release(fn, bytes_TH_ff);
-    scratch_release(inter, bytes_Tffn);
-    scratch_release(ff, bytes_TH_ff);
+    const std::size_t bytes_BTH_ff = (std::size_t)BT * H * sizeof(float);
+    const std::size_t bytes_BTffn = (std::size_t)BT * ffn * sizeof(float);
+    float* inter = static_cast<float*>(scratch_acquire(bytes_BTffn));
+    linear_(blas, fn, Wi, bi, inter, BT, ffn, H);
+    gelu_exact_kernel<<<div_ceil_(BT * ffn, kBlock), kBlock>>>(inter, BT * ffn);
+    float* ff = static_cast<float*>(scratch_acquire(bytes_BTH_ff));
+    linear_(blas, inter, Wo2, bo2, ff, BT, H, ffn);
+    add_inplace_kernel<<<div_ceil_(BT * H, kBlock), kBlock>>>(d_hidden, ff,
+                                                              (long)BT * H);
+    scratch_release(fn, bytes_BTH_ff);
+    scratch_release(inter, bytes_BTffn);
+    scratch_release(ff, bytes_BTH_ff);
     // Wi/bi/Wo2/bo2 are cache-owned; not freed here.
     return true;
 }
@@ -476,7 +491,7 @@ std::vector<float> DiarizenWavlmPruned::debug_layers(const float* pcm,
         }
         diarizen_set_gemm_math_(blas);  // tensor-core GEMM (env-gated)
         for (int l = 0; l < up_to_layer && l < DiarizenWavlmPrunedArch::kTransformerLayers; ++l) {
-            if (!run_encoder_layer_(l, d_hidden, T, d_pos_bias, blas)) {
+            if (!run_encoder_layer_(l, d_hidden, 1, T, d_pos_bias, blas)) {
                 cublasDestroy(blas);
                 cudaFree(d_hidden);
                 scratch_release(d_pos_bias, bytes_pos);
@@ -528,7 +543,7 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail(const float* pcm,
     }
     diarizen_set_gemm_math_(blas);  // tensor-core GEMM (env-gated)
     for (int l = 0; l < DiarizenWavlmPrunedArch::kTransformerLayers; ++l) {
-        if (!run_encoder_layer_(l, d_hidden, T, d_pos_bias, blas)) {
+        if (!run_encoder_layer_(l, d_hidden, 1, T, d_pos_bias, blas)) {
             cublasDestroy(blas); cudaFree(d_hidden);
             scratch_release(d_taps, bytes_taps);
             scratch_release(d_pos_bias, bytes_pos);
@@ -592,5 +607,98 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail(const float* pcm,
     return host;
 }
 
+std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail_batch(
+    const float* pcm, int B, int win_samples, int& T_out) {
+    if (B <= 0) return {};
+    const int H = DiarizenWavlmPrunedArch::kHiddenDim;  // 1024
+    const int D = 256;
+
+    // Front end runs per chunk (its CNN is not yet batched); the B outputs are
+    // stacked frame-major into one [B*T, H] device buffer that feeds the fused
+    // encoder. All chunks share the same window so T is constant.
+    int T = 0;
+    float* d_batch = nullptr;
+    for (int c = 0; c < B; ++c) {
+        int Tc = 0;
+        float* hc = run_frontend_(pcm + (std::size_t)c * win_samples,
+                                  win_samples, Tc);
+        if (!hc) { if (d_batch) cudaFree(d_batch); return {}; }
+        if (c == 0) {
+            T = Tc;
+            if (cudaMalloc(&d_batch, (std::size_t)B * T * H * sizeof(float)) !=
+                cudaSuccess) { cudaFree(hc); return {}; }
+        } else if (Tc != T) {
+            LOG_ERROR(kLog, "batch chunk %d frame mismatch %d!=%d", c, Tc, T);
+            cudaFree(hc); cudaFree(d_batch); return {};
+        }
+        cudaMemcpy(d_batch + (std::size_t)c * T * H, hc,
+                   (std::size_t)T * H * sizeof(float),
+                   cudaMemcpyDeviceToDevice);
+        cudaFree(hc);
+    }
+    const long BTH = (long)B * T * H;
+
+    // Incremental learned weighted sum over the 25 taps (front end + 24
+    // layers); avoids materialising the [25, B*T, H] tap tensor.
+    float* d_ws = top_f32(*this, "weight_sum.weight", nullptr);
+    const std::size_t bytes_sum = (std::size_t)BTH * sizeof(float);
+    float* d_sum = static_cast<float*>(scratch_acquire(bytes_sum));
+    float* d_pos_bias = compute_position_bias_(T);
+    cublasHandle_t blas = nullptr;
+    if (!d_ws || !d_sum || !d_pos_bias ||
+        cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS) {
+        cudaFree(d_batch);
+        if (d_sum) scratch_release(d_sum, bytes_sum);
+        if (d_pos_bias)
+            scratch_release(d_pos_bias, (std::size_t)16 * T * T * sizeof(float));
+        return {};
+    }
+    diarizen_set_gemm_math_(blas);
+    cudaMemset(d_sum, 0, bytes_sum);
+    const int accB = div_ceil_((int)BTH, kBlock);
+    weighted_acc_kernel<<<accB, kBlock>>>(d_sum, d_batch, d_ws, 0, BTH);  // tap0
+    for (int l = 0; l < DiarizenWavlmPrunedArch::kTransformerLayers; ++l) {
+        if (!run_encoder_layer_(l, d_batch, B, T, d_pos_bias, blas)) {
+            cublasDestroy(blas); cudaFree(d_batch);
+            scratch_release(d_sum, bytes_sum);
+            scratch_release(d_pos_bias, (std::size_t)16 * T * T * sizeof(float));
+            return {};
+        }
+        weighted_acc_kernel<<<accB, kBlock>>>(d_sum, d_batch, d_ws, l + 1, BTH);
+    }
+    scratch_release(d_pos_bias, (std::size_t)16 * T * T * sizeof(float));
+    cudaFree(d_batch);
+
+    // proj 1024 -> 256 then LayerNorm(256), fused over all B*T rows.
+    float* d_pw = top_f32(*this, "proj.weight", nullptr);
+    float* d_pb = top_f32(*this, "proj.bias", nullptr);
+    const std::size_t bytes_proj = (std::size_t)B * T * D * sizeof(float);
+    float* d_proj = static_cast<float*>(scratch_acquire(bytes_proj));
+    if (!d_pw || !d_pb || !d_proj) {
+        cublasDestroy(blas); scratch_release(d_sum, bytes_sum);
+        if (d_proj) scratch_release(d_proj, bytes_proj);
+        return {};
+    }
+    linear_(blas, d_sum, d_pw, d_pb, d_proj, B * T, D, H);
+    cublasDestroy(blas);
+    scratch_release(d_sum, bytes_sum);
+
+    float* d_lw = top_f32(*this, "lnorm.weight", nullptr);
+    float* d_lb = top_f32(*this, "lnorm.bias", nullptr);
+    if (!d_lw || !d_lb) { scratch_release(d_proj, bytes_proj); return {}; }
+    row_layer_norm_to_kernel<<<B * T, kBlock>>>(d_proj, d_proj, d_lw, d_lb,
+                                                B * T, D);
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        scratch_release(d_proj, bytes_proj); return {};
+    }
+    std::vector<float> host((std::size_t)B * T * D);
+    cudaMemcpy(host.data(), d_proj, host.size() * sizeof(float),
+               cudaMemcpyDeviceToHost);
+    scratch_release(d_proj, bytes_proj);
+    T_out = T;
+    return host;
+}
+
 }  // namespace orator
 }  // namespace deusridet
+
