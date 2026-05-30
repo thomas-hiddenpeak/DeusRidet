@@ -62,6 +62,28 @@ float* DiarizenWavlmPruned::weight_f32(const std::string& name,
     return d;
 }
 
+// Persistent scratch pool: recycle transient forward buffers by exact byte
+// size to avoid per-chunk cudaMalloc/cudaFree on Tegra. Buffers are
+// uninitialised on acquire (every consumer overwrites before read), so
+// recycling is bit-equivalent to fresh allocation.
+void* DiarizenWavlmPruned::scratch_acquire(std::size_t bytes) const {
+    if (bytes == 0) return nullptr;
+    auto it = scratch_pool_.find(bytes);
+    if (it != scratch_pool_.end() && !it->second.empty()) {
+        void* p = it->second.back();
+        it->second.pop_back();
+        return p;
+    }
+    void* p = nullptr;
+    if (cudaMalloc(&p, bytes) != cudaSuccess) return nullptr;
+    return p;
+}
+
+void DiarizenWavlmPruned::scratch_release(void* ptr, std::size_t bytes) const {
+    if (!ptr || bytes == 0) return;
+    scratch_pool_[bytes].push_back(ptr);
+}
+
 namespace {
 
 // Gather the [16, T, T] relative-position bias from rel_attn_embed.weight
@@ -242,28 +264,28 @@ float* DiarizenWavlmPruned::compute_position_bias_(int T) {
     }
 
     int en = (int)emb->numel;  // 320 * 16
-    float* d_emb = nullptr;
-    if (!cuda_ck_(cudaMalloc(&d_emb, (size_t)en * sizeof(float)), "emb malloc"))
-        return nullptr;
+    const std::size_t bytes_emb = (std::size_t)en * sizeof(float);
+    float* d_emb = static_cast<float*>(scratch_acquire(bytes_emb));
+    if (!d_emb) return nullptr;
     half_to_float_kernel<<<div_ceil_(en, kBlock), kBlock>>>(emb->data, d_emb, en);
 
-    int* d_bucket = nullptr;
-    cudaMalloc(&d_bucket, bucket.size() * sizeof(int));
+    const std::size_t bytes_bucket = bucket.size() * sizeof(int);
+    int* d_bucket = static_cast<int*>(scratch_acquire(bytes_bucket));
     cudaMemcpy(d_bucket, bucket.data(), bucket.size() * sizeof(int),
                cudaMemcpyHostToDevice);
 
-    float* d_bias = nullptr;
-    if (!cuda_ck_(cudaMalloc(&d_bias, (size_t)16 * T * T * sizeof(float)),
-                  "pos_bias malloc")) {
-        cudaFree(d_emb);
-        cudaFree(d_bucket);
+    const std::size_t bytes_bias = (std::size_t)16 * T * T * sizeof(float);
+    float* d_bias = static_cast<float*>(scratch_acquire(bytes_bias));
+    if (!d_bias) {
+        scratch_release(d_emb, bytes_emb);
+        scratch_release(d_bucket, bytes_bucket);
         return nullptr;
     }
     long tot = (long)16 * T * T;
     gather_pos_bias_kernel<<<(int)((tot + kBlock - 1) / kBlock), kBlock>>>(
         d_bucket, d_emb, d_bias, T);
-    cudaFree(d_emb);
-    cudaFree(d_bucket);
+    scratch_release(d_emb, bytes_emb);
+    scratch_release(d_bucket, bytes_bucket);
     return d_bias;
 }
 
@@ -350,54 +372,58 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int T,
 
         // Pre-norm: xn = layer_norm(d_hidden); attention reads xn, residual
         // stream (d_hidden) is preserved for the post-attention add.
-        float* xn = nullptr;
-        cudaMalloc(&xn, (size_t)T * H * sizeof(float));
+        const std::size_t bytes_TH = (std::size_t)T * H * sizeof(float);
+        const std::size_t bytes_Tinner = (std::size_t)T * inner * sizeof(float);
+        float* xn = static_cast<float*>(scratch_acquire(bytes_TH));
         row_layer_norm_to_kernel<<<T, kBlock>>>(d_hidden, xn, ln_w, ln_b, T, H);
 
-        float *Q = nullptr, *K = nullptr, *V = nullptr;
-        cudaMalloc(&Q, (size_t)T * inner * sizeof(float));
-        cudaMalloc(&K, (size_t)T * inner * sizeof(float));
-        cudaMalloc(&V, (size_t)T * inner * sizeof(float));
+        float* Q = static_cast<float*>(scratch_acquire(bytes_Tinner));
+        float* K = static_cast<float*>(scratch_acquire(bytes_Tinner));
+        float* V = static_cast<float*>(scratch_acquire(bytes_Tinner));
         linear_(blas, xn, Wq, bq, Q, T, inner, H);
         linear_(blas, xn, Wk, bk, K, T, inner, H);
         linear_(blas, xn, Wv, bv, V, T, inner, H);
 
         // Gated relative-position scalar per (head, query) over all 16 heads.
-        float* gate = nullptr;
-        cudaMalloc(&gate, (size_t)16 * T * sizeof(float));
+        const std::size_t bytes_gate = (std::size_t)16 * T * sizeof(float);
+        float* gate = static_cast<float*>(scratch_acquire(bytes_gate));
         gru_gate_kernel<<<div_ceil_(16 * T, kBlock), kBlock>>>(xn, Wg, bg,
                                                                cst, gate, T);
 
         // remaining_heads -> device.
-        int* d_rh = nullptr;
-        cudaMalloc(&d_rh, nh * sizeof(int));
+        const std::size_t bytes_rh = (std::size_t)nh * sizeof(int);
+        int* d_rh = static_cast<int*>(scratch_acquire(bytes_rh));
         cudaMemcpy(d_rh, remaining_heads_[layer].data(), nh * sizeof(int),
                    cudaMemcpyHostToDevice);
 
-        float* S = nullptr;
-        cudaMalloc(&S, (size_t)nh * T * T * sizeof(float));
+        const std::size_t bytes_S = (std::size_t)nh * T * T * sizeof(float);
+        float* S = static_cast<float*>(scratch_acquire(bytes_S));
         long stot = (long)nh * T * T;
         const float scaling = 0.125f;  // 64^-0.5
         attn_scores_kernel<<<(int)((stot + kBlock - 1) / kBlock), kBlock>>>(
             Q, K, d_rh, gate, d_pos_bias, S, T, nh, scaling);
         softmax_rows_kernel<<<nh * T, 256>>>(S, T);
 
-        float* ctx = nullptr;
-        cudaMalloc(&ctx, (size_t)T * inner * sizeof(float));
+        float* ctx = static_cast<float*>(scratch_acquire(bytes_Tinner));
         long ctot = (long)T * inner;
         attn_context_kernel<<<(int)((ctot + kBlock - 1) / kBlock), kBlock>>>(
             S, V, ctx, T, nh);
 
         // out_proj then residual add: d_hidden = d_hidden + out_proj(ctx).
-        float* attn_out = nullptr;
-        cudaMalloc(&attn_out, (size_t)T * H * sizeof(float));
+        float* attn_out = static_cast<float*>(scratch_acquire(bytes_TH));
         linear_(blas, ctx, Wo, bo, attn_out, T, H, inner);
         add_inplace_kernel<<<div_ceil_(T * H, kBlock), kBlock>>>(
             d_hidden, attn_out, (long)T * H);
 
-        cudaFree(xn);
-        cudaFree(Q); cudaFree(K); cudaFree(V); cudaFree(gate); cudaFree(d_rh);
-        cudaFree(S); cudaFree(ctx); cudaFree(attn_out);
+        scratch_release(xn, bytes_TH);
+        scratch_release(Q, bytes_Tinner);
+        scratch_release(K, bytes_Tinner);
+        scratch_release(V, bytes_Tinner);
+        scratch_release(gate, bytes_gate);
+        scratch_release(d_rh, bytes_rh);
+        scratch_release(S, bytes_S);
+        scratch_release(ctx, bytes_Tinner);
+        scratch_release(attn_out, bytes_TH);
         // Wq..ln_b are device-resident in the f32 weight cache; not freed here.
     }
 
@@ -406,8 +432,7 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int T,
     float* fln_w = layer_f32(*this, layer, "final_layer_norm.weight", nullptr);
     float* fln_b = layer_f32(*this, layer, "final_layer_norm.bias", nullptr);
     if (!fln_w || !fln_b) return false;
-    float* fn = nullptr;
-    cudaMalloc(&fn, (size_t)T * H * sizeof(float));
+    float* fn = static_cast<float*>(scratch_acquire((std::size_t)T * H * sizeof(float)));
     row_layer_norm_to_kernel<<<T, kBlock>>>(d_hidden, fn, fln_w, fln_b, T, H);
     // fln_w/fln_b are cache-owned; not freed here.
 
@@ -417,18 +442,18 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int T,
     float* bo2 = layer_f32(*this, layer, "feed_forward.output_dense.bias", nullptr);
     if (!Wi || !bi || !Wo2 || !bo2) return false;
 
-    float* inter = nullptr;
-    cudaMalloc(&inter, (size_t)T * ffn * sizeof(float));
+    const std::size_t bytes_TH_ff = (std::size_t)T * H * sizeof(float);
+    const std::size_t bytes_Tffn = (std::size_t)T * ffn * sizeof(float);
+    float* inter = static_cast<float*>(scratch_acquire(bytes_Tffn));
     linear_(blas, fn, Wi, bi, inter, T, ffn, H);
     gelu_exact_kernel<<<div_ceil_(T * ffn, kBlock), kBlock>>>(inter, T * ffn);
-    float* ff = nullptr;
-    cudaMalloc(&ff, (size_t)T * H * sizeof(float));
+    float* ff = static_cast<float*>(scratch_acquire(bytes_TH_ff));
     linear_(blas, inter, Wo2, bo2, ff, T, H, ffn);
     add_inplace_kernel<<<div_ceil_(T * H, kBlock), kBlock>>>(d_hidden, ff,
                                                              (long)T * H);
-    cudaFree(fn);
-    cudaFree(inter);
-    cudaFree(ff);
+    scratch_release(fn, bytes_TH_ff);
+    scratch_release(inter, bytes_Tffn);
+    scratch_release(ff, bytes_TH_ff);
     // Wi/bi/Wo2/bo2 are cache-owned; not freed here.
     return true;
 }
@@ -443,6 +468,7 @@ std::vector<float> DiarizenWavlmPruned::debug_layers(const float* pcm,
     const int H = DiarizenWavlmPrunedArch::kHiddenDim;
 
     if (up_to_layer > 0) {
+        const std::size_t bytes_pos = (std::size_t)16 * T * T * sizeof(float);
         float* d_pos_bias = compute_position_bias_(T);
         if (!d_pos_bias) {
             cudaFree(d_hidden);
@@ -451,19 +477,19 @@ std::vector<float> DiarizenWavlmPruned::debug_layers(const float* pcm,
         cublasHandle_t blas = nullptr;
         if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS) {
             cudaFree(d_hidden);
-            cudaFree(d_pos_bias);
+            scratch_release(d_pos_bias, bytes_pos);
             return {};
         }
         for (int l = 0; l < up_to_layer && l < DiarizenWavlmPrunedArch::kTransformerLayers; ++l) {
             if (!run_encoder_layer_(l, d_hidden, T, d_pos_bias, blas)) {
                 cublasDestroy(blas);
                 cudaFree(d_hidden);
-                cudaFree(d_pos_bias);
+                scratch_release(d_pos_bias, bytes_pos);
                 return {};
             }
         }
         cublasDestroy(blas);
-        cudaFree(d_pos_bias);
+        scratch_release(d_pos_bias, bytes_pos);
     }
 
     if (cudaDeviceSynchronize() != cudaSuccess) {
@@ -489,81 +515,83 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail(const float* pcm,
     const long TH = (long)T * H;
 
     // Collect all 25 taps (front end + 24 layers) into [25, T, H].
-    float* d_taps = nullptr;
-    if (!cuda_ck_(cudaMalloc(&d_taps, (size_t)kNumTaps * TH * sizeof(float)),
-                  "taps malloc")) {
+    const std::size_t bytes_taps = (std::size_t)kNumTaps * TH * sizeof(float);
+    float* d_taps = static_cast<float*>(scratch_acquire(bytes_taps));
+    if (!d_taps) {
         cudaFree(d_hidden);
         return {};
     }
     cudaMemcpy(d_taps, d_hidden, TH * sizeof(float), cudaMemcpyDeviceToDevice);
 
+    const std::size_t bytes_pos = (std::size_t)16 * T * T * sizeof(float);
     float* d_pos_bias = compute_position_bias_(T);
     cublasHandle_t blas = nullptr;
     if (!d_pos_bias || cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS) {
-        cudaFree(d_hidden); cudaFree(d_taps);
-        if (d_pos_bias) cudaFree(d_pos_bias);
+        cudaFree(d_hidden); scratch_release(d_taps, bytes_taps);
+        if (d_pos_bias) scratch_release(d_pos_bias, bytes_pos);
         return {};
     }
     for (int l = 0; l < DiarizenWavlmPrunedArch::kTransformerLayers; ++l) {
         if (!run_encoder_layer_(l, d_hidden, T, d_pos_bias, blas)) {
             cublasDestroy(blas); cudaFree(d_hidden);
-            cudaFree(d_taps); cudaFree(d_pos_bias);
+            scratch_release(d_taps, bytes_taps);
+            scratch_release(d_pos_bias, bytes_pos);
             return {};
         }
         cudaMemcpy(d_taps + (long)(l + 1) * TH, d_hidden, TH * sizeof(float),
                    cudaMemcpyDeviceToDevice);
     }
-    cudaFree(d_pos_bias);
+    scratch_release(d_pos_bias, bytes_pos);
     cudaFree(d_hidden);
 
     // weight_sum.weight [1, 25] -> ws[25]; summed[t, c] = sum_k ws[k]*tap_k.
     float* d_ws = top_f32(*this, "weight_sum.weight", nullptr);
-    float* d_sum = nullptr;
-    cudaMalloc(&d_sum, TH * sizeof(float));
+    float* d_sum = static_cast<float*>(scratch_acquire((std::size_t)TH * sizeof(float)));
     if (!d_ws || !d_sum) {
-        cublasDestroy(blas); cudaFree(d_taps);
-        if (d_sum) cudaFree(d_sum);
+        cublasDestroy(blas); scratch_release(d_taps, bytes_taps);
+        if (d_sum) scratch_release(d_sum, (std::size_t)TH * sizeof(float));
         return {};
     }
     weighted_sum_kernel<<<div_ceil_((int)TH, kBlock), kBlock>>>(d_taps, d_ws,
                                                                 d_sum, TH);
-    cudaFree(d_taps);
+    scratch_release(d_taps, bytes_taps);
     // d_ws is cache-owned; not freed here.
 
     // proj: [T, 256] = summed[T, 1024] @ proj.weight^T + proj.bias.
     const int D = 256;
     float* d_pw = top_f32(*this, "proj.weight", nullptr);
     float* d_pb = top_f32(*this, "proj.bias", nullptr);
-    float* d_proj = nullptr;
-    cudaMalloc(&d_proj, (size_t)T * D * sizeof(float));
+    const std::size_t bytes_sum = (std::size_t)TH * sizeof(float);
+    const std::size_t bytes_proj = (std::size_t)T * D * sizeof(float);
+    float* d_proj = static_cast<float*>(scratch_acquire(bytes_proj));
     if (!d_pw || !d_pb || !d_proj) {
-        cublasDestroy(blas); cudaFree(d_sum);
-        if (d_proj) cudaFree(d_proj);
+        cublasDestroy(blas); scratch_release(d_sum, bytes_sum);
+        if (d_proj) scratch_release(d_proj, bytes_proj);
         return {};
     }
     linear_(blas, d_sum, d_pw, d_pb, d_proj, T, D, H);
     cublasDestroy(blas);
-    cudaFree(d_sum);
+    scratch_release(d_sum, bytes_sum);
     // d_pw/d_pb are cache-owned; not freed here.
 
     // lnorm: LayerNorm(256) in place over the feature dim.
     float* d_lw = top_f32(*this, "lnorm.weight", nullptr);
     float* d_lb = top_f32(*this, "lnorm.bias", nullptr);
     if (!d_lw || !d_lb) {
-        cudaFree(d_proj);
+        scratch_release(d_proj, bytes_proj);
         return {};
     }
     row_layer_norm_to_kernel<<<T, kBlock>>>(d_proj, d_proj, d_lw, d_lb, T, D);
     // d_lw/d_lb are cache-owned; not freed here.
 
     if (cudaDeviceSynchronize() != cudaSuccess) {
-        cudaFree(d_proj);
+        scratch_release(d_proj, bytes_proj);
         return {};
     }
     std::vector<float> host((size_t)T * D);
     cudaMemcpy(host.data(), d_proj, host.size() * sizeof(float),
                cudaMemcpyDeviceToHost);
-    cudaFree(d_proj);
+    scratch_release(d_proj, bytes_proj);
     T_out = T;
     return host;
 }

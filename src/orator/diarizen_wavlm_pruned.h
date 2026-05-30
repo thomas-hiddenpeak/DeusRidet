@@ -139,6 +139,23 @@ public:
     /// on lookup/alloc failure.
     float* weight_f32(const std::string& name, std::size_t* out_numel = nullptr) const;
 
+    /// Acquire a device scratch buffer of `bytes` from a persistent,
+    /// size-keyed free-list pool. On a pool hit no allocation occurs; on a
+    /// miss a single cudaMalloc backs the buffer for the object's lifetime.
+    /// The caller must return the buffer via scratch_release() with the
+    /// SAME byte count. This removes the per-chunk cudaMalloc/cudaFree churn
+    /// for transient forward buffers (Tegra VMM walk). Contents are
+    /// uninitialised — every consumer fully overwrites before reading, so
+    /// recycling is bit-equivalent to fresh allocation. Returns nullptr on
+    /// alloc failure.
+    void* scratch_acquire(std::size_t bytes) const;
+
+    /// Return a scratch buffer to the pool keyed by `bytes` (must match the
+    /// value passed to scratch_acquire). Does not free device memory; the
+    /// backing allocation is reused on the next matching acquire and
+    /// released only in release_().
+    void scratch_release(void* ptr, std::size_t bytes) const;
+
 
     /// Diagnostic dump to stderr: per-layer attn_inner / ffn_inner and
     /// total arena bytes. Used by the smoke test target.
@@ -194,6 +211,11 @@ private:
     /// Lazily-populated device fp32 weight cache (name -> owned GPU ptr),
     /// freed in release_(). Backs weight_f32(); see its doc for why.
     mutable std::unordered_map<std::string, float*> f32_cache_;
+
+    /// Persistent scratch pool: byte-size -> stack of recyclable GPU
+    /// buffers. Backs scratch_acquire()/scratch_release(); all entries are
+    /// cudaFree'd in release_().
+    mutable std::unordered_map<std::size_t, std::vector<void*>> scratch_pool_;
 
     // Lazily-created compute handles (forward path only; loader does not
     // need them). Declared void* to keep cudnn/cublas headers out of this

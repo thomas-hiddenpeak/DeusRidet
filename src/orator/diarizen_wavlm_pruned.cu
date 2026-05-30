@@ -84,6 +84,10 @@ void DiarizenWavlmPruned::release_() {
         if (kv.second) cudaFree(kv.second);
     }
     f32_cache_.clear();
+    for (auto& kv : scratch_pool_) {
+        for (void* p : kv.second) cudaFree(p);
+    }
+    scratch_pool_.clear();
     tensors_.clear();
     layer_dims_.clear();
     remaining_heads_.clear();
