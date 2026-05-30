@@ -5,13 +5,35 @@
 #include "diarizen_clustering.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <vector>
 
 namespace deusridet {
 namespace orator {
+
+namespace {
+// Temporary sub-stage profiler for the clustering CPU path. Gated by
+// DEUSRIDET_DIARIZEN_CLUSTER_PROF=1 so it is silent by default. Used to
+// decide which sub-stage (AHC / fea / VBx / cdist / assignment) to port to
+// the GPU per the project's GPU-first rule.
+inline bool cluster_prof_enabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("DEUSRIDET_DIARIZEN_CLUSTER_PROF");
+        return e && e[0] == '1';
+    }();
+    return on;
+}
+using prof_clock = std::chrono::steady_clock;
+inline double ms_since(const prof_clock::time_point& t0) {
+    return std::chrono::duration<double, std::milli>(prof_clock::now() - t0)
+        .count();
+}
+}  // namespace
 
 // Rectangular linear_sum_assignment (maximize) — a faithful port of scipy
 // scipy/optimize/rectangular_lsap/rectangular_lsap.cpp (Crouse 2016 shortest
@@ -132,6 +154,11 @@ bool DiarizenClustering::cluster(const float* embeddings, int C, int S, int dim,
     if (!priors_.loaded) return false;
     hard_out.assign(static_cast<std::size_t>(C) * S, -2);
 
+    const bool prof = cluster_prof_enabled();
+    const auto t_start = prof_clock::now();
+    double ms_filter = 0, ms_ahc = 0, ms_fea = 0, ms_vbx = 0, ms_cent = 0,
+           ms_soft = 0, ms_assign = 0;
+
     // --- filter_embeddings -------------------------------------------------
     auto collect = [&](long min_frames, std::vector<int>& cidx,
                        std::vector<int>& sidx) {
@@ -175,6 +202,7 @@ bool DiarizenClustering::cluster(const float* embeddings, int C, int S, int dim,
     if (static_cast<int>(cidx.size()) < 2) collect(0, cidx, sidx);
 
     const int N = static_cast<int>(cidx.size());
+    if (prof) { ms_filter = ms_since(t_start); }
     if (N < 2) {
         // trivial path: all zeros (BaseClustering / VBx <2 branch).
         std::fill(hard_out.begin(), hard_out.end(), 0);
@@ -190,6 +218,7 @@ bool DiarizenClustering::cluster(const float* embeddings, int C, int S, int dim,
     }
 
     // --- AHC ---------------------------------------------------------------
+    const auto t_ahc0 = prof_clock::now();
     std::vector<double> normed(static_cast<std::size_t>(N) * dim);
     for (int r = 0; r < N; ++r) {
         const float* x = train.data() + (std::size_t)r * dim;
@@ -203,14 +232,20 @@ bool DiarizenClustering::cluster(const float* embeddings, int C, int S, int dim,
     agglomerative_(normed, N, dim, ahc);
     int K0 = 0;
     for (int v : ahc) K0 = std::max(K0, v + 1);
+    if (prof) ms_ahc = ms_since(t_ahc0);
 
     // --- VBx EM ------------------------------------------------------------
+    const auto t_fea0 = prof_clock::now();
     std::vector<double> fea;
     compute_fea_(train.data(), N, dim, fea);  // [N, pdim]
+    if (prof) ms_fea = ms_since(t_fea0);
+    const auto t_vbx0 = prof_clock::now();
     std::vector<double> q, pi;
     vbx_em_(fea, N, priors_.pdim, ahc, K0, q, pi);
+    if (prof) ms_vbx = ms_since(t_vbx0);
 
     // --- centroids = (q[:, sp>1e-7].T @ train) -----------------------------
+    const auto t_cent0 = prof_clock::now();
     std::vector<int> keep;
     for (int k = 0; k < K0; ++k)
         if (pi[k] > 1e-7) keep.push_back(k);
@@ -234,8 +269,11 @@ bool DiarizenClustering::cluster(const float* embeddings, int C, int S, int dim,
         cnorm[ci] = std::sqrt(s2);
     }
 
+    if (prof) ms_cent = ms_since(t_cent0);
+
     // --- soft = 2 - cdist(embeddings, centroids, cosine) -------------------
     // NaN rows (inactive speakers) yield NaN distances -> NaN soft.
+    const auto t_soft0 = prof_clock::now();
     const std::size_t CS = static_cast<std::size_t>(C) * S;
     std::vector<double> soft(CS * Kc);
     std::vector<char> isnan_row(CS, 0);
@@ -270,7 +308,10 @@ bool DiarizenClustering::cluster(const float* embeddings, int C, int S, int dim,
     for (std::size_t i = 0; i < soft.size(); ++i)
         if (std::isnan(soft[i])) soft[i] = soft_min;
 
+    if (prof) ms_soft = ms_since(t_soft0);
+
     // --- constrained_argmax per chunk (Hungarian, maximize) ----------------
+    const auto t_assign0 = prof_clock::now();
     std::vector<std::int32_t> hard_raw(CS, -2);
     std::vector<double> cost(static_cast<std::size_t>(S) * Kc);
     std::vector<int> assign;
@@ -294,6 +335,14 @@ bool DiarizenClustering::cluster(const float* embeddings, int C, int S, int dim,
             std::lower_bound(uniq.begin(), uniq.end(), hard_raw[i]) -
             uniq.begin());
         hard_out[i] = static_cast<std::int8_t>(idx);
+    }
+    if (prof) {
+        ms_assign = ms_since(t_assign0);
+        std::fprintf(stderr,
+            "[cluster-prof] N=%d K0=%d Kc=%d C=%d S=%d | filter=%.1f ahc=%.1f "
+            "fea=%.1f vbx=%.1f cent=%.1f soft=%.1f assign=%.1f total=%.1f ms\n",
+            N, K0, Kc, C, S, ms_filter, ms_ahc, ms_fea, ms_vbx, ms_cent,
+            ms_soft, ms_assign, ms_since(t_start));
     }
     return true;
 }

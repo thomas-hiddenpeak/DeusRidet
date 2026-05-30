@@ -9,6 +9,8 @@
 #include <limits>
 #include <vector>
 
+#include "diarizen_clustering_ahc.h"
+
 namespace deusridet {
 namespace orator {
 
@@ -33,64 +35,80 @@ void DiarizenClustering::agglomerative_(const std::vector<double>& normed, int n
     if (n <= 1) return;
 
     const int total = 2 * n - 1;  // node ids: leaves 0..n-1, merges n..2n-2
-    const double INF = std::numeric_limits<double>::infinity();
-
-    // Dense distance among active clusters (ids 0..total-1).
-    std::vector<double> D(static_cast<std::size_t>(total) * total, INF);
-    auto at = [&](int i, int j) -> double& {
-        return D[static_cast<std::size_t>(i) * total + j];
-    };
-    // pdist euclidean on the normalized rows.
-    for (int i = 0; i < n; ++i) {
-        for (int j = i + 1; j < n; ++j) {
-            double s = 0.0;
-            const double* a = normed.data() + static_cast<std::size_t>(i) * dim;
-            const double* b = normed.data() + static_cast<std::size_t>(j) * dim;
-            for (int d = 0; d < dim; ++d) {
-                const double diff = a[d] - b[d];
-                s += diff * diff;
-            }
-            const double dd = std::sqrt(s);
-            at(i, j) = dd;
-            at(j, i) = dd;
-        }
-    }
 
     std::vector<int> size(total, 0);
-    std::vector<char> active(total, 0);
-    for (int i = 0; i < n; ++i) { size[i] = 1; active[i] = 1; }
-
     std::vector<int> child0(total, -1), child1(total, -1);
     std::vector<double> height(total, 0.0);
 
-    // Generic agglomeration: each step merge the global-minimum active pair.
-    for (int k = 0; k < n - 1; ++k) {
-        double best = INF;
-        int ba = -1, bb = -1;
-        for (int i = 0; i < total; ++i) {
-            if (!active[i]) continue;
-            for (int j = i + 1; j < total; ++j) {
-                if (!active[j]) continue;
-                const double dd = at(i, j);
-                if (dd < best) { best = dd; ba = i; bb = j; }
+    // GPU-first: profiling the full 60-min session showed this pdist + generic
+    // centroid merge is the clustering CPU hog (~41 s, 86 % of the cluster
+    // stage at N≈3894) running on one core while the GPU idled.
+    // agglomerative_merge_gpu fills child0/child1/height/size bit-identically
+    // (same fp64 pdist order, lexicographic (dist,i,j) argmin tie-break,
+    // identical Lance-Williams arithmetic). Fall back to the CPU merge below
+    // only on a CUDA error.
+    if (!agglomerative_merge_gpu(normed, n, dim, child0, child1, height,
+                                 size)) {
+        const double INF = std::numeric_limits<double>::infinity();
+        std::vector<double> D(static_cast<std::size_t>(total) * total, INF);
+        auto at = [&](int i, int j) -> double& {
+            return D[static_cast<std::size_t>(i) * total + j];
+        };
+        // pdist euclidean on the normalized rows.
+        for (int i = 0; i < n; ++i) {
+            for (int j = i + 1; j < n; ++j) {
+                double s = 0.0;
+                const double* a =
+                    normed.data() + static_cast<std::size_t>(i) * dim;
+                const double* b =
+                    normed.data() + static_cast<std::size_t>(j) * dim;
+                for (int d = 0; d < dim; ++d) {
+                    const double diff = a[d] - b[d];
+                    s += diff * diff;
+                }
+                const double dd = std::sqrt(s);
+                at(i, j) = dd;
+                at(j, i) = dd;
             }
         }
-        const int nid = n + k;  // new cluster id
-        child0[nid] = ba;
-        child1[nid] = bb;
-        height[nid] = best;
-        size[nid] = size[ba] + size[bb];
-        active[ba] = 0;
-        active[bb] = 0;
-        // Update distances from the new cluster to every other active cluster.
-        for (int z = 0; z < total; ++z) {
-            if (!active[z] || z == nid) continue;
-            const double dnew = centroid_lw(at(ba, z), at(bb, z), best,
-                                            size[ba], size[bb]);
-            at(nid, z) = dnew;
-            at(z, nid) = dnew;
+        std::vector<char> active(total, 0);
+        for (int i = 0; i < n; ++i) {
+            size[i] = 1;
+            active[i] = 1;
         }
-        active[nid] = 1;
+        // Generic agglomeration: each step merge the global-minimum active pair.
+        for (int k = 0; k < n - 1; ++k) {
+            double best = INF;
+            int ba = -1, bb = -1;
+            for (int i = 0; i < total; ++i) {
+                if (!active[i]) continue;
+                for (int j = i + 1; j < total; ++j) {
+                    if (!active[j]) continue;
+                    const double dd = at(i, j);
+                    if (dd < best) {
+                        best = dd;
+                        ba = i;
+                        bb = j;
+                    }
+                }
+            }
+            const int nid = n + k;  // new cluster id
+            child0[nid] = ba;
+            child1[nid] = bb;
+            height[nid] = best;
+            size[nid] = size[ba] + size[bb];
+            active[ba] = 0;
+            active[bb] = 0;
+            // Update distances from the new cluster to every other active one.
+            for (int z = 0; z < total; ++z) {
+                if (!active[z] || z == nid) continue;
+                const double dnew = centroid_lw(at(ba, z), at(bb, z), best,
+                                                size[ba], size[bb]);
+                at(nid, z) = dnew;
+                at(z, nid) = dnew;
+            }
+            active[nid] = 1;
+        }
     }
 
     // MD[node] = max merge height in the subtree rooted at node (leaves -> 0).
