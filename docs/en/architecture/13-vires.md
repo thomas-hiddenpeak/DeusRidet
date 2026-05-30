@@ -212,6 +212,31 @@ is `vires_facade.h`, matching every other subsystem facade convention.
   refinement/consolidation as **Background** — so the priority ordering
   is enforced by the substrate rather than left to the accident of
   default-stream scheduling.
+- **All current GPU consumers wired: DONE** (commit `1702112`). Six
+  consumers register at boot — `orator_spk_encoder`,
+  `orator_spk_store_{CamppDb,WLEcapaDb,DualDb}`, `auditus_overlap` as
+  **Foreground** (prio −5), `diarizen` as **Background** (prio 0); the
+  LLM-gated (`machina_compute`/`machina_aux`) and ASR-gated
+  (`auditus_asr`) and separation (`auditus_separator`) consumers light
+  up when their subsystem loads. The Vires invariant is now permanent:
+  *now and forever, every GPU compute consumer registers with the
+  Arbiter* rather than owning a raw private stream.
+- **V2 — Back-pressure + telemetry: DONE** (commit `a7b947d`). Three
+  additions, all scheduling/observability-only (bit-identical):
+  *(a)* `note_submit(id)` records the last Foreground submit time;
+  `background_should_yield()` reports true inside a 50 ms recent-activity
+  window. *(b)* The DiariZen Background pass calls a bounded yield
+  consult (≤ 8 × 2000 µs) before launching — it defers *when* the pass
+  starts, never *what* it computes, so inputs are unchanged.
+  *(c)* The awaken main thread doubles as a 2 s telemetry heartbeat
+  (`sigtimedwait`, no new thread) that broadcasts a
+  `vires_compute_snapshot` WS message — consumer registry (id / name /
+  class / submitted) + `background_yielding` + `foreground_idle_us` —
+  rendered by the WebUI `vires-panel`. Verified: live gate held at
+  `accuracy(tests/test.mp3, diarization): 93.5% → 93.6% (Δ = +0.1 pp)`,
+  P3a bit-eq PASS (28/28, `min_cos 0.999980`), HTTP 200 / WS 101 /
+  `vires-panel.{js,css}` 200, snapshot broadcasts every 2 s with all 6
+  consumers.
 
 ## Deferred (named now to kill ambiguity later)
 

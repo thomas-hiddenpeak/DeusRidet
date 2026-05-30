@@ -61,6 +61,14 @@ struct Snapshot {
     int greatest_priority = 0;
     int least_priority    = 0;
     std::vector<ConsumerStat> consumers;
+
+    // V2 back-pressure observability. `background_yielding` is true when a
+    // foreground submission landed within the recent activity window, i.e.
+    // background consumers should currently pause/chunk to let foreground
+    // through. `foreground_idle_us` is the time since the last foreground
+    // submission (UINT64_MAX if none ever observed).
+    bool     background_yielding   = false;
+    uint64_t foreground_idle_us    = UINT64_MAX;
 };
 
 } // namespace vires

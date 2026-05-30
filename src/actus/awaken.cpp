@@ -27,6 +27,7 @@
 #include <string>
 #include <cuda_runtime.h>
 #include <signal.h>
+#include <cerrno>
 #include "nexus/ws_server.h"
 #include "sensus/auditus/audio_pipeline.h"
 #include "sensus/auditus/auditus_facade.h"
@@ -45,6 +46,37 @@
 #include "vires/vires_facade.h"
 
 namespace deusridet {
+
+// Serialize the Vires compute ledger into a `vires_compute_snapshot` WS message
+// and broadcast it to all WebUI clients. JSON lives at the Nexus boundary; Vires
+// core stays compute-only and never learns about WS/JSON. Called on a fixed
+// telemetry cadence from the awaken main thread.
+static void broadcast_vires_snapshot(WsServer& server) {
+    const vires::Snapshot snap = vires::Arbiter::instance().snapshot();
+    std::string js;
+    js.reserve(128 + snap.consumers.size() * 96);
+    js += "{\"type\":\"vires_compute_snapshot\"";
+    js += ",\"greatest_priority\":" + std::to_string(snap.greatest_priority);
+    js += ",\"least_priority\":" + std::to_string(snap.least_priority);
+    js += ",\"background_yielding\":";
+    js += (snap.background_yielding ? "true" : "false");
+    js += ",\"foreground_idle_us\":";
+    js += (snap.foreground_idle_us == UINT64_MAX)
+              ? "null"
+              : std::to_string(snap.foreground_idle_us);
+    js += ",\"consumers\":[";
+    for (size_t i = 0; i < snap.consumers.size(); ++i) {
+        const vires::ConsumerStat& c = snap.consumers[i];
+        if (i) js += ",";
+        js += "{\"id\":" + std::to_string(c.id);
+        js += ",\"name\":\"" + c.name + "\"";
+        js += ",\"priority\":\"";
+        js += vires::priority_str(c.priority);
+        js += "\",\"submitted\":" + std::to_string(c.submitted) + "}";
+    }
+    js += "]}";
+    server.broadcast_text(js);
+}
 
 int awaken(const std::string& webui_dir,
                 const std::string& llm_model_dir,
@@ -409,14 +441,27 @@ int awaken(const std::string& webui_dir,
 
     printf("[awaken] Press Ctrl+C to stop...\n");
 
-    // Block until SIGINT/SIGTERM.
+    // Block until SIGINT/SIGTERM, emitting a Vires compute telemetry snapshot to
+    // the WebUI on a fixed cadence between signals. The awaken main thread is
+    // otherwise idle here, so it doubles as the telemetry heartbeat — no extra
+    // thread, matching the "CPU for orchestration only" rule.
     sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask, SIGINT);
     sigaddset(&mask, SIGTERM);
     sigprocmask(SIG_BLOCK, &mask, nullptr);
     int sig = 0;
-    sigwait(&mask, &sig);
+    const struct timespec telem_period = {2, 0};  // 2 s snapshot cadence
+    for (;;) {
+        sig = sigtimedwait(&mask, nullptr, &telem_period);
+        if (sig > 0) break;                 // SIGINT/SIGTERM received
+        if (errno == EAGAIN) {              // cadence elapsed — emit telemetry
+            broadcast_vires_snapshot(server);
+            continue;
+        }
+        if (errno == EINTR) continue;       // interrupted by another signal
+        break;                              // unexpected — fall through to exit
+    }
     printf("\n[awaken] Caught signal %d, shutting down...\n", sig);
 
     // Hybrid P2: drain the DiariZen periodic worker + holdback before we

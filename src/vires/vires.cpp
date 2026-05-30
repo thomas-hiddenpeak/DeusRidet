@@ -15,6 +15,8 @@
 
 #include "communis/log.h"
 
+#include <chrono>
+
 namespace deusridet {
 namespace vires {
 
@@ -110,7 +112,27 @@ cudaStream_t Arbiter::stream(ConsumerId id) const {
 void Arbiter::note_submit(ConsumerId id) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = consumers_.find(id);
-    if (it != consumers_.end()) ++it->second.stat.submitted;
+    if (it == consumers_.end()) return;
+    ++it->second.stat.submitted;
+    // V2 back-pressure: a foreground submission opens the activity window that
+    // tells background consumers to yield. Recorded lock-free for cheap reads.
+    if (it->second.stat.priority == Priority::Foreground) {
+        last_foreground_submit_us_.store(now_us_(), std::memory_order_relaxed);
+    }
+}
+
+bool Arbiter::background_should_yield() const {
+    const uint64_t last =
+        last_foreground_submit_us_.load(std::memory_order_relaxed);
+    if (last == 0) return false;  // no foreground activity ever observed
+    const uint64_t now = now_us_();
+    return (now - last) < foreground_active_window_us_;
+}
+
+uint64_t Arbiter::now_us_() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
 }
 
 Snapshot Arbiter::snapshot() const {
@@ -120,6 +142,18 @@ Snapshot Arbiter::snapshot() const {
     snap.least_priority = least_priority_;
     snap.consumers.reserve(consumers_.size());
     for (const auto& kv : consumers_) snap.consumers.push_back(kv.second.stat);
+    // V2 observability: surface the back-pressure state alongside the ledger.
+    const uint64_t last =
+        last_foreground_submit_us_.load(std::memory_order_relaxed);
+    if (last == 0) {
+        snap.foreground_idle_us = UINT64_MAX;
+        snap.background_yielding = false;
+    } else {
+        const uint64_t now = now_us_();
+        snap.foreground_idle_us = (now >= last) ? (now - last) : 0;
+        snap.background_yielding =
+            snap.foreground_idle_us < foreground_active_window_us_;
+    }
     return snap;
 }
 

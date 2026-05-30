@@ -673,6 +673,9 @@ std::vector<float> SpeakerEncoder::extract_gpu(const float* d_mel, int T) {
     forward_one(d_mel, T, scratch_, stream_, cublas_, d_emb);
 
     cudaStreamSynchronize(stream_);
+    // Foreground heartbeat: marks live speaker-ID activity so Background
+    // consumers (DiariZen) can yield at their next launch boundary.
+    vires::Arbiter::instance().note_submit(vires_id_);
     std::vector<float> result(192);
     cudaMemcpy(result.data(), d_emb, 192 * sizeof(float), cudaMemcpyDeviceToHost);
     return result;
@@ -692,6 +695,8 @@ std::vector<float> SpeakerEncoder::extract(const float* mel, int T) {
     forward_one(d_mel, T, scratch_, stream_, cublas_, d_emb);
 
     cudaStreamSynchronize(stream_);
+    // Foreground heartbeat (see extract_gpu).
+    vires::Arbiter::instance().note_submit(vires_id_);
     std::vector<float> result(192);
     cudaMemcpy(result.data(), d_emb, 192 * sizeof(float), cudaMemcpyDeviceToHost);
     return result;

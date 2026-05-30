@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <thread>
 #include <vector>
 
 #include "../communis/log.h"
@@ -331,6 +332,21 @@ std::vector<DiarizenSegment> DiarizenPipeline::diarize(const float* wave,
     if (!impl_->loaded) {
         impl_->err = "diarize: pipeline not loaded";
         return {};
+    }
+    // Background back-pressure (Vires V2): this is a non-real-time refinement
+    // pass. Before launching the GPU-heavy segmentation, conservatively yield
+    // to live Foreground speaker-ID activity. Yielding only delays *when* the
+    // pass starts — inputs (wave, n_samples) are unchanged, so the diarization
+    // result is bit-identical. The consult is bounded so a continuously busy
+    // foreground cannot starve the refinement indefinitely.
+    {
+        auto& arb = vires::Arbiter::instance();
+        arb.note_submit(impl_->vires_id);  // background heartbeat
+        const int max_yield_slices = 8;    // bounded defer (~16 ms at 2000 µs)
+        for (int i = 0; i < max_yield_slices && arb.background_should_yield(); ++i) {
+            std::this_thread::sleep_for(
+                std::chrono::microseconds(arb.background_slice_us()));
+        }
     }
     using clk = std::chrono::steady_clock;
     auto ms = [](clk::time_point a, clk::time_point b) {

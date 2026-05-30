@@ -13,6 +13,7 @@ import { TextOutputPanel } from './components/text-output-panel.js';
 import { ConfigPanel } from './components/config-panel.js';
 import { TimelinePanel } from './components/timeline-panel.js';
 import { DiarizenPanel } from './components/diarizen-panel.js';
+import { ViresPanel } from './components/vires-panel.js';
 import { spkColor } from './utils/speaker-colors.js';
 
 // --- Log utility ---
@@ -94,6 +95,10 @@ ws.onText = (msg) => {
         if (obj.type === 'speaker_diarize_final') {
             diarizenPanel.onFinal(obj);
             log(`DiariZen FINAL pass=${obj.pass} segs=${obj.segment_count}`);
+            return;
+        }
+        if (obj.type === 'vires_compute_snapshot') {
+            viresPanel.onSnapshot(obj);
             return;
         }
         if (obj.type === 'asr_transcript') {
@@ -195,6 +200,7 @@ const textOutputPanel = new TextOutputPanel(ws);
 const configPanel = new ConfigPanel(ws);
 const timelinePanel = new TimelinePanel();
 const diarizenPanel = new DiarizenPanel(ws);
+const viresPanel = new ViresPanel();
 
 // --- VAD source selector ---
 const vadSourceSelect = document.getElementById('vad-source-select');

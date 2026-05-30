@@ -176,6 +176,26 @@ Vigilia 头。对外唯一缝隙是 `vires_facade.h`，与其它子系统 facade
   Somnium）都正在迁移以向 Vires 声明其代谢类别 —— 感知/prefill/decode 为
   **Foreground**，精修/巩固为 **Background** —— 使优先级次序由基质强制，
   而非任由默认流调度的偶然性决定。
+- **所有当前 GPU 消费者已接入：完成**（提交 `1702112`）。启动时注册六个
+  消费者 —— `orator_spk_encoder`、
+  `orator_spk_store_{CamppDb,WLEcapaDb,DualDb}`、`auditus_overlap` 为
+  **Foreground**（prio −5），`diarizen` 为 **Background**（prio 0）；
+  LLM 门控（`machina_compute`/`machina_aux`）、ASR 门控（`auditus_asr`）
+  与分离（`auditus_separator`）消费者在其子系统加载时点亮。Vires 不变式
+  自此永久确立：*现在及以后，每个 GPU 计算消费者都向 Arbiter 注册*，
+  而非自持裸私有流。
+- **V2——背压 + 遥测：完成**（提交 `a7b947d`）。三项新增，皆仅涉调度/
+  可观测性（逐位一致）：*(a)* `note_submit(id)` 记录最近一次 Foreground
+  提交时间；`background_should_yield()` 在 50 ms 最近活动窗口内返回 true。
+  *(b)* DiariZen Background pass 在发射前进行有界让步咨询（≤ 8 × 2000 µs）
+  —— 它只推迟 pass *何时* 开始，绝不改变 *计算什么*，故输入不变。
+  *(c)* awaken 主线程兼作 2 s 遥测心跳（`sigtimedwait`，无新线程），
+  广播 `vires_compute_snapshot` WS 消息 —— 消费者注册表（id / 名称 /
+  类别 / submitted）+ `background_yielding` + `foreground_idle_us` ——
+  由 WebUI `vires-panel` 渲染。已验证：实测 gate 维持
+  `accuracy(tests/test.mp3, diarization): 93.5% → 93.6% (Δ = +0.1 pp)`，
+  P3a bit-eq PASS（28/28，`min_cos 0.999980`），HTTP 200 / WS 101 /
+  `vires-panel.{js,css}` 200，快照每 2 s 广播，含全部 6 个消费者。
 
 ## 延后项（现在命名，以消除日后歧义）
 

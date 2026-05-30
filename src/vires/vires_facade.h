@@ -22,6 +22,7 @@
 
 #include <cuda_runtime_api.h>
 
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <unordered_map>
@@ -66,6 +67,13 @@ public:
     // Foreground consumers may ignore it.
     uint64_t background_slice_us() const { return background_slice_us_; }
 
+    // V2 back-pressure (compute-saturation admission). Returns true when a
+    // foreground submission landed within the recent activity window — i.e. the
+    // live perception/prefill/decode path is busy and a background consumer
+    // should pause or chunk to stay out of its way. Foreground is always
+    // admitted, so it never consults this. Cheap atomic read; no lock.
+    bool background_should_yield() const;
+
     // A consistent snapshot of the compute ledger for Nexus/WebUI.
     Snapshot snapshot() const;
 
@@ -83,12 +91,21 @@ private:
     int least_priority_    = 0;  // least urgent (numerically largest)
     uint64_t background_slice_us_ = 2000;  // 2 ms default bounded slice
 
+    // V2 back-pressure: the foreground-activity window. A background consumer
+    // yields while a foreground submission landed within this many microseconds.
+    uint64_t foreground_active_window_us_ = 50000;  // 50 ms
+    // Steady-clock microseconds of the last foreground submission (0 = none).
+    std::atomic<uint64_t> last_foreground_submit_us_{0};
+
     mutable std::mutex mu_;
     std::unordered_map<ConsumerId, Consumer> consumers_;
     ConsumerId next_id_ = 1;  // 0 reserved as kInvalidConsumer
 
     // Map a metabolic class to a concrete CUDA stream priority value.
     int priority_value_(Priority p) const;
+
+    // Monotonic microsecond clock for the foreground-activity window.
+    static uint64_t now_us_();
 };
 
 } // namespace vires

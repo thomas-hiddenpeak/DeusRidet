@@ -1,0 +1,57 @@
+/* vires-panel.css — styling for the Vires compute-substrate telemetry panel.
+ * Decoupled per webui zero-inline-styles rule; consumes design tokens. */
+
+.vires-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3, 0.75rem);
+    margin-bottom: var(--space-3, 0.75rem);
+}
+
+.vires-status .stat {
+    font-size: var(--font-size-sm, 0.85rem);
+    color: var(--color-text-muted, #8a93a6);
+}
+
+.vires-status .stat strong {
+    color: var(--color-text, #e6e9ef);
+    font-variant-numeric: tabular-nums;
+}
+
+#vires-yielding[data-state="yielding"] {
+    color: var(--color-warn, #e0a93b);
+}
+
+#vires-yielding[data-state="idle"] {
+    color: var(--color-ok, #5bc88a);
+}
+
+.vires-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--font-size-sm, 0.85rem);
+}
+
+.vires-table th,
+.vires-table td {
+    text-align: left;
+    padding: 0.25rem 0.5rem;
+    border-bottom: 1px solid var(--color-border, #2a2f3a);
+}
+
+.vires-table th {
+    color: var(--color-text-muted, #8a93a6);
+    font-weight: 600;
+}
+
+.vires-table td {
+    font-variant-numeric: tabular-nums;
+}
+
+.vires-table tr[data-class="foreground"] td {
+    color: var(--color-accent, #6aa6ff);
+}
+
+.vires-table tr[data-class="background"] td {
+    color: var(--color-text-muted, #8a93a6);
+}
