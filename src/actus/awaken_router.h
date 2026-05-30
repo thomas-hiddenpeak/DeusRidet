@@ -22,6 +22,7 @@ class ConscientiStream;
 namespace orator {
 class DiarizenFacade;
 class DiarizenPeriodicWorker;
+class DiarizenPipeline;
 }
 
 namespace actus {
@@ -42,7 +43,8 @@ void handle_ws_text_command(int fd,
                             std::atomic<bool>& loopback,
                             bool llm_loaded,
                             orator::DiarizenFacade* diarizen = nullptr,
-                            orator::DiarizenPeriodicWorker* worker = nullptr);
+                            orator::DiarizenPeriodicWorker* worker = nullptr,
+                            orator::DiarizenPipeline* native = nullptr);
 
 // Peer routing helper (R1 split): handles the four consciousness_* prefixes
 // plus text_input. Returns true if the message matched one of those prefixes

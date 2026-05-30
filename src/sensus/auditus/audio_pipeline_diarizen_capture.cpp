@@ -121,6 +121,22 @@ size_t AudioPipeline::diarizen_dump_wav(const std::string& path) const {
     return n;
 }
 
+size_t AudioPipeline::diarizen_copy_pcm_f32(std::vector<float>& out) const {
+    // Snapshot under the lock so push_pcm cannot race against the read.
+    std::vector<int16_t> snapshot;
+    {
+        std::lock_guard<std::mutex> lk(diarizen_capture_mu_);
+        if (diarizen_capture_buf_.empty()) { out.clear(); return 0; }
+        snapshot = diarizen_capture_buf_;
+    }
+    out.resize(snapshot.size());
+    constexpr float kInv = 1.0f / 32768.0f;
+    for (size_t i = 0; i < snapshot.size(); ++i) {
+        out[i] = static_cast<float>(snapshot[i]) * kInv;
+    }
+    return out.size();
+}
+
 // Public hook for audio_pipeline.cpp::push_pcm so capture is appended on
 // every successful WS binary frame. Implemented as a member so it can
 // touch the private buffer/lock fields directly.

@@ -15,6 +15,7 @@
 #include "conscientia/frame.h"
 #include "orator/diarizen_facade.h"
 #include "orator/diarizen_periodic_worker.h"
+#include "orator/diarizen_pipeline.h"
 
 #include <chrono>
 #include <cstdio>
@@ -22,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace deusridet {
 namespace actus {
@@ -34,7 +36,8 @@ void handle_ws_text_command(int fd,
                             std::atomic<bool>& loopback,
                             bool llm_loaded,
                             orator::DiarizenFacade* diarizen,
-                            orator::DiarizenPeriodicWorker* worker) {
+                            orator::DiarizenPeriodicWorker* worker,
+                            orator::DiarizenPipeline* native) {
     if (msg == "loopback:on") {
         loopback.store(true, std::memory_order_relaxed);
         server.send_text(fd, R"({"type":"loopback","enabled":true})");
@@ -352,11 +355,56 @@ void handle_ws_text_command(int fd,
             server.send_text(fd, R"json({"type":"speaker_diarize_progress","status":"triggered"})json");
         }
     } else if (msg == "diarizen_finalize") {
+        // P3b native path (DEUSRIDET_DIARIZEN_NATIVE=1): when the in-process
+        // DiarizenPipeline is loaded, finalise through it — no wav dump, no
+        // Python worker. Highest priority so it can be A/B-scored live
+        // against the worker baseline without disturbing the default path.
         // Hybrid P2 path: if a periodic worker is wired, finalize through
         // it so the still-pending holdback is drained into Conscientia
         // with the freshest relabelling. Falls back to the P1 detached
         // diarize when no worker is present.
-        if (worker) {
+        if (native && native->is_loaded()) {
+            std::vector<float> pcm;
+            size_t n = audio.diarizen_copy_pcm_f32(pcm);
+            if (n == 0) {
+                server.send_text(fd, R"({"type":"speaker_diarize_final","ok":false,"error":"capture buffer empty"})");
+            } else {
+                char ack[256];
+                snprintf(ack, sizeof(ack),
+                    R"({"type":"speaker_diarize_progress","status":"running","samples":%zu,"sec":%.2f})",
+                    n, (double)n / 16000.0);
+                server.send_text(fd, ack);
+                auto* server_ptr = &server;
+                auto* native_ptr = native;
+                std::thread([server_ptr, native_ptr, pcm = std::move(pcm), n]() {
+                    auto t0 = std::chrono::steady_clock::now();
+                    auto segs = native_ptr->diarize(pcm.data(), pcm.size());
+                    auto t1 = std::chrono::steady_clock::now();
+                    double wall = std::chrono::duration<double>(t1 - t0).count();
+                    if (segs.empty()) {
+                        std::string err = native_ptr->last_error();
+                        std::string j = std::string("{\"type\":\"speaker_diarize_final\",\"ok\":false,\"error\":\"")
+                                      + (err.empty() ? "no segments" : err) + "\"}";
+                        server_ptr->broadcast_text(j);
+                        return;
+                    }
+                    std::string j = "{\"type\":\"speaker_diarize_final\",\"ok\":true,\"audio_sec\":";
+                    char buf[96];
+                    snprintf(buf, sizeof(buf), "%.3f,\"wall_sec\":%.3f,\"n_segments\":%zu,\"segments\":[",
+                             (double)n / 16000.0, wall, segs.size());
+                    j += buf;
+                    for (size_t i = 0; i < segs.size(); ++i) {
+                        if (i) j += ',';
+                        snprintf(buf, sizeof(buf), "[%.3f,%.3f,\"", segs[i].start_sec, segs[i].end_sec);
+                        j += buf;
+                        j += segs[i].label;
+                        j += "\"]";
+                    }
+                    j += "]}";
+                    server_ptr->broadcast_text(j);
+                }).detach();
+            }
+        } else if (worker) {
             char ack[160];
             size_t n = audio.diarizen_capture_samples();
             snprintf(ack, sizeof(ack),

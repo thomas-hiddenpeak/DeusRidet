@@ -544,6 +544,11 @@ public:
     bool diarizen_capture_enabled() const;
     size_t diarizen_capture_samples() const;
     size_t diarizen_dump_wav(const std::string& path) const;
+    // Native-pipeline path (P3b): snapshot the capture buffer as float32 in
+    // [-1, 1] (int16/32768), matching torchaudio/soundfile scale. Replaces
+    // the dump-to-wav + reload step for the in-process DiarizenPipeline.
+    // Returns the number of samples copied; 0 on empty buffer.
+    size_t diarizen_copy_pcm_f32(std::vector<float>& out) const;
     void diarizen_capture_clear();
 
     // Hybrid P2 — origin of the capture buffer in stream-time seconds.
