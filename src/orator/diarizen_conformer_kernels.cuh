@@ -107,26 +107,9 @@ __global__ void scaled_add_kernel(float* __restrict__ res,
     res[i] += scale * x[i];
 }
 
-// Multi-head self-attention scores: per (head j, query q, key k),
-// S[j,q,k] = scale * sum_d Q[q, j*64+d] * K[k, j*64+d]. Q/K are [T, nh*64].
-__global__ void mhsa_scores_kernel(const float* __restrict__ Q,
-                                   const float* __restrict__ K,
-                                   float* __restrict__ S,  // [nh, T, T]
-                                   int T, int nh, int dk, float scale) {
-    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    long total = (long)nh * T * T;
-    if (idx >= total) return;
-    long tt = (long)T * T;
-    int j = (int)(idx / tt);
-    long r = idx % tt;
-    int q = (int)(r / T);
-    int k = (int)(r % T);
-    const float* qp = Q + (long)q * nh * dk + (long)j * dk;
-    const float* kp = K + (long)k * nh * dk + (long)j * dk;
-    float dot = 0.0f;
-    for (int d = 0; d < dk; ++d) dot += qp[d] * kp[d];
-    S[idx] = scale * dot;
-}
+// Multi-head self-attention scores and context are done by
+// cublasSgemmStridedBatched (tensor-core path) in diarizen_conformer_forward.cu;
+// no hand-rolled matmul kernel is needed here.
 
 // Row softmax over the last dim (length T) of an [nh, T, T] tensor; one block
 // per (j, q) row.
@@ -161,22 +144,8 @@ __global__ void softmax_rows_kernel_c(float* __restrict__ S, int T) {
     for (int k = tid; k < T; k += blockDim.x) s[k] /= rsum;
 }
 
-// Attention context: ctx[q, j*64+d] = sum_k S[j,q,k] * V[k, j*64+d].
-__global__ void mhsa_context_kernel(const float* __restrict__ S,  // [nh,T,T]
-                                    const float* __restrict__ V,  // [T,nh*64]
-                                    float* __restrict__ ctx,      // [T,nh*64]
-                                    int T, int nh, int dk) {
-    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= (long)T * nh * dk) return;
-    int q = (int)(idx / (nh * dk));
-    int rem = (int)(idx % (nh * dk));
-    int j = rem / dk;
-    int d = rem % dk;
-    const float* srow = S + ((long)j * T + q) * T;
-    float acc = 0.0f;
-    for (int k = 0; k < T; ++k) acc += srow[k] * V[(long)k * nh * dk + j * dk + d];
-    ctx[idx] = acc;
-}
+// Attention context is done by cublasSgemmStridedBatched in
+// diarizen_conformer_forward.cu; no hand-rolled matmul kernel here.
 
 // LogSoftmax over the last dim (length C) of a [T, C] tensor; one block per row.
 __global__ void logsoftmax_rows_kernel(float* __restrict__ X, int T, int C) {

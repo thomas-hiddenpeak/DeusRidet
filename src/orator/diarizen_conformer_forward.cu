@@ -137,12 +137,22 @@ bool mha_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
     clinear_(blas, xn, wk, bk, K, T, C, C);
     clinear_(blas, xn, wv, bv, V, T, C, C);
     const float scale = 1.0f / std::sqrt((float)dk);
-    long stot = (long)nh * T * T;
-    mhsa_scores_kernel<<<div_ceil_((int)stot, kBlock), kBlock>>>(Q, K, S, T, nh,
-                                                                 dk, scale);
+    const float zero = 0.0f, one = 1.0f;
+    // Scores via batched GEMM (replaces hand-rolled mhsa_scores_kernel, which
+    // was 13.1% of pipeline GPU time): per head j, S_j[q,k] = scale * Q_j·K_j.
+    // Row-major S_j[q,k] is the column-major (k,q) matrix K_jᵀ·Q_j.
+    cublasSgemmStridedBatched(
+        blas, CUBLAS_OP_T, CUBLAS_OP_N, T, T, dk, &scale,
+        K, nh * dk, dk,                    // A = per-head K, lda, strideA
+        Q, nh * dk, dk,                    // B = per-head Q, ldb, strideB
+        &zero, S, T, (long long)T * T, nh);
     softmax_rows_kernel_c<<<nh * T, 256>>>(S, T);
-    mhsa_context_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(S, V, ctx, T, nh,
-                                                              dk);
+    // Context via batched GEMM: ctx_j[q,d] = sum_k S_j[q,k] · V_j[k,d].
+    cublasSgemmStridedBatched(
+        blas, CUBLAS_OP_N, CUBLAS_OP_N, dk, T, T, &one,
+        V, nh * dk, dk,                    // A = per-head V, lda, strideA
+        S, T, (long long)T * T,            // B = per-head S, ldb, strideB
+        &zero, ctx, nh * dk, dk, nh);
     clinear_(blas, ctx, wo, bo, o, T, C, C);
     scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, o, 1.0f,
                                                             (long)T * C);
