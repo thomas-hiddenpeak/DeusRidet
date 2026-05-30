@@ -53,6 +53,8 @@ void DiarizenConformerHead::release_() {
         cudaFree(arena_);
         arena_ = nullptr;
     }
+    for (auto& kv : f32_cache_) cudaFree(kv.second);
+    f32_cache_.clear();
     arena_bytes_ = 0;
     tensors_.clear();
     loaded_ = false;

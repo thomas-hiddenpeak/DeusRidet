@@ -31,31 +31,48 @@ namespace {
 constexpr const char* kFLog = "DiariZenConformer";
 }  // namespace
 
-namespace {
-
-// Fetch a tensor by exact name into a fresh fp32 device buffer (caller frees).
-float* fetch_f32(const DiarizenConformerHead& self, const char* name,
-                 std::size_t* out_numel) {
-    const auto* v = self.find(name);
+// Persistent fp32 weight cache (declared in the header). Converts the fp16
+// arena tensor to a device-resident fp32 buffer on first use and returns the
+// cached pointer thereafter, so the four Conformer blocks no longer pay a
+// cudaMalloc + convert + cudaFree per weight per chunk (each malloc/free walks
+// the Tegra VMM map). Bit-equality preserving: same values, fetched once.
+float* DiarizenConformerHead::weight_f32(const std::string& name) const {
+    auto it = f32_cache_.find(name);
+    if (it != f32_cache_.end()) return it->second;
+    const auto* v = find(name);
     if (!v || !v->data) {
-        LOG_ERROR(kFLog, "tensor missing: %s", name);
+        LOG_ERROR(kFLog, "tensor missing: %s", name.c_str());
         return nullptr;
     }
     float* d = nullptr;
     if (cudaMalloc(&d, v->numel * sizeof(float)) != cudaSuccess) return nullptr;
     half_to_float_kernel<<<div_ceil_((int)v->numel, kBlock), kBlock>>>(
         v->data, d, (int)v->numel);
-    if (out_numel) *out_numel = v->numel;
+    f32_cache_.emplace(name, d);
     return d;
 }
 
-// Convenience: fetch "conformer.conformer_layer.<L>.<suffix>".
+namespace {
+
+// Fetch a tensor by exact name as a device fp32 buffer. Returns the head's
+// persistent cached pointer (NOT a fresh buffer) — callers MUST NOT free it.
+float* fetch_f32(const DiarizenConformerHead& self, const char* name,
+                 std::size_t* out_numel) {
+    float* d = self.weight_f32(name);
+    if (d && out_numel) {
+        const auto* v = self.find(name);
+        if (v) *out_numel = v->numel;
+    }
+    return d;
+}
+
+// Convenience: fetch "conformer.conformer_layer.<L>.<suffix>" (cached).
 float* layer_f32c(const DiarizenConformerHead& self, int layer,
                   const char* suffix) {
     char name[256];
     std::snprintf(name, sizeof(name), "conformer.conformer_layer.%d.%s", layer,
                   suffix);
-    return fetch_f32(self, name, nullptr);
+    return self.weight_f32(name);
 }
 
 // Y[T, M] = X[T, K] @ W^T + bias[M], W is [M, K] row-major.
@@ -99,9 +116,7 @@ bool ffn_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
     clinear_(blas, h1, w2, b2, h2, T, C, FF);
     scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, h2, 0.5f,
                                                             (long)T * C);
-    cudaFree(xn); cudaFree(h1); cudaFree(h2);
-    cudaFree(lnw); cudaFree(lnb); cudaFree(w1); cudaFree(b1);
-    cudaFree(w2); cudaFree(b2);
+    cudaFree(xn); cudaFree(h1); cudaFree(h2);  // scratch only; weights cached
     return true;
 }
 
@@ -157,9 +172,7 @@ bool mha_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
     scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, o, 1.0f,
                                                             (long)T * C);
     cudaFree(xn); cudaFree(Q); cudaFree(K); cudaFree(V); cudaFree(S);
-    cudaFree(ctx); cudaFree(o);
-    cudaFree(lnw); cudaFree(lnb); cudaFree(wq); cudaFree(bq); cudaFree(wk);
-    cudaFree(bk); cudaFree(wv); cudaFree(bv); cudaFree(wo); cudaFree(bo);
+    cudaFree(ctx); cudaFree(o);  // scratch only; weights cached
     return true;
 }
 
@@ -210,10 +223,7 @@ bool conv_(const DiarizenConformerHead& self, cublasHandle_t blas, int layer,
     scaled_add_kernel<<<div_ceil_(T * C, kBlock), kBlock>>>(d_x, pc2, 1.0f,
                                                             (long)T * C);
     cudaFree(xn); cudaFree(pc1); cudaFree(glu); cudaFree(gct); cudaFree(dw);
-    cudaFree(swt); cudaFree(pc2);
-    cudaFree(lnw); cudaFree(lnb); cudaFree(pw1); cudaFree(pb1); cudaFree(dww);
-    cudaFree(dwb); cudaFree(bnw); cudaFree(bnb); cudaFree(bnm); cudaFree(bnv);
-    cudaFree(pw2); cudaFree(pb2);
+    cudaFree(swt); cudaFree(pc2);  // scratch only; weights cached
     return true;
 }
 
@@ -229,25 +239,15 @@ bool DiarizenConformerHead::run_block_(int layer, float* d_x, int T,
     if (!ffn_(*this, blas, layer, "ffn2", d_x, T)) return false;
     // Final per-block LayerNorm, in place.
     {
-        char s[128];
-        std::snprintf(s, sizeof(s), "conformer.conformer_layer.%d.ln_norm.weight",
-                      layer);
-        const auto* vw = find(s);
-        std::snprintf(s, sizeof(s), "conformer.conformer_layer.%d.ln_norm.bias",
-                      layer);
-        const auto* vb = find(s);
-        if (!vw || !vb) return false;
-        float* w = nullptr;
-        float* b = nullptr;
-        cudaMalloc(&w, vw->numel * sizeof(float));
-        cudaMalloc(&b, vb->numel * sizeof(float));
-        half_to_float_kernel<<<div_ceil_((int)vw->numel, kBlock), kBlock>>>(
-            vw->data, w, (int)vw->numel);
-        half_to_float_kernel<<<div_ceil_((int)vb->numel, kBlock), kBlock>>>(
-            vb->data, b, (int)vb->numel);
+        char nw[160], nb[160];
+        std::snprintf(nw, sizeof(nw),
+                      "conformer.conformer_layer.%d.ln_norm.weight", layer);
+        std::snprintf(nb, sizeof(nb),
+                      "conformer.conformer_layer.%d.ln_norm.bias", layer);
+        float* w = weight_f32(nw);
+        float* b = weight_f32(nb);
+        if (!w || !b) return false;
         row_layer_norm_to_kernel<<<T, kBlock>>>(d_x, d_x, w, b, T, C);
-        cudaFree(w);
-        cudaFree(b);
     }
     return true;
 }
@@ -284,14 +284,10 @@ std::vector<float> DiarizenConformerHead::run_(const float* feat, int T,
         if (!cw || !cb) {
             cublasDestroy(blas);
             cudaFree(d_x);
-            if (cw) cudaFree(cw);
-            if (cb) cudaFree(cb);
             return {};
         }
         cudaMalloc(&d_logits, (size_t)T * NC * sizeof(float));
-        clinear_(blas, d_x, cw, cb, d_logits, T, NC, C);
-        cudaFree(cw);
-        cudaFree(cb);
+        clinear_(blas, d_x, cw, cb, d_logits, T, NC, C);  // cw/cb cached
         out_dim = NC;
         d_out = d_logits;
         if (stage >= 2)

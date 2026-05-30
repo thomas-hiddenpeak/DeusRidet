@@ -77,6 +77,14 @@ public:
     /// if absent. Stable for the object lifetime.
     const DiarizenConformerTensorView* find(const std::string& name) const;
 
+    /// Persistent fp32 weight cache: converts an fp16 arena tensor to a
+    /// device-resident fp32 buffer on first use and returns the cached pointer
+    /// on every subsequent call. Eliminates the per-chunk
+    /// cudaMalloc/convert/cudaFree churn (each Tegra cudaMalloc/Free walks the
+    /// global VMM map) that dominated the Conformer seg stage. Owned by the
+    /// head; callers MUST NOT free the result. Mirrors the WavLM weight_f32.
+    float* weight_f32(const std::string& name) const;
+
     /// P1b bit-equality tap: run the four Conformer blocks over the [T, 256]
     /// feature `feat` (host, frame-major) and return the conformer output
     /// [T, 256] flattened frame-major. Bit-checked vs `conformer_out`.
@@ -103,6 +111,7 @@ private:
     void*       arena_       = nullptr;   ///< owned, GPU
     std::size_t arena_bytes_ = 0;
     std::unordered_map<std::string, DiarizenConformerTensorView> tensors_;
+    mutable std::unordered_map<std::string, float*> f32_cache_;  ///< owned, GPU
 };
 
 }  // namespace orator

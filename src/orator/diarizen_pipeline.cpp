@@ -5,6 +5,7 @@
 #include "diarizen_pipeline.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -288,6 +289,11 @@ std::vector<DiarizenSegment> DiarizenPipeline::diarize(const float* wave,
         impl_->err = "diarize: pipeline not loaded";
         return {};
     }
+    using clk = std::chrono::steady_clock;
+    auto ms = [](clk::time_point a, clk::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    auto t0 = clk::now();
     // 1. Sliding-window segmentation (WavLM + Conformer, median-filtered).
     DiarizenSegmentation seg = impl_->segmenter.segment(
         wave, n_samples, impl_->cfg.apply_median_filtering);
@@ -296,12 +302,14 @@ std::vector<DiarizenSegment> DiarizenPipeline::diarize(const float* wave,
         return {};
     }
     const int C = seg.num_chunks, F = seg.num_frames, S = seg.num_speakers;
+    auto t1 = clk::now();
 
     // 2. Per-(chunk, speaker) speaker embeddings (inactive -> constant).
     std::vector<float> emb;
     if (!impl_->get_embeddings(wave, n_samples, seg.data.data(), C, F, S, emb)) {
         return {};  // err set
     }
+    auto t2 = clk::now();
 
     // 3. VBx clustering -> per-chunk hard cluster ids (-2 = inactive).
     std::vector<std::int8_t> hard8;
@@ -311,6 +319,7 @@ std::vector<DiarizenSegment> DiarizenPipeline::diarize(const float* wave,
         return {};
     }
     std::vector<int> hard(hard8.begin(), hard8.end());
+    auto t3 = clk::now();
 
     // 4. reconstruct + speaker_count + to_diarization.
     std::vector<float> count, binary;
@@ -319,9 +328,17 @@ std::vector<DiarizenSegment> DiarizenPipeline::diarize(const float* wave,
                              binary, nf, ncl)) {
         return {};  // err set
     }
+    auto t4 = clk::now();
 
     // 5. Binarize -> labelled intervals.
-    return impl_->binarize(binary, nf, ncl);
+    auto out = impl_->binarize(binary, nf, ncl);
+    auto t5 = clk::now();
+    LOG_INFO("DiarizenPipeline",
+             "diarize stages (C=%d F=%d S=%d): seg=%.0fms embed=%.0fms "
+             "cluster=%.0fms post=%.0fms binarize=%.0fms total=%.0fms",
+             C, F, S, ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4),
+             ms(t4, t5), ms(t0, t5));
+    return out;
 }
 
 }  // namespace orator
