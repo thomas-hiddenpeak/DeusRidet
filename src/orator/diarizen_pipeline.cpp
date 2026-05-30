@@ -191,6 +191,38 @@ struct DiarizenPipeline::Impl {
         }
         return true;
     }
+
+    // pyannote Binarize (onset=offset=0.5, no pad, no min-duration). binary is
+    // [nf*ncl]; frame middle = i*0.02 + 0.0125 s. Emits one DiarizenSegment per
+    // contiguous active run per cluster, label "speaker<k>".
+    std::vector<DiarizenSegment> binarize(const std::vector<float>& binary,
+                                          int nf, int ncl) {
+        constexpr double kStep = 0.02, kDur = 0.025, kOn = 0.5;
+        auto mid = [&](int i) { return i * kStep + 0.5 * kDur; };
+        std::vector<DiarizenSegment> out;
+        for (int k = 0; k < ncl; ++k) {
+            double start = mid(0);
+            bool is_active = binary[static_cast<std::size_t>(0) * ncl + k] > kOn;
+            double t = start;
+            for (int i = 1; i < nf; ++i) {
+                t = mid(i);
+                const float y = binary[static_cast<std::size_t>(i) * ncl + k];
+                if (is_active) {
+                    if (y < kOn) {
+                        out.push_back({start, t, "speaker" + std::to_string(k)});
+                        start = t;
+                        is_active = false;
+                    }
+                } else if (y > kOn) {
+                    start = t;
+                    is_active = true;
+                }
+            }
+            if (is_active)
+                out.push_back({start, t, "speaker" + std::to_string(k)});
+        }
+        return out;
+    }
 };
 
 DiarizenPipeline::DiarizenPipeline() : impl_(std::make_unique<Impl>()) {}
@@ -249,11 +281,47 @@ bool DiarizenPipeline::debug_post_process(const float* seg, const int* hard,
                                num_clusters);
 }
 
-std::vector<DiarizenSegment> DiarizenPipeline::diarize(const float* /*wave*/,
-                                                       int /*n_samples*/) {
-    // Full chain lands in P3a-4/P3a-5.
-    impl_->err = "diarize: not yet implemented (P3a-4/P3a-5)";
-    return {};
+std::vector<DiarizenSegment> DiarizenPipeline::diarize(const float* wave,
+                                                       int n_samples) {
+    impl_->err.clear();
+    if (!impl_->loaded) {
+        impl_->err = "diarize: pipeline not loaded";
+        return {};
+    }
+    // 1. Sliding-window segmentation (WavLM + Conformer, median-filtered).
+    DiarizenSegmentation seg = impl_->segmenter.segment(
+        wave, n_samples, impl_->cfg.apply_median_filtering);
+    if (seg.empty()) {
+        impl_->err = "diarize: segmentation empty";
+        return {};
+    }
+    const int C = seg.num_chunks, F = seg.num_frames, S = seg.num_speakers;
+
+    // 2. Per-(chunk, speaker) speaker embeddings (inactive -> constant).
+    std::vector<float> emb;
+    if (!impl_->get_embeddings(wave, n_samples, seg.data.data(), C, F, S, emb)) {
+        return {};  // err set
+    }
+
+    // 3. VBx clustering -> per-chunk hard cluster ids (-2 = inactive).
+    std::vector<std::int8_t> hard8;
+    if (!impl_->clustering.cluster(emb.data(), C, S, DiarizenResnet34Arch::kEmbedDim,
+                                   seg.data.data(), F, hard8)) {
+        impl_->err = "diarize: clustering failed";
+        return {};
+    }
+    std::vector<int> hard(hard8.begin(), hard8.end());
+
+    // 4. reconstruct + speaker_count + to_diarization.
+    std::vector<float> count, binary;
+    int nf = 0, ncl = 0;
+    if (!impl_->post_process(seg.data.data(), hard.data(), C, F, S, count,
+                             binary, nf, ncl)) {
+        return {};  // err set
+    }
+
+    // 5. Binarize -> labelled intervals.
+    return impl_->binarize(binary, nf, ncl);
 }
 
 }  // namespace orator

@@ -86,6 +86,43 @@ def main() -> int:
         nat_count = np.fromfile(cp, dtype=np.float32).astype(np.uint8)
         nat_disc = np.fromfile(bp, dtype=np.float32).reshape(nf, ncl)
 
+        # --- P3a-5: end-to-end diarize from wave_in --------------------------
+        op = os.path.join(tmp, "segs.bin")
+        r3 = subprocess.run(
+            [args.harness, "diarize", wp, op],
+            capture_output=True,
+            text=True,
+        )
+        e2e_ok = r3.returncode == 0
+        e2e_msg = ""
+        if e2e_ok:
+            nat_seg = np.fromfile(op, dtype=np.float32).reshape(-1, 3)
+            ref_seg = np.ascontiguousarray(d["segments"])
+            ref_lab = np.ascontiguousarray(d["segment_labels"])
+            no = np.lexsort((nat_seg[:, 2], nat_seg[:, 1], nat_seg[:, 0]))
+            bo = np.lexsort((ref_lab, ref_seg[:, 1], ref_seg[:, 0]))
+            nat_seg = nat_seg[no]
+            rs, rl = ref_seg[bo], ref_lab[bo]
+            same_n = len(nat_seg) == len(rs)
+            if same_n:
+                lab_ok = np.array_equal(nat_seg[:, 2].astype(int), rl.astype(int))
+                bdiff = float(
+                    max(
+                        np.abs(nat_seg[:, 0] - rs[:, 0]).max(),
+                        np.abs(nat_seg[:, 1] - rs[:, 1]).max(),
+                    )
+                )
+                e2e_ok = lab_ok and bdiff <= 0.021  # <=1 frame (0.02 s)
+                e2e_msg = (
+                    f"segs={len(nat_seg)}/{len(rs)} labels_match={lab_ok} "
+                    f"max_boundary_diff={bdiff:.4f}s"
+                )
+            else:
+                e2e_ok = False
+                e2e_msg = f"segment count mismatch {len(nat_seg)} vs {len(rs)}"
+        else:
+            e2e_msg = r3.stderr.strip().splitlines()[-1] if r3.stderr else "fail"
+
     active = seg.sum(axis=1) > 0  # [C, S]
     cs = _cos(emb.reshape(-1, D), ref.reshape(-1, D)).reshape(C, S)
     ca, ci = cs[active], cs[~active]
@@ -106,11 +143,13 @@ def main() -> int:
         f"postproc count_match={count_ok} discrete_diff={disc_diff} "
         f"(nf={nf} ncl={ncl})"
     )
+    print(f"end2end  ok={e2e_ok} {e2e_msg}")
     ok = (
         float(ca.min()) >= 0.999
         and float(ci.min()) >= 0.999
         and count_ok
         and disc_diff == 0
+        and e2e_ok
     )
     print("RESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
