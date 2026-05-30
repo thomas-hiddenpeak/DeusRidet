@@ -135,16 +135,15 @@ __global__ void gru_gate_kernel(const float* __restrict__ x,       // [T,1024]
     gate[(long)h * T + t] = ga * (gb * cst[h] - 1.0f) + 2.0f;
 }
 
-// Attention scores for the surviving heads. One thread per (j, q, k) where j
-// indexes the pruned head set (0..nh-1) and o = rh[j] is its original id in
-// 0..15. score = scaling * (Q_j[q] . K_j[k]) + gate[o, q] * pos_bias[o, q, k].
-__global__ void attn_scores_kernel(const float* __restrict__ Q,   // [T,nh*64]
-                                   const float* __restrict__ K,   // [T,nh*64]
-                                   const int* __restrict__ rh,    // [nh]
-                                   const float* __restrict__ gate,// [16,T]
-                                   const float* __restrict__ posb,// [16,T,T]
-                                   float* __restrict__ S,         // [nh,T,T]
-                                   int T, int nh, float scaling) {
+// Add the gated relative-position bias to raw batched-GEMM scores. The
+// Q·Kᵀ dot product itself is done by cublasSgemmStridedBatched (tensor-core
+// path); only this bias term is not a GEMM. One thread per (j, q, k):
+// S[j,q,k] += gate[o, q] * pos_bias[o, q, k], o = rh[j] the original head id.
+__global__ void attn_bias_kernel(const int* __restrict__ rh,    // [nh]
+                                  const float* __restrict__ gate,// [16,T]
+                                  const float* __restrict__ posb,// [16,T,T]
+                                  float* __restrict__ S,         // [nh,T,T]
+                                  int T, int nh) {
     long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
     long total = (long)nh * T * T;
     if (idx >= total) return;
@@ -154,12 +153,7 @@ __global__ void attn_scores_kernel(const float* __restrict__ Q,   // [T,nh*64]
     int q = (int)(r / T);
     int k = (int)(r % T);
     int o = rh[j];
-    const float* qp = Q + (long)q * nh * 64 + j * 64;
-    const float* kp = K + (long)k * nh * 64 + j * 64;
-    float dot = 0.0f;
-    for (int d = 0; d < 64; ++d) dot += qp[d] * kp[d];
-    float bias = gate[(long)o * T + q] * posb[(long)o * tt + (long)q * T + k];
-    S[idx] = scaling * dot + bias;
+    S[idx] += gate[(long)o * T + q] * posb[(long)o * tt + (long)q * T + k];
 }
 
 // Row softmax over the key axis. One block per (j, q) row of length T; block
@@ -195,26 +189,6 @@ __global__ void softmax_rows_kernel(float* __restrict__ S, int T) {
     }
     float inv = 1.0f / red[0];
     for (int k = threadIdx.x; k < T; k += blockDim.x) s[k] *= inv;
-}
-
-// Context: ctx[q, j, d] = sum_k S[j, q, k] * V[k, j, d]. One thread per
-// (q, j, d) over the pruned head set.
-__global__ void attn_context_kernel(const float* __restrict__ S,   // [nh,T,T]
-                                    const float* __restrict__ V,   // [T,nh*64]
-                                    float* __restrict__ ctx,       // [T,nh*64]
-                                    int T, int nh) {
-    long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    long total = (long)T * nh * 64;
-    if (idx >= total) return;
-    int q = (int)(idx / (nh * 64));
-    int rem = (int)(idx % (nh * 64));
-    int j = rem / 64;
-    int d = rem % 64;
-    const float* srow = S + ((long)j * T + q) * T;
-    float acc = 0.0f;
-    for (int k = 0; k < T; ++k)
-        acc += srow[k] * V[(long)k * nh * 64 + j * 64 + d];
-    ctx[(long)q * nh * 64 + j * 64 + d] = acc;
 }
 
 // a += b, elementwise.
@@ -398,16 +372,36 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int T,
 
         const std::size_t bytes_S = (std::size_t)nh * T * T * sizeof(float);
         float* S = static_cast<float*>(scratch_acquire(bytes_S));
-        long stot = (long)nh * T * T;
         const float scaling = 0.125f;  // 64^-0.5
-        attn_scores_kernel<<<(int)((stot + kBlock - 1) / kBlock), kBlock>>>(
-            Q, K, d_rh, gate, d_pos_bias, S, T, nh, scaling);
+        const float zero = 0.0f, one = 1.0f;
+        // Scores via batched GEMM: S_j[q,k] = scaling * (Q_j[q] · K_j[k]).
+        // Per head j, Q_j/K_j are [T,64] sub-blocks of the [T,nh*64] buffers
+        // (row stride nh*64, head offset j*64). cuBLAS is column-major, so a
+        // row-major [T,T] result S_j[q,k] = the column-major (k,q) matrix
+        // K_jᵀ · Q_j: transA=T, transB=N, m=n=T, k=64, lda=ldb=nh*64,
+        // batch stride 64. This replaces the hand-rolled 10M-thread kernel
+        // (was 42.7% of pipeline GPU time) with the tensor-core path.
+        cublasSgemmStridedBatched(
+            blas, CUBLAS_OP_T, CUBLAS_OP_N, T, T, 64, &scaling,
+            K, nh * 64, 64,                  // A = per-head K, lda, strideA
+            Q, nh * 64, 64,                  // B = per-head Q, ldb, strideB
+            &zero, S, T, (long long)T * T, nh);
+        // Gated relative-position bias is the only non-GEMM term.
+        long stot = (long)nh * T * T;
+        attn_bias_kernel<<<(int)((stot + kBlock - 1) / kBlock), kBlock>>>(
+            d_rh, gate, d_pos_bias, S, T, nh);
         softmax_rows_kernel<<<nh * T, 256>>>(S, T);
 
         float* ctx = static_cast<float*>(scratch_acquire(bytes_Tinner));
-        long ctot = (long)T * inner;
-        attn_context_kernel<<<(int)((ctot + kBlock - 1) / kBlock), kBlock>>>(
-            S, V, ctx, T, nh);
+        // Context via batched GEMM: ctx_j[q,d] = sum_k S_j[q,k] · V_j[k,d].
+        // Row-major ctx_j[q,d] = column-major (d,q) matrix V_jᵀ · S_jᵀ... here
+        // V_j is [T,64] (lda=nh*64) and S_j is the [T,T] col-major (k,q)
+        // buffer: transA=N (V, m=64), transB=N (S, k_inner=T), n=T.
+        cublasSgemmStridedBatched(
+            blas, CUBLAS_OP_N, CUBLAS_OP_N, 64, T, T, &one,
+            V, nh * 64, 64,                  // A = per-head V, lda, strideA
+            S, T, (long long)T * T,          // B = per-head S, ldb, strideB
+            &zero, ctx, nh * 64, 64, nh);
 
         // out_proj then residual add: d_hidden = d_hidden + out_proj(ctx).
         float* attn_out = static_cast<float*>(scratch_acquire(bytes_TH));
