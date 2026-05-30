@@ -69,11 +69,14 @@ def main() -> int:
             raw = run(args.bin, args.plda, "--ahc", [wp, N, X])
         got = np.frombuffer(raw, dtype=np.int32)
         ref = d["ahc"].astype(np.int32)
-        # compare as partitions (label ids are canonical 0..K-1 by first-seen)
-        agree = float(np.mean(got == ref))
-        print(f"[ahc] N={N} exact_label_agreement={agree:.6f} "
+        same_got = got[:, None] == got[None, :]
+        same_ref = ref[:, None] == ref[None, :]
+        part_match = bool(np.array_equal(same_got, same_ref))
+        exact = float(np.mean(got == ref))
+        print(f"[ahc] N={N} exact_label_agreement={exact:.6f} "
+              f"partition_identical={part_match} "
               f"K_got={int(got.max())+1 if got.size else 0} K_ref={int(ref.max())+1}")
-        ok = agree == 1.0
+        ok = exact == 1.0
 
     else:  # hard
         emb = d["embeddings"].astype(np.float32)
