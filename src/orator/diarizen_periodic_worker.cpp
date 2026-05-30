@@ -13,7 +13,9 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <sstream>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -29,7 +31,11 @@ DiarizenPeriodicWorker::DiarizenPeriodicWorker(
       pipeline_(pipeline),
       holdback_(holdback),
       server_(server),
-      period_sec_(period_sec < 5.0 ? 5.0 : period_sec) {}
+      period_sec_(period_sec < 5.0 ? 5.0 : period_sec) {
+    if (const char* e = std::getenv("DEUSRIDET_DIARIZEN_PERIODIC")) {
+        periodic_enabled_ = (std::string(e) == "1");
+    }
+}
 
 DiarizenPeriodicWorker::~DiarizenPeriodicWorker() { stop(); }
 
@@ -81,12 +87,17 @@ void DiarizenPeriodicWorker::worker_loop_() {
         bool was_triggered = trigger_req_;
         trigger_req_ = false;
         lk.unlock();
-        // Only pay the diarisation cost when there is actual audio to
-        // diarise — first pass on an empty buffer wastes ~30 s on Orin.
-        size_t samples = audio_.diarizen_capture_samples();
-        if (samples >= 16000 * 8) {  // need ≥ 8 s of audio
-            (void)was_triggered;
-            run_one_pass_(/*is_final=*/false);
+        // Skip bare periodic wakeups unless the timed cadence is explicitly
+        // re-enabled. Full-session re-diarise on the shared GPU starves the
+        // live perception pipeline (see periodic_enabled_ in the header) —
+        // the default path only diarises on an explicit trigger / finalize.
+        if (was_triggered || periodic_enabled_) {
+            // Only pay the diarisation cost when there is actual audio to
+            // diarise — first pass on an empty buffer wastes ~30 s on Orin.
+            size_t samples = audio_.diarizen_capture_samples();
+            if (samples >= 16000 * 8) {  // need ≥ 8 s of audio
+                run_one_pass_(/*is_final=*/false);
+            }
         }
         lk.lock();
     }
@@ -104,10 +115,21 @@ bool DiarizenPeriodicWorker::run_one_pass_(bool is_final) {
 
     double origin_sec = audio_.diarizen_capture_origin_sec();
 
+    auto t0 = std::chrono::steady_clock::now();
     auto segs = pipeline_.diarize(pcm.data(), (int)pcm.size());
+    auto t1 = std::chrono::steady_clock::now();
+    double wall_sec = std::chrono::duration<double>(t1 - t0).count();
     if (segs.empty()) {
         std::fprintf(stderr, "[diarizen-worker] pipeline.diarize returned empty: %s\n",
                      pipeline_.last_error().c_str());
+        // The score client / WebUI must still get a terminal reply on a final
+        // pass, otherwise they hang waiting for `speaker_diarize_final`.
+        if (is_final) {
+            std::string err = pipeline_.last_error();
+            std::string j = std::string("{\"type\":\"speaker_diarize_final\",\"ok\":false,\"error\":\"")
+                          + (err.empty() ? "no segments" : err) + "\"}";
+            server_.broadcast_text(j);
+        }
         return false;
     }
 
@@ -116,21 +138,28 @@ bool DiarizenPeriodicWorker::run_one_pass_(bool is_final) {
                  "[diarizen-worker] pass=%llu segs=%zu changed_pending=%zu origin=%.2fs final=%d\n",
                  (unsigned long long)seq, segs.size(), changed, origin_sec, (int)is_final);
 
-    // Broadcast WS message (matches the P1 finalize format; only `type`
-    // differs for the periodic case).
+    // Broadcast WS message. Use the array-segment schema understood by BOTH
+    // the live score client (tools/diarizen_live_score.py expects `ok` +
+    // `segments` as [start,end,label]) AND the WebUI panel (which accepts
+    // either array or object segments and reads `segment_count`/`pass`/
+    // `origin_sec`/`changed_pending`).
     std::ostringstream js;
     js << "{\"type\":\"" << (is_final ? "speaker_diarize_final" : "speaker_diarize_partial")
-       << "\",\"pass\":" << seq
+       << "\",\"ok\":true"
+       << ",\"pass\":" << seq
        << ",\"origin_sec\":" << origin_sec
+       << ",\"audio_sec\":" << ((double)n / 16000.0)
+       << ",\"wall_sec\":" << wall_sec
        << ",\"segment_count\":" << segs.size()
+       << ",\"n_segments\":" << segs.size()
        << ",\"changed_pending\":" << changed
        << ",\"segments\":[";
     for (size_t i = 0; i < segs.size(); ++i) {
         const auto& s = segs[i];
         if (i) js << ',';
-        js << "{\"start\":" << (s.start_sec + origin_sec)
-           << ",\"end\":"   << (s.end_sec   + origin_sec)
-           << ",\"label\":\"" << s.label << "\"}";
+        js << '[' << (s.start_sec + origin_sec)
+           << ',' << (s.end_sec   + origin_sec)
+           << ",\"" << s.label << "\"]";
     }
     js << "]}";
     server_.broadcast_text(js.str());

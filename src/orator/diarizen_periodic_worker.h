@@ -83,6 +83,14 @@ private:
     bool                         running_ = false;
     bool                         stop_req_ = false;
     bool                         trigger_req_ = false;
+    // Timed full-session re-diarise is OFF by default. A full re-diarise
+    // of the whole accumulated session every period is O(N²) and, on a
+    // long session, monopolises the GPU for minutes — starving the live
+    // perception pipeline (FRCRN/VAD/speaker-id) that shares the same GPU
+    // and poisoning the CUDA context. Set DEUSRIDET_DIARIZEN_PERIODIC=1 to
+    // re-enable the timed cadence; otherwise the worker only runs on an
+    // explicit trigger_async() or finalize().
+    bool                         periodic_enabled_ = false;
 };
 
 }  // namespace orator

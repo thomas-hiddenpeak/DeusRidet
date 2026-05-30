@@ -387,6 +387,11 @@ void FrcrnGpu::forward_unet(
 int FrcrnGpu::enhance(const float* d_pcm_in, float* d_pcm_out, int n_samples) {
     if (!initialized_) return 0;
     if (n_samples <= kWinLen) return 0;
+    // Boundary guard (mirrors enhance_host): an over-long chunk produces
+    // more STFT frames than the conv buffers were sized for (max_frames_),
+    // overflowing cuDNN's ConvT2d → CUDNN_STATUS_BAD_PARAM → illegal memory
+    // access that poisons the whole CUDA context. Skip enhancement instead.
+    if (n_samples > max_samples_) return 0;
 
     auto t0 = std::chrono::steady_clock::now();
 

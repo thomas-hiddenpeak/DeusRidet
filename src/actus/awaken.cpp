@@ -355,10 +355,17 @@ int awaken(const std::string& webui_dir,
                 audio, *diarizen_native, *diarizen_holdback, server,
                 diarizen_period_sec);
             diarizen_worker->start();
+            const bool periodic_on =
+                (std::getenv("DEUSRIDET_DIARIZEN_PERIODIC") != nullptr) &&
+                std::string(std::getenv("DEUSRIDET_DIARIZEN_PERIODIC")) == "1";
+            std::string periodic_desc =
+                periodic_on
+                    ? ("ON period=" + std::to_string((long)diarizen_period_sec) + "s")
+                    : std::string("OFF (trigger/finalize only)");
             printf("[awaken] DiariZen-v2 Hybrid P2 ENABLED "
-                   "(cap=%.0fs period=%.0fs holdback=%.0fs); "
+                   "(cap=%.0fs holdback=%.0fs; periodic=%s); "
                    "WS commands: diarizen_trigger / diarizen_finalize\n",
-                   diarizen_cap_sec, diarizen_period_sec, diarizen_holdback_sec);
+                   diarizen_cap_sec, diarizen_holdback_sec, periodic_desc.c_str());
         } else if (diarizen_enabled) {
             printf("[awaken] DiariZen-v2 capture ENABLED (cap=%.0fs, "
                    "LLM not loaded so holdback is no-op); "
