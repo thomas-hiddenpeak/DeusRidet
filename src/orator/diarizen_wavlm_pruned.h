@@ -130,6 +130,16 @@ public:
     /// view if absent. Stable for the lifetime of the object.
     const DiarizenWavlmPrunedTensorView* find(const std::string& name) const;
 
+    /// Return a device fp32 copy of the named fp16 weight, converted once
+    /// and cached for the object's lifetime. Subsequent calls for the same
+    /// name reuse the cached buffer — the caller must NOT free it. This
+    /// eliminates the per-chunk half->float conversion + cudaMalloc/cudaFree
+    /// churn that dominated the sliding-window forward (Tegra VMM walk).
+    /// `out_numel`, if non-null, receives the element count. Returns nullptr
+    /// on lookup/alloc failure.
+    float* weight_f32(const std::string& name, std::size_t* out_numel = nullptr) const;
+
+
     /// Diagnostic dump to stderr: per-layer attn_inner / ffn_inner and
     /// total arena bytes. Used by the smoke test target.
     void log_summary() const;
@@ -180,6 +190,10 @@ private:
     std::unordered_map<std::string, DiarizenWavlmPrunedTensorView> tensors_;
     std::vector<DiarizenWavlmPrunedLayerDims> layer_dims_;
     std::vector<std::vector<int>> remaining_heads_;  ///< 24 lists, from sidecar
+
+    /// Lazily-populated device fp32 weight cache (name -> owned GPU ptr),
+    /// freed in release_(). Backs weight_f32(); see its doc for why.
+    mutable std::unordered_map<std::string, float*> f32_cache_;
 
     // Lazily-created compute handles (forward path only; loader does not
     // need them). Declared void* to keep cudnn/cublas headers out of this

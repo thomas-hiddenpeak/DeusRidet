@@ -41,6 +41,27 @@
 namespace deusridet {
 namespace orator {
 
+// Device fp32 weight cache: convert each fp16 weight once, reuse forever.
+// Removes the per-chunk half->float + cudaMalloc/cudaFree churn that
+// dominated the sliding-window forward on Tegra (see header doc).
+float* DiarizenWavlmPruned::weight_f32(const std::string& name,
+                                       std::size_t* out_numel) const {
+    auto it = f32_cache_.find(name);
+    const auto* v = find(name);
+    if (!v || !v->data) {
+        LOG_ERROR(kLog, "tensor missing: %s", name.c_str());
+        return nullptr;
+    }
+    if (out_numel) *out_numel = v->numel;
+    if (it != f32_cache_.end()) return it->second;
+    float* d = nullptr;
+    if (cudaMalloc(&d, v->numel * sizeof(float)) != cudaSuccess) return nullptr;
+    half_to_float_kernel<<<div_ceil_((int)v->numel, kBlock), kBlock>>>(
+        v->data, d, (int)v->numel);
+    f32_cache_.emplace(name, d);
+    return d;
+}
+
 namespace {
 
 // Gather the [16, T, T] relative-position bias from rel_attn_embed.weight
@@ -248,24 +269,15 @@ float* DiarizenWavlmPruned::compute_position_bias_(int T) {
 
 namespace {
 
-// Fetch a per-layer tensor by suffix and return a freshly allocated fp32
-// device buffer (caller frees). Returns nullptr on lookup failure.
+// Fetch a per-layer tensor by suffix and return a cached fp32 device buffer
+// (owned by the object; caller must NOT free). Returns nullptr on lookup
+// failure.
 float* layer_f32(const DiarizenWavlmPruned& self, int layer,
                  const char* suffix, std::size_t* out_numel) {
     char name[256];
     std::snprintf(name, sizeof(name),
                   "wavlm_model.encoder.transformer.layers.%d.%s", layer, suffix);
-    const auto* v = self.find(name);
-    if (!v || !v->data) {
-        LOG_ERROR(kLog, "tensor missing: %s", name);
-        return nullptr;
-    }
-    float* d = nullptr;
-    if (cudaMalloc(&d, v->numel * sizeof(float)) != cudaSuccess) return nullptr;
-    half_to_float_kernel<<<div_ceil_((int)v->numel, kBlock), kBlock>>>(
-        v->data, d, (int)v->numel);
-    if (out_numel) *out_numel = v->numel;
-    return d;
+    return self.weight_f32(name, out_numel);
 }
 
 // Y[T, M] = X[T, K] @ W^T, W is [M, K] row-major. Optionally adds bias[M].
@@ -279,20 +291,11 @@ void linear_(cublasHandle_t blas, const float* d_X, const float* d_W,
                                                                    T, M);
 }
 
-// Fetch a top-level tensor by exact name into a fresh fp32 device buffer.
+// Fetch a top-level tensor by exact name into a cached fp32 device buffer
+// (owned by the object; caller must NOT free).
 float* top_f32(const DiarizenWavlmPruned& self, const char* name,
                std::size_t* out_numel) {
-    const auto* v = self.find(name);
-    if (!v || !v->data) {
-        LOG_ERROR(kLog, "tensor missing: %s", name);
-        return nullptr;
-    }
-    float* d = nullptr;
-    if (cudaMalloc(&d, v->numel * sizeof(float)) != cudaSuccess) return nullptr;
-    half_to_float_kernel<<<div_ceil_((int)v->numel, kBlock), kBlock>>>(
-        v->data, d, (int)v->numel);
-    if (out_numel) *out_numel = v->numel;
-    return d;
+    return self.weight_f32(name, out_numel);
 }
 
 // Learned weighted sum over the 25 hidden taps. taps is [25, T, H] frame-
@@ -395,9 +398,7 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int T,
         cudaFree(xn);
         cudaFree(Q); cudaFree(K); cudaFree(V); cudaFree(gate); cudaFree(d_rh);
         cudaFree(S); cudaFree(ctx); cudaFree(attn_out);
-        cudaFree(Wq); cudaFree(bq); cudaFree(Wk); cudaFree(bk); cudaFree(Wv);
-        cudaFree(bv); cudaFree(Wo); cudaFree(bo); cudaFree(Wg); cudaFree(bg);
-        cudaFree(cst); cudaFree(ln_w); cudaFree(ln_b);
+        // Wq..ln_b are device-resident in the f32 weight cache; not freed here.
     }
 
     // ---- feed forward (PRE-NORM): x = x + output_dense(gelu(
@@ -408,8 +409,7 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int T,
     float* fn = nullptr;
     cudaMalloc(&fn, (size_t)T * H * sizeof(float));
     row_layer_norm_to_kernel<<<T, kBlock>>>(d_hidden, fn, fln_w, fln_b, T, H);
-    cudaFree(fln_w);
-    cudaFree(fln_b);
+    // fln_w/fln_b are cache-owned; not freed here.
 
     float* Wi = layer_f32(*this, layer, "feed_forward.intermediate_dense.weight", nullptr);
     float* bi = layer_f32(*this, layer, "feed_forward.intermediate_dense.bias", nullptr);
@@ -429,7 +429,7 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int T,
     cudaFree(fn);
     cudaFree(inter);
     cudaFree(ff);
-    cudaFree(Wi); cudaFree(bi); cudaFree(Wo2); cudaFree(bo2);
+    // Wi/bi/Wo2/bo2 are cache-owned; not freed here.
     return true;
 }
 
@@ -522,14 +522,13 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail(const float* pcm,
     cudaMalloc(&d_sum, TH * sizeof(float));
     if (!d_ws || !d_sum) {
         cublasDestroy(blas); cudaFree(d_taps);
-        if (d_ws) cudaFree(d_ws);
         if (d_sum) cudaFree(d_sum);
         return {};
     }
     weighted_sum_kernel<<<div_ceil_((int)TH, kBlock), kBlock>>>(d_taps, d_ws,
                                                                 d_sum, TH);
     cudaFree(d_taps);
-    cudaFree(d_ws);
+    // d_ws is cache-owned; not freed here.
 
     // proj: [T, 256] = summed[T, 1024] @ proj.weight^T + proj.bias.
     const int D = 256;
@@ -539,26 +538,23 @@ std::vector<float> DiarizenWavlmPruned::debug_lnorm_tail(const float* pcm,
     cudaMalloc(&d_proj, (size_t)T * D * sizeof(float));
     if (!d_pw || !d_pb || !d_proj) {
         cublasDestroy(blas); cudaFree(d_sum);
-        if (d_pw) cudaFree(d_pw);
-        if (d_pb) cudaFree(d_pb);
         if (d_proj) cudaFree(d_proj);
         return {};
     }
     linear_(blas, d_sum, d_pw, d_pb, d_proj, T, D, H);
     cublasDestroy(blas);
-    cudaFree(d_sum); cudaFree(d_pw); cudaFree(d_pb);
+    cudaFree(d_sum);
+    // d_pw/d_pb are cache-owned; not freed here.
 
     // lnorm: LayerNorm(256) in place over the feature dim.
     float* d_lw = top_f32(*this, "lnorm.weight", nullptr);
     float* d_lb = top_f32(*this, "lnorm.bias", nullptr);
     if (!d_lw || !d_lb) {
         cudaFree(d_proj);
-        if (d_lw) cudaFree(d_lw);
-        if (d_lb) cudaFree(d_lb);
         return {};
     }
     row_layer_norm_to_kernel<<<T, kBlock>>>(d_proj, d_proj, d_lw, d_lb, T, D);
-    cudaFree(d_lw); cudaFree(d_lb);
+    // d_lw/d_lb are cache-owned; not freed here.
 
     if (cudaDeviceSynchronize() != cudaSuccess) {
         cudaFree(d_proj);

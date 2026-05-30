@@ -80,6 +80,10 @@ void DiarizenWavlmPruned::release_() {
         arena_ = nullptr;
     }
     arena_bytes_ = 0;
+    for (auto& kv : f32_cache_) {
+        if (kv.second) cudaFree(kv.second);
+    }
+    f32_cache_.clear();
     tensors_.clear();
     layer_dims_.clear();
     remaining_heads_.clear();
