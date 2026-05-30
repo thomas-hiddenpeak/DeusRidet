@@ -42,6 +42,7 @@
 #include "conscientia/conscientia_facade.h"
 #include "memoria/cache_manager.h"
 #include "communis/timeline_logger.h"
+#include "vires/vires_facade.h"
 
 namespace deusridet {
 
@@ -333,6 +334,14 @@ int awaken(const std::string& webui_dir,
         fprintf(stderr, "[awaken] Failed to start audio pipeline\n");
         return 1;
     }
+
+    // Vires — autonomic GPU compute substrate. Construct the process-global
+    // arbiter once here so it queries the device's cooperative stream-priority
+    // range (the load-bearing feasibility assumption) and becomes observable.
+    // V1 delivery core: consumers route their streams through Vires in a later
+    // increment; this boot touch only lights up the substrate. Compute only —
+    // GPU memory remains Memoria's charge.
+    (void)vires::Arbiter::instance();
 
     // DiariZen-v2 capture + native pipeline. Off by default; enable with
     // DEUSRIDET_DIARIZEN_ENABLE=1. The in-process CUDA pipeline is loaded

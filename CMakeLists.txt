@@ -64,6 +64,17 @@ add_library(communis STATIC ${COMMUNIS_SOURCES})
 target_link_libraries(communis PRIVATE CUDA::cudart)
 
 # ============================================================================
+# Vires static library (vires — autonomic GPU compute substrate allocator)
+# Compute-only: priority streams + consumer registry. Memory stays with Memoria.
+# ============================================================================
+file(GLOB_RECURSE VIRES_SOURCES
+    "src/vires/*.cpp"
+)
+
+add_library(vires STATIC ${VIRES_SOURCES})
+target_link_libraries(vires PRIVATE communis CUDA::cudart)
+
+# ============================================================================
 # Network layer static library (nexus — WebSocket + HTTP server)
 # ============================================================================
 file(GLOB_RECURSE NEXUS_SOURCES
@@ -137,7 +148,7 @@ add_executable(deusridet
     src/sensus/auditus/auditus_facade.cpp
     src/sensus/auditus/auditus_facade_broadcasts.cpp
 )
-target_link_libraries(deusridet PRIVATE machina memoria conscientia communis nexus sensus orator stdc++fs rt dl)
+target_link_libraries(deusridet PRIVATE machina memoria conscientia communis nexus sensus orator vires stdc++fs rt dl)
 
 # Embed RPATH (not RUNPATH) so the binary finds CUDA 12.9 libs.
 # DT_RPATH takes precedence over ldconfig cache, unlike DT_RUNPATH.

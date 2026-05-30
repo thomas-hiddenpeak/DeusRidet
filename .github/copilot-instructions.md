@@ -151,6 +151,7 @@ Long-form design documents for every subsystem live under
 | 10 | Nexus (WebUI, WS, HTTP) | [en](../docs/en/architecture/10-nexus.md) | [zh](../docs/zh/architecture/10-nexus.md) |
 | 11 | Machina (stack, quant, models, budget) | [en](../docs/en/architecture/11-machina.md) | [zh](../docs/zh/architecture/11-machina.md) |
 | 12 | DiariZen reclusterer (speaker re-attribution) | [en](../docs/en/architecture/12-diarizen.md) | [zh](../docs/zh/architecture/12-diarizen.md) |
+| 13 | Vires (GPU substrate allocator) | [en](../docs/en/architecture/13-vires.md) | [zh](../docs/zh/architecture/13-vires.md) |
 
 ## Latin Nomenclatura (glance-reference)
 
@@ -172,6 +173,7 @@ Long-form design documents for every subsystem live under
 | Instrumenta | Tools | MCP, function calling, skills |
 | Actus | Action/Entry | External CLI command entry points |
 | Tempus | Time | Three-tier temporal architecture |
+| Vires | Vital force | GPU substrate allocator (autonomic) |
 
 Full binding rules (including forbidden names, CamelCase conventions,
 three-level philosophical anchors) are in

@@ -1,0 +1,85 @@
+# Vires — The Conserved Vital Force (GPU Substrate Allocator)
+
+> *Latin*: **vires** (plural of *vis*) — "available strength; resources;
+> the forces one can bring to bear". Not a faculty of mind — the finite
+> metabolic substrate that every faculty must draw from to act.
+
+## Philosophical Role
+
+The brain runs on ~20 W. That budget is fixed; what changes is *where*
+the blood, oxygen, and glucose flow. Active regions pull substrate
+toward themselves through neurovascular coupling — astrocyte-mediated,
+demand-driven, and entirely below the level of consciousness. No
+"decision" allocates the energy; the act of being active *is* the
+request.
+
+Vires is that **arterial** substrate layer for DeusRidet: it routes
+**compute** — the metabolic delivery of GPU work. The scarce resource it
+governs is GPU *throughput* (SM occupancy, kernel-launch ordering,
+compute bandwidth). Every consumer — Sensus (auditus/visus), Cogitatio,
+Vox, Somnium, and Conscientia itself — issues GPU work, and Vires
+arbitrates the limited compute among the concurrent requests so that
+foreground perception and prefill are never starved by background
+refinement.
+
+Vires is **not** a mental faculty and **not** a scheduler-of-intent. It
+neither decides what to think nor selects what to attend to. It only
+answers a metabolic question: *given these concurrent demands on a
+finite GPU, who computes now?*
+
+## Scope Boundary — Compute, Not Memory
+
+Vires governs **GPU compute allocation only**. It does **not** manage GPU
+memory as a whole. The unified 64 GB DRAM — model weights, KV cache,
+long-term memory indices, every LLM-related allocation — is the domain of
+**Memoria** (the hippocampus / memory system). Vires never sizes, evicts,
+or relocates an LLM allocation.
+
+The one memory-adjacent task Vires may own is **reclaiming the
+metabolic waste of non-LLM GPU work**: the transient scratch / arenas
+left by auditus, orator (DiariZen), vox, and somnium passes once they
+complete. Even here Vires only touches substrate it handed out for
+non-LLM compute; anything LLM-related is deferred to Memoria. This is the
+glymphatic clearance of *non-LLM* by-products, never a general memory
+manager.
+
+## Two Sibling Drivers, Not a Hierarchy
+
+Perception feeds two distinct autonomic quantities, side by side:
+
+- **Vigilia** (lives in `src/conscientia/scheduler.*`) reads sensor
+  *presence* (sound, camera, direct injection) and sets wakefulness —
+  *how deeply awake should we be?*
+- **Vires** (this subsystem) reads the *actual GPU requests* emitted by
+  conscious content (auditus/visus/cogitatio/conscientia) and answers —
+  *given these concurrent demands, who gets substrate now?*
+
+They share a source (perception) but measure different things. They are
+**siblings, not parent and child.** Vires does **not** read Vigilia, and
+Vigilia does **not** read Vires.
+
+## Why "Idle Feeds Dreaming" Is Emergent, Not Coupled
+
+When wakefulness is low, foreground consumers simply stop issuing
+requests. Vires then finds spare substrate and background refinement /
+Somnium consolidation naturally fills it. This behaviour falls out of
+the demand structure itself — Vires never queries wakefulness to make it
+happen. "Even idle is thought" is realised without any cross-layer wire.
+
+## Invariants
+
+- **One-way isolation.** Vires never includes a Conscientia / Vigilia
+  header and never reaches up into a consumer. Consumers submit work to
+  Vires; Vires only routes compute.
+- **Compute, not memory.** Vires allocates GPU throughput, never LLM
+  memory. GPU memory as a whole belongs to Memoria. Vires' only memory
+  task is reclaiming non-LLM GPU scratch it itself handed out.
+- **Demand-driven.** Vires has no internal model of intent or wakefulness.
+  Its only inputs are the live requests submitted by consumers and a
+  static per-consumer priority class.
+- **Foreground is never starved.** Background-class work yields within a
+  bounded window so high-priority perception + prefill + decode always
+  make progress.
+- **Wakefulness throttling stays at the source.** Cutting GPU work when
+  drowsy (e.g. `scheduler.h` `probe_threshold`) lives in the consumer
+  (Conscientia), not in Vires. Vires only ever sees "fewer requests".

@@ -166,6 +166,7 @@ All major components are named in Latin. The Latin name is not decoration
 | Instrumenta | Tools | MCP client, tool registry, skill management |
 | Actus | Action/Entry | External command entry points (CLI dispatch) |
 | Tempus | Time | Three-tier temporal architecture |
+| Vires | Vital force | GPU substrate allocator (autonomic, demand-driven) |
 
 Directory names use the Latin form: `src/conscientia/`, `src/memoria/`, etc.
 Class names use CamelCase with Latin root: `ConscientiaStream`, `MachinaModel`.
