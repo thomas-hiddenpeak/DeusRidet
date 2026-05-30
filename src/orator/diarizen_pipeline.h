@@ -26,10 +26,13 @@ namespace orator {
 // /home/rm01/models/dev/diarizen_v2 layout used by the 93.5% live verdict.
 struct DiarizenPipelineConfig {
     // WavLM-pruned encoder + 4-layer Conformer EEND head (segmentation).
-    std::string wavlm_safetensors;
-    std::string conformer_safetensors;
+    std::string wavlm_safetensors =
+        "/home/rm01/models/dev/diarizen_v2/wavlm_pruned.safetensors";
+    std::string conformer_safetensors =
+        "/home/rm01/models/dev/diarizen_v2/conformer_head.safetensors";
     // WeSpeaker ResNet34-LM speaker embedder.
-    std::string resnet34_safetensors;
+    std::string resnet34_safetensors =
+        "/home/rm01/models/dev/diarizen_v2/wespeaker_resnet34.safetensors";
     // Directory holding xvec_transform.npz + plda.npz (VBx priors).
     std::string plda_dir = "/home/rm01/models/dev/diarizen_v2";
 
@@ -66,6 +69,17 @@ class DiarizenPipeline {
     std::vector<DiarizenSegment> diarize(const float* wave, int n_samples);
 
     const std::string& last_error() const noexcept;
+
+    // --- bit-equality debug taps (P3a harness) -----------------------------
+    // @role get_embeddings windowing tap. Given a waveform and the binarized
+    //   segmentation [num_chunks * num_frames * num_speakers], reproduce
+    //   pyannote get_embeddings: crop each chunk (mode="pad"), build the
+    //   clean/full activity mask, and run the ResNet34 embedder per
+    //   (chunk, speaker). Writes embeddings [num_chunks * num_speakers * 256].
+    //   Requires the embedder to be loaded. Returns false on error.
+    bool debug_get_embeddings(const float* wave, int n_samples,
+                              const float* seg, int num_chunks, int num_frames,
+                              int num_speakers, std::vector<float>& emb_out);
 
    private:
     struct Impl;

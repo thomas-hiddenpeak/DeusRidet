@@ -320,6 +320,13 @@ target_include_directories(test_diarizen_clustering_biteq
     PRIVATE ${CMAKE_SOURCE_DIR}/src /usr/include/eigen3)
 target_link_libraries(test_diarizen_clustering_biteq
     PRIVATE orator communis machina CUDA::cudart CUDA::cublas cudnn)
+# DiariZen-v2 native CUDA port — P3a pipeline bit-eq (get_embeddings windowing).
+add_executable(test_diarizen_pipeline_biteq
+    tests/test_diarizen_pipeline_biteq.cpp)
+target_include_directories(test_diarizen_pipeline_biteq
+    PRIVATE ${CMAKE_SOURCE_DIR}/src /usr/include/eigen3)
+target_link_libraries(test_diarizen_pipeline_biteq
+    PRIVATE orator sensus communis machina CUDA::cudart CUDA::cublas CUDA::cufft cudnn)
 # ============================================================================
 add_executable(test_overlap_separator tests/test_overlap_separator.cpp)
 target_include_directories(test_overlap_separator PRIVATE ${CMAKE_SOURCE_DIR})
