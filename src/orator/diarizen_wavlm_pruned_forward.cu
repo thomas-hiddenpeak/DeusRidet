@@ -83,57 +83,32 @@ __global__ void normalize_waveform_kernel(float* __restrict__ x, int n,
 }
 
 // Per-frame LayerNorm over the channel dimension, operating in place on a
-// channel-major [C, T] buffer. One block per frame t; threads stride over
-// channels reading data[c * T + t]. eps = 1e-5 (torch default).
+// channel-major [C, T] buffer. One thread per frame t; the thread reduces
+// serially over channels reading data[c * T + t]. Because neighbouring threads
+// own neighbouring frames, every load data[c*T + (t0..t0+31)] is a contiguous
+// 32-float run -> fully coalesced. (The earlier one-block-per-frame version
+// strided each warp by T and was the pipeline's top kernel at 20%.) eps = 1e-5.
 __global__ void layer_norm_channels_kernel(float* __restrict__ data,
                                            const float* __restrict__ gamma,
                                            const float* __restrict__ beta,
                                            int C, int T) {
-    int t = blockIdx.x;
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= T) return;
 
     float sum = 0.0f;
-    for (int c = threadIdx.x; c < C; c += blockDim.x)
-        sum += data[c * T + t];
-    for (int o = warpSize / 2; o > 0; o >>= 1)
-        sum += __shfl_down_sync(0xffffffff, sum, o);
-
-    __shared__ float s_buf[32];
-    int lane = threadIdx.x % warpSize;
-    int warp = threadIdx.x / warpSize;
-    if (lane == 0) s_buf[warp] = sum;
-    __syncthreads();
-    __shared__ float s_mean, s_inv;
-    if (threadIdx.x == 0) {
-        float tot = 0.0f;
-        int nw = (blockDim.x + warpSize - 1) / warpSize;
-        for (int i = 0; i < nw; ++i) tot += s_buf[i];
-        s_mean = tot / C;
-    }
-    __syncthreads();
-    float mean = s_mean;
+    for (int c = 0; c < C; ++c) sum += data[(long)c * T + t];
+    float mean = sum / C;
 
     float vs = 0.0f;
-    for (int c = threadIdx.x; c < C; c += blockDim.x) {
-        float d = data[c * T + t] - mean;
+    for (int c = 0; c < C; ++c) {
+        float d = data[(long)c * T + t] - mean;
         vs += d * d;
     }
-    for (int o = warpSize / 2; o > 0; o >>= 1)
-        vs += __shfl_down_sync(0xffffffff, vs, o);
-    if (lane == 0) s_buf[warp] = vs;
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        float tot = 0.0f;
-        int nw = (blockDim.x + warpSize - 1) / warpSize;
-        for (int i = 0; i < nw; ++i) tot += s_buf[i];
-        s_inv = rsqrtf(tot / C + 1e-5f);
-    }
-    __syncthreads();
-    float inv = s_inv;
+    float inv = rsqrtf(vs / C + 1e-5f);
 
-    for (int c = threadIdx.x; c < C; c += blockDim.x) {
-        float v = (data[c * T + t] - mean) * inv;
-        data[c * T + t] = v * gamma[c] + beta[c];
+    for (int c = 0; c < C; ++c) {
+        long idx = (long)c * T + t;
+        data[idx] = (data[idx] - mean) * inv * gamma[c] + beta[c];
     }
 }
 
@@ -438,8 +413,8 @@ float* DiarizenWavlmPruned::run_cnn_(const float* pcm, int n_samples,
             w_lng[i]->data, ln_gb, Co);
         half_to_float_kernel<<<div_ceil_(Co, kBlock), kBlock>>>(
             w_lnb[i]->data, ln_gb + Co, Co);
-        layer_norm_channels_kernel<<<To, kBlock>>>(dst_act, ln_gb, ln_gb + Co,
-                                                   Co, To);
+        layer_norm_channels_kernel<<<div_ceil_(To, kBlock), kBlock>>>(
+            dst_act, ln_gb, ln_gb + Co, Co, To);
         gelu_exact_kernel<<<div_ceil_(Co * To, kBlock), kBlock>>>(dst_act,
                                                                   Co * To);
         cudaFree(ln_gb);
