@@ -17,6 +17,7 @@
 #pragma once
 
 #include "gptq.h"
+#include "../vires/vires_types.h"
 #include <cuda_fp16.h>
 #include <string>
 #include <vector>
@@ -303,6 +304,11 @@ struct InferenceState {
     cudaStream_t compute_stream = nullptr;
     // Auxiliary stream for concurrent MLP gate+up projections
     cudaStream_t aux_stream     = nullptr;
+    // Vires Foreground handles for the two streams above (decode/prefill is
+    // the highest-urgency GPU work; these preempt the Background DiariZen
+    // pass at kernel-launch boundaries). Vires owns the stream lifecycles.
+    vires::ConsumerId vires_compute_id = vires::kInvalidConsumer;
+    vires::ConsumerId vires_aux_id     = vires::kInvalidConsumer;
     cudaEvent_t  aux_fork_event = nullptr;  // main→aux dependency (X is ready)
     cudaEvent_t  aux_join_event = nullptr;  // aux→main dependency (up_proj done)
     // Graph state

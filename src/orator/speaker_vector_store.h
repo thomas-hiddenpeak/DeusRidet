@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include "../vires/vires_types.h"
+
 #include <cuda_runtime.h>
 #include <mutex>
 #include <string>
@@ -258,7 +260,10 @@ private:
     // existing speakers, reject registration to avoid creating duplicates.
     float min_margin_ = 0.08f;
 
+    // Foreground priority stream from Vires (live speaker matching/EMA must
+    // preempt the Background DiariZen pass); Vires owns its lifecycle.
     cudaStream_t stream_ = nullptr;
+    vires::ConsumerId vires_id_ = vires::kInvalidConsumer;
 };
 
 } // namespace deusridet

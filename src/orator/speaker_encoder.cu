@@ -16,6 +16,7 @@
 
 #include "speaker_encoder.h"
 #include "../communis/log.h"
+#include "../vires/vires_facade.h"
 
 #include <algorithm>
 #include <cmath>
@@ -279,7 +280,8 @@ SpeakerEncoder::SpeakerEncoder() = default;
 
 SpeakerEncoder::~SpeakerEncoder() {
     scratch_.free();
-    if (stream_) cudaStreamDestroy(stream_);
+    if (vires_id_ != vires::kInvalidConsumer)
+        vires::Arbiter::instance().unregister_consumer(vires_id_);  // destroys stream_
     if (cublas_) cublasDestroy(cublas_);
     for (auto& kv : gpu_tensors_) {
         if (kv.second) cudaFree(kv.second);
@@ -313,7 +315,11 @@ bool SpeakerEncoder::init(const SpeakerEncoderConfig& cfg) {
         total_bytes += bytes;
     }
 
-    cudaStreamCreate(&stream_);
+    // Foreground priority stream from Vires: live speaker ID must preempt the
+    // Background DiariZen refinement pass at kernel-launch boundaries.
+    vires_id_ = vires::Arbiter::instance().register_consumer(
+        "orator_spk_encoder", vires::Priority::Foreground);
+    stream_ = vires::Arbiter::instance().stream(vires_id_);
     ensure_scratch(1000);  // pre-allocate for typical segments
 
     initialized_ = true;

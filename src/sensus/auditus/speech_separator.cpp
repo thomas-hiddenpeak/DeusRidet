@@ -12,6 +12,7 @@
 
 #include "speech_separator.h"
 #include "../../communis/log.h"
+#include "../../vires/vires_facade.h"
 
 #include <algorithm>
 #include <cassert>
@@ -55,12 +56,15 @@ bool SpeechSeparator::ensure_loaded() {
     if (loaded_) return true;
     if (!initialized_) return false;
 
-    // Create CUDA stream for I/O transfers.
-    cudaStreamCreate(&cuda_stream_);
+    // Foreground priority stream from Vires: overlap separation is on the live
+    // perception path and must preempt the Background DiariZen pass. The same
+    // stream is handed to MossFormer2 so its compute shares the priority.
+    vires_id_ = vires::Arbiter::instance().register_consumer(
+        "auditus_separator", vires::Priority::Foreground);
+    cuda_stream_ = vires::Arbiter::instance().stream(vires_id_);
 
-    // Initialize native MossFormer2 model.
-    // MossFormer2::init creates its own internal stream for compute.
-    if (!mf2_.init(cfg_.model_path, cfg_.max_chunk)) {
+    // Initialize native MossFormer2 model on the same Foreground stream.
+    if (!mf2_.init(cfg_.model_path, cfg_.max_chunk, cuda_stream_)) {
         LOG_ERROR("Separator", "MossFormer2 init failed: %s", cfg_.model_path.c_str());
         return false;
     }
@@ -81,7 +85,11 @@ void SpeechSeparator::unload() {
     if (d_input_)   { cudaFree(d_input_);   d_input_   = nullptr; }
     if (d_source1_) { cudaFree(d_source1_); d_source1_ = nullptr; }
     if (d_source2_) { cudaFree(d_source2_); d_source2_ = nullptr; }
-    if (cuda_stream_) { cudaStreamDestroy(cuda_stream_); cuda_stream_ = nullptr; }
+    if (vires_id_ != vires::kInvalidConsumer) {
+        vires::Arbiter::instance().unregister_consumer(vires_id_);  // destroys cuda_stream_
+        vires_id_ = vires::kInvalidConsumer;
+        cuda_stream_ = nullptr;
+    }
     loaded_ = false;
 }
 

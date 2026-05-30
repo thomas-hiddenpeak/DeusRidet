@@ -12,6 +12,7 @@
 #include "marlin.h"
 #include "allocator.h"
 #include "../communis/log.h"
+#include "../vires/vires_facade.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstring>
@@ -315,11 +316,19 @@ bool InferenceState::allocate(int max_seq) {
     cudaHostAlloc(&h_pos_pinned, sizeof(int), cudaHostAllocDefault);
     cudaHostAlloc(&h_token_pinned, sizeof(int), cudaHostAllocDefault);
 
-    // Compute stream for graph capture (cannot capture on default stream 0)
-    cudaStreamCreate(&compute_stream);
+    // Compute stream for graph capture (cannot capture on default stream 0).
+    // Drawn from Vires with Foreground priority: decode/prefill is the
+    // highest-urgency GPU work and must preempt the Background DiariZen pass.
+    // Vires streams are cudaStreamNonBlocking + priority — graph-capturable.
+    vires_compute_id = vires::Arbiter::instance().register_consumer(
+        "machina_compute", vires::Priority::Foreground);
+    compute_stream = vires::Arbiter::instance().stream(vires_compute_id);
 
-    // Auxiliary stream for concurrent MLP gate+up projections (prefill only)
-    cudaStreamCreate(&aux_stream);
+    // Auxiliary stream for concurrent MLP gate+up projections (prefill only),
+    // also Foreground so it shares the urgency of the main compute stream.
+    vires_aux_id = vires::Arbiter::instance().register_consumer(
+        "machina_aux", vires::Priority::Foreground);
+    aux_stream = vires::Arbiter::instance().stream(vires_aux_id);
     cudaEventCreateWithFlags(&aux_fork_event, cudaEventDisableTiming);
     cudaEventCreateWithFlags(&aux_join_event, cudaEventDisableTiming);
 
@@ -372,8 +381,14 @@ void InferenceState::free() {
     if (h_token_pinned) { cudaFreeHost(h_token_pinned); h_token_pinned = nullptr; }
     if (cuda_graph_exec) { cudaGraphExecDestroy(cuda_graph_exec); cuda_graph_exec = nullptr; }
     if (cuda_graph) { cudaGraphDestroy(cuda_graph); cuda_graph = nullptr; }
-    if (compute_stream) { cudaStreamDestroy(compute_stream); compute_stream = nullptr; }
-    if (aux_stream) { cudaStreamDestroy(aux_stream); aux_stream = nullptr; }
+    if (vires_compute_id != vires::kInvalidConsumer) {
+        vires::Arbiter::instance().unregister_consumer(vires_compute_id);  // destroys compute_stream
+        vires_compute_id = vires::kInvalidConsumer; compute_stream = nullptr;
+    }
+    if (vires_aux_id != vires::kInvalidConsumer) {
+        vires::Arbiter::instance().unregister_consumer(vires_aux_id);  // destroys aux_stream
+        vires_aux_id = vires::kInvalidConsumer; aux_stream = nullptr;
+    }
     if (aux_fork_event) { cudaEventDestroy(aux_fork_event); aux_fork_event = nullptr; }
     if (aux_join_event) { cudaEventDestroy(aux_join_event); aux_join_event = nullptr; }
     graph_captured = false;

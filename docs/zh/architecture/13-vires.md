@@ -154,6 +154,29 @@ Vigilia 头。对外唯一缝隙是 `vires_facade.h`，与其它子系统 facade
 | **V3——非 LLM 清除** | 非 LLM 临时显存的回收回调，与 Memoria 协调 | 遍历完成时释放非 LLM 临时显存；不触碰任何 LLM 显存 |
 | **D2——延后** | 把 `probe_threshold` 的 GPU 门控迁入 Vires | backlog；需重过 live gate |
 
+### 建造进度（2026-05-30）
+
+- **V1——递送核：已完成**（提交 `e3ef92b`）。`vires::Arbiter` 单例 +
+  `register_consumer(name, Priority)` + 经 `cudaStreamCreateWithPriority`
+  为每个消费者建优先级 stream。启动干净：`[vires] arbiter online —
+  priority range [greatest=-5, least=0], background slice 2000 us`
+  （Orin 暴露 6 个优先级档）。
+- **首个 Background 消费者已接入：已完成**（提交 `afe9a15`）。原生
+  DiariZen 前向路径（ResNet34 嵌入器 + Conformer 头 + WavLM-pruned 编码器）
+  经各子模型的 `set_stream(cudaStream_t)` 穿到 `"diarizen"` **Background**
+  流上（`cublasSetStream` / `cudnnSetStream` + 每个 `<<<…>>>` 携带该流 +
+  异步拷贝）。`DiarizenPipeline::load` 注册该消费者并绑定其流。流的选择
+  *只改变调度优先级* —— 同 kernel、同顺序、同数学 —— 因此逐位一致
+  （P3a fixture bit-eq PASS 28/28，`min_cos 0.999980`），实测精度维持：
+  `accuracy(tests/test.mp3, diarization): 93.6% → 93.6% (Δ = 0.0 pp)`。
+  收益在于争用：移除 Tegra 默认流屏障后，实测 finalize 墙钟从
+  **685 s → 359.6 s**（RTF 0.19 → 0.099），0 CUDA 错误。
+- **所有 GPU 消费者都将接入。** DiariZen Background 消费者是第一个；
+  其余每个 GPU 消费者（machina prefill/decode、auditus 感知、Vox、
+  Somnium）都正在迁移以向 Vires 声明其代谢类别 —— 感知/prefill/decode 为
+  **Foreground**，精修/巩固为 **Background** —— 使优先级次序由基质强制，
+  而非任由默认流调度的偶然性决定。
+
 ## 延后项（现在命名，以消除日后歧义）
 
 - **D2——把 `probe_threshold` 的 GPU 门控迁入 Vires。** 长远看，"犯困就减

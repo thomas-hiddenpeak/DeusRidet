@@ -27,6 +27,7 @@
 #include "whisper_mel.h"
 #include "machina/tokenizer.h"
 #include "machina/safetensors.h"
+#include "vires/vires_types.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -101,6 +102,7 @@ private:
     int max_prompt_len_ = 0;
 
     cudaStream_t stream_ = 0;
+    vires::ConsumerId vires_id_ = vires::kInvalidConsumer;
     bool loaded_ = false;
 
     void load_weights(const std::string& model_dir);

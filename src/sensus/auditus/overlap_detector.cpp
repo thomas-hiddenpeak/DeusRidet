@@ -11,6 +11,7 @@
 
 #include "overlap_detector.h"
 #include "../../communis/log.h"
+#include "../../vires/vires_facade.h"
 
 #include <algorithm>
 #include <cassert>
@@ -25,14 +26,21 @@ OverlapDetector::OverlapDetector() = default;
 OverlapDetector::~OverlapDetector() {
     if (d_input_)  { cudaFree(d_input_);  d_input_  = nullptr; }
     if (d_output_) { cudaFree(d_output_); d_output_ = nullptr; }
-    if (stream_)   { cudaStreamDestroy(stream_); stream_ = nullptr; }
+    if (vires_id_ != vires::kInvalidConsumer) {
+        vires::Arbiter::instance().unregister_consumer(vires_id_);  // destroys stream_
+        vires_id_ = vires::kInvalidConsumer;
+        stream_ = nullptr;
+    }
 }
 
 bool OverlapDetector::init(const OverlapDetectorConfig& cfg) {
     cfg_ = cfg;
 
-    // Create CUDA stream.
-    cudaStreamCreate(&stream_);
+    // Foreground priority stream from Vires: the overlap VAD gate runs on the
+    // live perception path. PyannoteSeg3 inherits this stream via init().
+    vires_id_ = vires::Arbiter::instance().register_consumer(
+        "auditus_overlap", vires::Priority::Foreground);
+    stream_ = vires::Arbiter::instance().stream(vires_id_);
 
     // Init native CUDA model.
     if (!seg3_.init(cfg_.model_path, stream_)) {

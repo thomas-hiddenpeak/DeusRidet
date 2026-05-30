@@ -15,6 +15,7 @@
 #include "asr_engine.h"
 #include "asr_engine_itn.h"
 #include "asr_ops.h"
+#include "vires/vires_facade.h"
 
 #include <cstring>
 #include <cstdio>
@@ -56,7 +57,8 @@ ASREngine::~ASREngine() {
     if (token_id_gpu_)      cudaFree(token_id_gpu_);
     if (prompt_tokens_gpu_) cudaFree(prompt_tokens_gpu_);
     if (rep_tokens_gpu_)    cudaFree(rep_tokens_gpu_);
-    if (stream_)            cudaStreamDestroy(stream_);
+    if (vires_id_ != vires::kInvalidConsumer)
+        vires::Arbiter::instance().unregister_consumer(vires_id_);  // destroys stream_
 }
 
 // ----- Prompt construction -----
@@ -219,8 +221,11 @@ void ASREngine::load_model(const std::string& model_dir) {
     }
     fprintf(stderr, "ASR: tokenizer loaded — vocab %d\n", tokenizer_.vocab_size());
 
-    // 3. Create CUDA stream
-    cudaStreamCreate(&stream_);
+    // 3. Foreground priority stream from Vires: ASR runs continuously on the
+    //    live audio path and must preempt the Background DiariZen pass.
+    vires_id_ = vires::Arbiter::instance().register_consumer(
+        "auditus_asr", vires::Priority::Foreground);
+    stream_ = vires::Arbiter::instance().stream(vires_id_);
 
     // 4. Create components
     whisper_mel_ = std::make_unique<WhisperMel>();

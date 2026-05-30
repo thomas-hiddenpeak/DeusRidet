@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include "../vires/vires_types.h"
+
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
@@ -129,9 +131,12 @@ private:
     std::unordered_map<std::string, int> tensor_sizes_;
     cublasHandle_t cublas_ = nullptr;
 
-    // Persistent scratch + stream.
+    // Persistent scratch + stream. The stream is drawn from Vires with
+    // Foreground priority (live speaker-ID must never be starved by the
+    // Background DiariZen pass); Vires owns its lifecycle.
     SpeakerScratchPool scratch_;
     cudaStream_t stream_ = nullptr;
+    vires::ConsumerId vires_id_ = vires::kInvalidConsumer;
     int scratch_max_T_ = 0;
 };
 

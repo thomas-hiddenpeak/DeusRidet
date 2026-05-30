@@ -15,6 +15,7 @@
 
 #include "speaker_vector_store.h"
 #include "../communis/log.h"
+#include "../vires/vires_facade.h"
 
 #include <algorithm>
 #include <cassert>
@@ -216,7 +217,11 @@ SpeakerVectorStore::SpeakerVectorStore(const std::string& label, int dim,
     assert(dim % 4 == 0 && "dim must be divisible by 4 for float4 vectorization");
     assert(max_exemplars >= 1 && max_exemplars <= 64);
 
-    cudaStreamCreate(&stream_);
+    // Foreground priority stream from Vires: live speaker matching/EMA updates
+    // must preempt the Background DiariZen refinement pass.
+    vires_id_ = vires::Arbiter::instance().register_consumer(
+        "orator_spk_store_" + label, vires::Priority::Foreground);
+    stream_ = vires::Arbiter::instance().stream(vires_id_);
 
     capacity_ = initial_capacity;
     size_t emb_bytes = (size_t)capacity_ * dim_ * sizeof(float);
@@ -257,7 +262,8 @@ SpeakerVectorStore::~SpeakerVectorStore() {
     cudaFree(d_result_);
 
     if (h_result_) cudaFreeHost(h_result_);
-    if (stream_)   cudaStreamDestroy(stream_);
+    if (vires_id_ != vires::kInvalidConsumer)
+        vires::Arbiter::instance().unregister_consumer(vires_id_);  // destroys stream_
 }
 
 // ============================================================================

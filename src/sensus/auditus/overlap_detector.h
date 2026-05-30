@@ -19,6 +19,7 @@
 #pragma once
 
 #include "pyannote_seg3.h"
+#include "../../vires/vires_types.h"
 
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -78,6 +79,7 @@ private:
 
     PyannoteSeg3 seg3_;
     cudaStream_t stream_ = nullptr;
+    vires::ConsumerId vires_id_ = vires::kInvalidConsumer;
 
     // GPU buffers
     float* d_input_  = nullptr;  // (1, 1, chunk_samples)

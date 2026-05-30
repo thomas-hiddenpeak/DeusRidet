@@ -185,6 +185,34 @@ is `vires_facade.h`, matching every other subsystem facade convention.
 | **V3 — Non-LLM clearance** | Reclaim callbacks for non-LLM scratch, coordinated with Memoria | Non-LLM scratch released on pass completion; no LLM allocation touched |
 | **D2 — deferred** | Migrate `probe_threshold` GPU gating into Vires | Backlog; requires re-verifying the live gate |
 
+### Build progress (2026-05-30)
+
+- **V1 — Delivery core: DONE** (commit `e3ef92b`). `vires::Arbiter`
+  singleton + `register_consumer(name, Priority)` + per-consumer
+  priority stream via `cudaStreamCreateWithPriority`. Boots clean:
+  `[vires] arbiter online — priority range [greatest=-5, least=0],
+  background slice 2000 us` (the Orin exposes 6 priority levels).
+- **First Background consumer wired: DONE** (commit `afe9a15`). The
+  native DiariZen forward path (ResNet34 embedder + Conformer head +
+  WavLM-pruned encoder) is threaded onto a `"diarizen"` **Background**
+  stream via `set_stream(cudaStream_t)` on each sub-model
+  (`cublasSetStream` / `cudnnSetStream` + every `<<<…>>>` carrying the
+  stream + async copies). `DiarizenPipeline::load` registers the
+  consumer and binds its stream. Stream choice changes scheduling
+  priority only — same kernels, same order, same math — so the change
+  is bit-identical (P3a fixture bit-eq PASS 28/28, `min_cos 0.999980`)
+  and live accuracy held: `accuracy(tests/test.mp3, diarization):
+  93.6% → 93.6% (Δ = 0.0 pp)`. The payoff is contention: removing the
+  Tegra default-stream barrier dropped the live finalize wall from
+  **685 s → 359.6 s** (RTF 0.19 → 0.099) with 0 CUDA errors.
+- **All GPU consumers will be wired.** The DiariZen Background consumer
+  is the first; every remaining GPU consumer (machina prefill/decode,
+  auditus perception, Vox, Somnium) is being migrated to declare its
+  metabolic class to Vires — perception/prefill/decode as **Foreground**,
+  refinement/consolidation as **Background** — so the priority ordering
+  is enforced by the substrate rather than left to the accident of
+  default-stream scheduling.
+
 ## Deferred (named now to kill ambiguity later)
 
 - **D2 — migrate `probe_threshold` GPU gating into Vires.** Long-term,

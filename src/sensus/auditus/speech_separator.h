@@ -20,6 +20,7 @@
 #pragma once
 
 #include "mossformer2.h"
+#include "../../vires/vires_types.h"
 
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -75,6 +76,7 @@ private:
 
     MossFormer2 mf2_;
     cudaStream_t cuda_stream_ = nullptr;
+    vires::ConsumerId vires_id_ = vires::kInvalidConsumer;
 
     // GPU buffers (allocated for max_chunk size).
     float* d_input_   = nullptr;  // (max_chunk)
