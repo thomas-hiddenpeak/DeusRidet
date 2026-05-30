@@ -1,0 +1,18 @@
+# Language-bar hygiene (GitHub Linguist)
+#
+# DeusRidet's product body is the C++/CUDA inference engine under src/.
+# The Python under tools/ is an evaluation / replay / benchmark scaffold
+# (live scoring harnesses, audio-analysis probes, fixture builders). It is
+# our own code, but it is not the product — it exists to measure and
+# reproduce the C++/CUDA core. Excluding it from the language statistics
+# makes the GitHub language bar reflect the project body, not the harness.
+#
+# We use `linguist-detectable=false` (not `linguist-vendored`) because the
+# scripts are authored by us, not third-party: they should simply not be
+# counted toward the language breakdown, without being mislabelled as
+# vendored or generated.
+tools/**/*.py linguist-detectable=false
+
+# Generated / vendored build artifacts that may sit in the tree should also
+# never drive the language bar.
+third_party/** linguist-vendored

@@ -347,7 +347,7 @@ void handle_ws_text_command(int fd,
         // pass right now. Returns immediately; result arrives later as a
         // `speaker_diarize_partial` broadcast.
         if (!worker) {
-            server.send_text(fd, R"json({"type":"speaker_diarize_progress","ok":false,"error":"periodic worker disabled (LLM not loaded or DEUSRIDET_DIARIZEN_ENABLE!=1)"})json");
+            server.send_text(fd, R"json({"type":"speaker_diarize_progress","ok":false,"error":"periodic worker disabled (LLM not loaded or DEUSRIDET_DIARIZEN_ENABLE=0)"})json");
         } else {
             worker->trigger_async();
             server.send_text(fd, R"json({"type":"speaker_diarize_progress","status":"triggered"})json");
@@ -410,7 +410,7 @@ void handle_ws_text_command(int fd,
             auto* worker_ptr = worker;
             std::thread([worker_ptr]() { worker_ptr->finalize(); }).detach();
         } else {
-            server.send_text(fd, R"json({"type":"speaker_diarize_final","ok":false,"error":"diarizen disabled (set DEUSRIDET_DIARIZEN_ENABLE=1)"})json");
+            server.send_text(fd, R"json({"type":"speaker_diarize_final","ok":false,"error":"diarizen disabled (DEUSRIDET_DIARIZEN_ENABLE=0)"})json");
         }
     } else {
         printf("[awaken] Text from fd=%d: %s\n", fd, msg.c_str());

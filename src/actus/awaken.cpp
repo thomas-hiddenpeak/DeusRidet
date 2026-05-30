@@ -153,28 +153,34 @@ int awaken(const std::string& webui_dir,
     double diarizen_cap_sec = 0.0;
     double diarizen_period_sec = 60.0;
     double diarizen_holdback_sec = 75.0;
-    bool   diarizen_enabled = false;
+    // P3c default flip (2026-05-30): native DiariZen is ON by default. The
+    // LLM-loaded live gate cleared at 93.55% (≥93.5%) with finalize RTF 0.10
+    // and zero CUDA errors, so the in-process pipeline is the default speaker
+    // re-attribution path. Opt out with DEUSRIDET_DIARIZEN_ENABLE=0. Periodic
+    // full-session re-diarise stays separately gated behind
+    // DEUSRIDET_DIARIZEN_PERIODIC=1 (O(N²); off by default — see the worker).
+    bool   diarizen_enabled = true;
     if (const char* en = std::getenv("DEUSRIDET_DIARIZEN_ENABLE")) {
-        if (en[0] == '1') {
-            diarizen_enabled = true;
-            diarizen_cap_sec = 4000.0;
-            if (const char* cap = std::getenv("DEUSRIDET_DIARIZEN_CAP_SEC")) {
-                double v = std::atof(cap);
-                if (v >= 60.0 && v <= 14400.0) diarizen_cap_sec = v;
-            }
-            if (const char* p = std::getenv("DEUSRIDET_DIARIZEN_PERIOD_SEC")) {
-                double v = std::atof(p);
-                if (v >= 5.0 && v <= 3600.0) diarizen_period_sec = v;
-            }
-            if (const char* h = std::getenv("DEUSRIDET_TRANSCRIPT_HOLDBACK_SEC")) {
-                double v = std::atof(h);
-                if (v >= 1.0 && v <= 3600.0) diarizen_holdback_sec = v;
-            }
-            if (cb.loaded) {
-                diarizen_holdback = std::make_unique<auditus::TranscriptHoldback>(
-                    cb.stream, diarizen_holdback_sec,
-                    [&audio]() { return audio.audio_t1_in_sec(); });
-            }
+        if (en[0] == '0') diarizen_enabled = false;
+    }
+    if (diarizen_enabled) {
+        diarizen_cap_sec = 4000.0;
+        if (const char* cap = std::getenv("DEUSRIDET_DIARIZEN_CAP_SEC")) {
+            double v = std::atof(cap);
+            if (v >= 60.0 && v <= 14400.0) diarizen_cap_sec = v;
+        }
+        if (const char* p = std::getenv("DEUSRIDET_DIARIZEN_PERIOD_SEC")) {
+            double v = std::atof(p);
+            if (v >= 5.0 && v <= 3600.0) diarizen_period_sec = v;
+        }
+        if (const char* h = std::getenv("DEUSRIDET_TRANSCRIPT_HOLDBACK_SEC")) {
+            double v = std::atof(h);
+            if (v >= 1.0 && v <= 3600.0) diarizen_holdback_sec = v;
+        }
+        if (cb.loaded) {
+            diarizen_holdback = std::make_unique<auditus::TranscriptHoldback>(
+                cb.stream, diarizen_holdback_sec,
+                [&audio]() { return audio.audio_t1_in_sec(); });
         }
     }
 

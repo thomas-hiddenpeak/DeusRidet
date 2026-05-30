@@ -133,7 +133,7 @@ Loader 落地时更新 `11-machina.md` Machina 显存预算表，标注为
 | **P2b** | `diarizen_vbx_cluster.cu`（`VBx.py` 的 NumPy → CUDA 移植） | 固定嵌入序列上标签序列与 Python 位等价 | 延后 |
 | **P3a** | `diarizen_pipeline.cpp` 门面把 S→C→E→K 接起来 | 在 `tests/test.mp3` 上离线运行通过 `tools/verification_2026/offline_score.py` 重现 93.5 % ± 0.5 pp | **已经 IPC 完成**（`e96255b`） |
 | **P3b** | `awaken` 集成：会话边界触发器 + `speaker_amend` 广播，受 `DEUSRIDET_DIARIZEN_RECLUSTER=1` 控制 | 由 `tools/replay_to_transcript.py` 捕获的 live `awaken` 跑出 `accuracy(tests/test.mp3, speaker-id 4-way): 31.0% → X%` | **已经 IPC 完成**（`b0e3a8f` + `0cc9d0d`） |
-| **P3c** | 默认翻为 `=1`——**当且仅当** P3b 实测 live 准确率 ≥ 80 % | commit message 中带宪法 accuracy 行 | **完成（native、LLM 加载）2026-05-30**——`accuracy(tests/test.mp3, diarization): 93.5% → 93.6%`，finalize RTF 0.10（369 s），0 CUDA 错误。由 periodic-worker + 广播 schema 修复解除阻塞（见 *Native P3c-verify* 行） |
+| **P3c** | 默认翻为 `=1`——**当且仅当** P3b 实测 live 准确率 ≥ 80 % | commit message 中带宪法 accuracy 行 | **已翻转 2026-05-30**——native DiariZen 现在默认开启（`diarizen_enabled = true`；用 `DEUSRIDET_DIARIZEN_ENABLE=0` 退出）。`accuracy(tests/test.mp3, diarization): 93.6% → 93.6%`（同一 bit-eq 已验证路径），finalize RTF 0.10（369 s），0 CUDA 错误。由 periodic-worker + 广播 schema 修复解除阻塞（见 *Native P3c-verify* 行） |
 | **Hybrid IPC P0** | `DiarizenFacade` C++/Python 行 JSON 桥，使用 `tools/diarizen_worker.py` | `tests/test.mp3` 上 round-trip diarize 调用返回 1658 段 | **done 2026-05-29**（`e96255b`） |
 | **Hybrid IPC P1** | `AudioPipeline` session 捕获 tap + WS `diarizen_finalize` | 通过 `tools/diarizen_live_score.py` 得 `accuracy(tests/test.mp3, diarization): — → 93.6%` | **done 2026-05-29**（`b0e3a8f`） |
 | **Hybrid IPC P2** | `TranscriptHoldback` + `DiarizenPeriodicWorker`；WS `diarizen_trigger` / `diarizen_finalize`；LLM 注入前重写 `speaker_id` | `accuracy(tests/test.mp3, diarization): 93.5% → 93.6%` 无回归 | **done 2026-05-29**（`0cc9d0d`） |
@@ -155,7 +155,8 @@ IPC 捷径（Hybrid IPC P0/P1/P2，表尾三行）是过渡桥，不是终点。
 - **原生 P1a/P1b/P1c**（WavLM s80-md tap + Conformer EEND head +
   segmentation 编排器）**必须落地**，DiariZen 才能被翻为
   `DEUSRIDET_DIARIZEN_ENABLE=1` 默认。当前状态：
-  `延后（由 IPC 捷径替代）`。
+  **已完成（原生进程内 pipeline；默认于 2026-05-30 翻转，
+  现为 `=0` 退出制）**。
 - **原生 P2a/P2b**（ResNet34-LM 嵌入 + VBx 聚类）出于同一理由
   **必须落地**。当前状态：`延后`。
 - **原生 P3a（`diarizen_pipeline.cpp` C++ 门面）** 替代 Python

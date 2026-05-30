@@ -152,7 +152,7 @@ no step exceeds the soft size cap; each ends with a green build.
 | **P2b** | `diarizen_vbx_cluster.cu` (NumPy → CUDA port of `VBx.py`) | label sequence bit-equality vs Python on a fixed embedding sequence | deferred |
 | **P3a** | `diarizen_pipeline.cpp` facade wiring stages S→C→E→K | offline run on `tests/test.mp3` reproduces 93.5 % ± 0.5 pp via `tools/verification_2026/offline_score.py` | **done via IPC** (`e96255b`) |
 | **P3b** | `awaken` integration: session-boundary trigger + `speaker_amend` broadcast, gated by `DEUSRIDET_DIARIZEN_RECLUSTER=1` | live `awaken` run captured by `tools/replay_to_transcript.py` produces `accuracy(tests/test.mp3, speaker-id 4-way): 31.0% → X%` | **done via IPC** (`b0e3a8f` + `0cc9d0d`) |
-| **P3c** | Default flip to `=1` *if and only if* P3b accuracy ≥ 80 % live | constitutional accuracy line in commit message | **done (native, LLM-loaded) 2026-05-30** — `accuracy(tests/test.mp3, diarization): 93.5% → 93.6%`, finalize RTF 0.10 (369 s), 0 CUDA errors. Unblocked by the periodic-worker + broadcast-schema fix (see *Native P3c-verify* row) |
+| **P3c** | Default flip to `=1` *if and only if* P3b accuracy ≥ 80 % live | constitutional accuracy line in commit message | **FLIPPED 2026-05-30** — native DiariZen is now ON by default (`diarizen_enabled = true`; opt out with `DEUSRIDET_DIARIZEN_ENABLE=0`). `accuracy(tests/test.mp3, diarization): 93.6% → 93.6%` (same bit-eq verified path), finalize RTF 0.10 (369 s), 0 CUDA errors. Unblocked by the periodic-worker + broadcast-schema fix (see *Native P3c-verify* row) |
 | **Hybrid IPC P0** | `DiarizenFacade` C++/Python line-JSON bridge using `tools/diarizen_worker.py` | round-trip diarize call returns 1658-seg list on `tests/test.mp3` | **done 2026-05-29** (`e96255b`) |
 | **Hybrid IPC P1** | `AudioPipeline` session capture tap + WS `diarizen_finalize` | `accuracy(tests/test.mp3, diarization): — → 93.6%` via `tools/diarizen_live_score.py` | **done 2026-05-29** (`b0e3a8f`) |
 | **Hybrid IPC P2** | `TranscriptHoldback` + `DiarizenPeriodicWorker`; WS `diarizen_trigger` / `diarizen_finalize`; LLM-facing `speaker_id` rewrite before injection | `accuracy(tests/test.mp3, diarization): 93.5% → 93.6%` no-regression run | **done 2026-05-29** (`0cc9d0d`) |
@@ -176,7 +176,8 @@ compatibility shim, never as a shipping default. Therefore:
 - **Native P1a/P1b/P1c (WavLM s80-md tap + Conformer EEND head +
   segmentation orchestrator) MUST land** before DiariZen can be
   promoted to `DEUSRIDET_DIARIZEN_ENABLE=1` by default. Status today:
-  `deferred (replaced by IPC fast-path)`.
+  **done (native in-process pipeline; default flipped 2026-05-30,
+  now opt-out via `=0`)**.
 - **Native P2a/P2b (ResNet34-LM embedding + VBx cluster) MUST land**
   for the same reason. Status: `deferred`.
 - **Native P3a (`diarizen_pipeline.cpp` C++ facade)** replaces the
