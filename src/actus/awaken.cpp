@@ -72,7 +72,8 @@ static void broadcast_vires_snapshot(WsServer& server) {
         js += ",\"name\":\"" + c.name + "\"";
         js += ",\"priority\":\"";
         js += vires::priority_str(c.priority);
-        js += "\",\"submitted\":" + std::to_string(c.submitted) + "}";
+        js += "\",\"submitted\":" + std::to_string(c.submitted);
+        js += ",\"reclaimed\":" + std::to_string(c.reclaimed) + "}";
     }
     js += "]}";
     server.broadcast_text(js);

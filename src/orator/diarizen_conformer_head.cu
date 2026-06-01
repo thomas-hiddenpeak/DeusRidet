@@ -67,6 +67,18 @@ void DiarizenConformerHead::release_() {
     loaded_ = false;
 }
 
+void DiarizenConformerHead::release_scratch() {
+    // Vires V3 glymphatic clearance: drop only the transient per-block forward
+    // buffers. Persistent weights (arena_, f32_cache_), the cuBLAS handle, and
+    // loaded_ are kept; the pool re-grows lazily on the next forward and
+    // contents are overwritten before read, so this is bit-equivalent to fresh
+    // allocation.
+    for (auto& kv : scratch_pool_) {
+        for (void* p : kv.second) cudaFree(p);
+    }
+    scratch_pool_.clear();
+}
+
 const DiarizenConformerTensorView* DiarizenConformerHead::find(
     const std::string& name) const {
     auto it = tensors_.find(name);

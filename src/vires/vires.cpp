@@ -121,6 +121,25 @@ void Arbiter::note_submit(ConsumerId id) {
     }
 }
 
+void Arbiter::note_pass_complete(ConsumerId id) {
+    // V3 glymphatic clearance: copy the reclaim callback out under the lock,
+    // then invoke it OUTSIDE the lock. The callback frees device scratch and
+    // may take consumer-side locks — running it under mu_ would risk a nested
+    // lock / deadlock and violates the "no callbacks under the Vires lock"
+    // invariant note_submit also obeys. An empty callback means the consumer
+    // holds no reclaimable transient scratch (cheap no-op). Compute-only: this
+    // never sizes/evicts an LLM allocation.
+    std::function<void()> cb;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = consumers_.find(id);
+        if (it == consumers_.end()) return;
+        ++it->second.stat.reclaimed;
+        cb = it->second.reclaim_cb;
+    }
+    if (cb) cb();
+}
+
 bool Arbiter::background_should_yield() const {
     const uint64_t last =
         last_foreground_submit_us_.load(std::memory_order_relaxed);

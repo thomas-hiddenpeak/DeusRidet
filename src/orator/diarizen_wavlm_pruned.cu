@@ -94,6 +94,24 @@ void DiarizenWavlmPruned::release_() {
     loaded_ = false;
 }
 
+void DiarizenWavlmPruned::release_scratch() {
+    // Vires V3 glymphatic clearance: drop only the transient forward
+    // by-products (the size-keyed scratch free-list and the on-demand cuDNN
+    // conv workspace). Persistent weights (arena_, f32_cache_), the cuDNN
+    // handle, and loaded_ are kept, so the encoder stays ready; the pool and
+    // workspace lazily re-grow on the next forward and contents are always
+    // overwritten before read, making this bit-equivalent to fresh allocation.
+    for (auto& kv : scratch_pool_) {
+        for (void* p : kv.second) cudaFree(p);
+    }
+    scratch_pool_.clear();
+    if (cudnn_ws_) {
+        cudaFree(cudnn_ws_);
+        cudnn_ws_ = nullptr;
+        cudnn_ws_bytes_ = 0;
+    }
+}
+
 // --------------------------------------------------------------------------
 // load
 // --------------------------------------------------------------------------

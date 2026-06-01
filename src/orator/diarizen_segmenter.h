@@ -69,6 +69,15 @@ public:
         conformer_.set_stream(s);
     }
 
+    /// Vires V3 glymphatic clearance: release both sub-models' transient
+    /// forward scratch (WavLM pool + cuDNN workspace, Conformer pool) while
+    /// keeping their persistent weights loaded. Bit-equivalent to fresh
+    /// allocation; safe to call between segmentation passes.
+    void release_scratch() {
+        wavlm_.release_scratch();
+        conformer_.release_scratch();
+    }
+
     /// Run the full sliding-window segmentation over a 16 kHz mono waveform.
     /// `apply_median` toggles the post-decode median filter (default true,
     /// matching the live pipeline). Returns an empty result on error.

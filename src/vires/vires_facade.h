@@ -42,9 +42,11 @@ public:
     Arbiter& operator=(const Arbiter&) = delete;
 
     // Register a GPU consumer. Returns a handle used for every later call.
-    // `reclaim_cb` is the consumer's non-LLM scratch release hook; it is stored
-    // but NOT invoked in V1 (glymphatic clearance is V3). Pass nullptr for now.
-    // A priority-tagged CUDA stream is created for the consumer at this point.
+    // `reclaim_cb` is the consumer's non-LLM scratch release hook. It is stored
+    // and, from V3 on, invoked by note_pass_complete() once a non-LLM GPU pass
+    // finishes (glymphatic clearance). Pass nullptr for consumers that hold no
+    // reclaimable transient scratch. A priority-tagged CUDA stream is created
+    // for the consumer at this point.
     ConsumerId register_consumer(const std::string& name,
                                  Priority priority,
                                  std::function<void()> reclaim_cb = nullptr);
@@ -60,6 +62,14 @@ public:
     // Telemetry: bump the consumer's submitted-pass counter. Cheap; lock-free
     // per-consumer atomic. Call once per GPU pass for observability.
     void note_submit(ConsumerId id);
+
+    // V3 glymphatic clearance (non-LLM only). Call once when a non-LLM GPU pass
+    // finishes. If the consumer registered a reclaim callback, Vires invokes it
+    // OUTSIDE its own lock to release the transient scratch it handed out for
+    // that pass, and bumps the consumer's `reclaimed` counter. No-op for an
+    // unknown id or a consumer with no callback. Never sizes, evicts, or
+    // touches any LLM allocation — that remains Memoria's charge.
+    void note_pass_complete(ConsumerId id);
 
     // Bounded-yield hint for background passes. A background consumer should
     // chunk its work so no single launch occupies the GPU longer than this many

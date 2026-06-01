@@ -292,7 +292,13 @@ bool DiarizenPipeline::load(const DiarizenPipelineConfig& cfg) {
     // only changes scheduling priority. Degrades to the default stream if the
     // arbiter hands back nullptr.
     impl_->vires_id = vires::Arbiter::instance().register_consumer(
-        "diarizen", vires::Priority::Background);
+        "diarizen", vires::Priority::Background,
+        // V3 glymphatic clearance: when a diarize pass completes, free the
+        // segmenter's transient forward scratch (WavLM pool + cuDNN workspace,
+        // Conformer pool). Weights stay loaded; the pool re-grows lazily and
+        // is overwritten before read, so the next pass is bit-identical. impl_
+        // outlives the process, so the raw capture is safe.
+        [this]() { impl_->segmenter.release_scratch(); });
     cudaStream_t st = vires::Arbiter::instance().stream(impl_->vires_id);
     impl_->segmenter.set_stream(st);
     impl_->embedder.set_stream(st);
@@ -397,6 +403,11 @@ std::vector<DiarizenSegment> DiarizenPipeline::diarize(const float* wave,
              "cluster=%.0fms post=%.0fms binarize=%.0fms total=%.0fms",
              C, F, S, ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4),
              ms(t4, t5), ms(t0, t5));
+    // Vires V3 glymphatic clearance: the pass is done, so hand back the
+    // transient forward scratch (invokes the reclaim_cb registered above,
+    // outside the Vires lock). Result `out` is already computed and copied,
+    // so freeing scratch cannot affect it.
+    vires::Arbiter::instance().note_pass_complete(impl_->vires_id);
     return out;
 }
 

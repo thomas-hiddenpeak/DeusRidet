@@ -51,6 +51,7 @@ struct ConsumerStat {
     std::string name;
     Priority    priority  = Priority::Background;
     uint64_t    submitted = 0;  // monotonic count of GPU passes submitted
+    uint64_t    reclaimed = 0;  // monotonic count of glymphatic clearances (V3)
 };
 
 // A point-in-time view of the compute ledger.

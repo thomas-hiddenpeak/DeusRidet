@@ -166,6 +166,16 @@ public:
     /// released only in release_().
     void scratch_release(void* ptr, std::size_t bytes) const;
 
+    /// Vires V3 glymphatic clearance: free the transient forward by-products
+    /// this encoder handed out (the size-keyed scratch free-list pool and the
+    /// on-demand cuDNN conv workspace) without touching the persistent weight
+    /// arena, the fp32 weight cache, the cuDNN handle, or the loaded state.
+    /// The pool and workspace refill lazily on the next forward, so a clear is
+    /// bit-equivalent to fresh allocation (buffers are always fully overwritten
+    /// before being read). Safe to call between passes; never on an LLM
+    /// allocation.
+    void release_scratch();
+
 
     /// Diagnostic dump to stderr: per-layer attn_inner / ffn_inner and
     /// total arena bytes. Used by the smoke test target.

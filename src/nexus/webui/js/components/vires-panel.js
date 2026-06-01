@@ -2,7 +2,8 @@
 //
 // Renders the single inspectable view of "who is computing what" (RFC 13,
 // observability rule): the live consumer registry with each consumer's
-// metabolic class + submitted-pass counter, plus the V2 back-pressure state
+// metabolic class + submitted-pass counter + V3 glymphatic-clearance count,
+// plus the V2 back-pressure state
 // (whether background consumers are currently yielding to a busy foreground).
 // Fed by the periodic `vires_compute_snapshot` WS message broadcast from the
 // awaken main thread every 2 s.
@@ -25,7 +26,7 @@ export class ViresPanel {
                 <thead>
                     <tr>
                         <th>#</th><th>Consumer</th>
-                        <th>Class</th><th>Submitted</th>
+                        <th>Class</th><th>Submitted</th><th>Reclaimed</th>
                     </tr>
                 </thead>
                 <tbody id="vires-rows"></tbody>
@@ -61,7 +62,8 @@ export class ViresPanel {
         for (const c of consumers) {
             const tr = document.createElement('tr');
             tr.dataset.class = c.priority || '';
-            for (const v of [c.id, c.name, c.priority, c.submitted]) {
+            for (const v of [c.id, c.name, c.priority, c.submitted,
+                             c.reclaimed]) {
                 const td = document.createElement('td');
                 td.textContent = (v == null) ? '—' : String(v);
                 tr.appendChild(td);

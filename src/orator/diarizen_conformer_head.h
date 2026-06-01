@@ -105,6 +105,14 @@ public:
     void* scratch_acquire(std::size_t bytes) const;
     void  scratch_release(void* ptr, std::size_t bytes) const;
 
+    /// Vires V3 glymphatic clearance: free the transient per-block forward
+    /// buffers in the scratch pool without touching the persistent weight
+    /// arena, the fp32 weight cache, the cuBLAS handle, or the loaded state.
+    /// The pool refills lazily on the next forward (buffers are always
+    /// overwritten before read), so a clear is bit-equivalent to fresh
+    /// allocation. Mirrors DiarizenWavlmPruned::release_scratch.
+    void release_scratch();
+
     /// P1b bit-equality tap: run the four Conformer blocks over the [T, 256]
     /// feature `feat` (host, frame-major) and return the conformer output
     /// [T, 256] flattened frame-major. Bit-checked vs `conformer_out`.
