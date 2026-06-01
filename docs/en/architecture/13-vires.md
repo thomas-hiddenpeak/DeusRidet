@@ -237,6 +237,25 @@ is `vires_facade.h`, matching every other subsystem facade convention.
   P3a bit-eq PASS (28/28, `min_cos 0.999980`), HTTP 200 / WS 101 /
   `vires-panel.{js,css}` 200, snapshot broadcasts every 2 s with all 6
   consumers.
+- **V3 — Non-LLM glymphatic clearance: DONE** (this commit). `ConsumerStat`
+  gains a monotonic `reclaimed` counter; new facade method
+  `note_pass_complete(id)` copies the consumer's `reclaim_cb` out under
+  the lock, bumps `reclaimed`, then invokes it **outside** the lock
+  (preserving the "no callback under the Vires mutex" invariant). The
+  Background `diarizen` consumer registers
+  `reclaim_cb = segmenter.release_scratch()` and calls
+  `note_pass_complete` at the end of every `DiarizenPipeline::diarize`;
+  `release_scratch()` frees **only** the transient forward by-products
+  (WavLM-pruned size-keyed scratch pool + its on-demand cuDNN conv
+  workspace, Conformer scratch pool), keeping persistent weights /
+  caches / handles loaded. Scratch is always overwritten before read, so
+  the clearance is bit-identical. The `reclaimed` count is broadcast in
+  the snapshot and shown as a new **Reclaimed** column in the WebUI
+  panel. Verified live: 8× gate held at
+  `accuracy(tests/test.mp3, diarization): 93.6% → 93.6% (Δ = 0.0 pp)`
+  (micro 0.936, 527/531 decided, coverage 0.992), and the WS snapshot
+  confirmed the loop fired once for the single finalize pass
+  (`diarizen submitted=1 reclaimed=1`); HTTP 200 / WS 101.
 
 ## Deferred (named now to kill ambiguity later)
 

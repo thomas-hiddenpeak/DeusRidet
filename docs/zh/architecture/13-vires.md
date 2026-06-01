@@ -196,6 +196,20 @@ Vigilia 头。对外唯一缝隙是 `vires_facade.h`，与其它子系统 facade
   `accuracy(tests/test.mp3, diarization): 93.5% → 93.6% (Δ = +0.1 pp)`，
   P3a bit-eq PASS（28/28，`min_cos 0.999980`），HTTP 200 / WS 101 /
   `vires-panel.{js,css}` 200，快照每 2 s 广播，含全部 6 个消费者。
+- **V3 — 非 LLM 类淋巴清除：完成**（本提交）。`ConsumerStat` 新增单调递增的
+  `reclaimed` 计数；新增门面方法 `note_pass_complete(id)` 在锁内复制消费者的
+  `reclaim_cb`、递增 `reclaimed`，随后在锁**外**调用它（保持「任何回调都不在
+  Vires 互斥锁下运行」的不变量）。Background 的 `diarizen` 消费者注册
+  `reclaim_cb = segmenter.release_scratch()`，并在每次
+  `DiarizenPipeline::diarize` 结束时调用 `note_pass_complete`；
+  `release_scratch()` **只**释放前向的临时副产物（WavLM-pruned 的按尺寸暂存
+  池 + 其按需 cuDNN 卷积工作区、Conformer 暂存池），持久权重/缓存/句柄保持
+  加载。暂存在读取前必被覆写，故清除逐位一致。`reclaimed` 计数在快照中广播，
+  并在 WebUI 面板中以新的 **Reclaimed** 列显示。真机验证：8× 门禁保持
+  `accuracy(tests/test.mp3, diarization): 93.6% → 93.6% (Δ = 0.0 pp)`
+  （micro 0.936，判定 527/531，覆盖率 0.992），WS 快照确认回路在唯一一次
+  finalize 计算里触发一次（`diarizen submitted=1 reclaimed=1`）；
+  HTTP 200 / WS 101。
 
 ## 延后项（现在命名，以消除日后歧义）
 
