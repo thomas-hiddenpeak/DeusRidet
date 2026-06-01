@@ -79,9 +79,17 @@ void DiarizenPeriodicWorker::finalize() {
     // session) the final broadcast is the whole contribution.
     // The final pass is always FULL-session (window_sec=0): it produces
     // the canonical end-of-session diarisation the accuracy gate scores.
+    //
+    // Stop the periodic loop FIRST (join the worker thread) so no timed
+    // window pass can run concurrently with this full-session pass —
+    // DiarizenPipeline::diarize is not re-entrant and two overlapping
+    // passes corrupt the shared GPU scratch (CUDNN_STATUS_EXECUTION_FAILED).
+    // stop() blocks until any in-flight periodic pass has finished, after
+    // which this final pass runs exclusively (pass_mutex_ additionally
+    // guards against a second concurrent finalize()).
+    stop();
     run_one_pass_(/*is_final=*/true, /*window_sec=*/0.0);
     if (holdback_) holdback_->drain_now();
-    stop();
 }
 
 void DiarizenPeriodicWorker::worker_loop_() {
@@ -113,6 +121,10 @@ void DiarizenPeriodicWorker::worker_loop_() {
 }
 
 bool DiarizenPeriodicWorker::run_one_pass_(bool is_final, double window_sec) {
+    // Serialise the whole pass: DiarizenPipeline::diarize drives shared,
+    // non-re-entrant GPU scratch, so at most one pass may run at a time
+    // across the worker thread and any detached finalize() thread.
+    std::lock_guard<std::mutex> pass_lk(pass_mutex_);
     const uint64_t seq = pass_seq_.fetch_add(1, std::memory_order_relaxed);
 
     std::vector<float> pcm;
