@@ -78,6 +78,16 @@ class DiarizenPipeline {
     //       segment-for-segment.
     std::vector<DiarizenSegment> diarize(const float* wave, int n_samples);
 
+    // @role Per-cluster mean speaker embedding (L2-normalised, 256-d) from the
+    //   most recent diarize() call, indexed by cluster id — i.e. centroid[k]
+    //   is the voiceprint of output label "speaker<k>". Empty before the first
+    //   pass. The cross-window identity registry uses these as acoustic
+    //   anchors so a speaker silent through the window-overlap zone can still
+    //   be re-bound by voiceprint rather than time overlap. Valid only until
+    //   the next diarize() (overwritten in place); read it immediately after a
+    //   successful pass.
+    const std::vector<std::vector<float>>& last_cluster_centroids() const;
+
     const std::string& last_error() const noexcept;
 
     // --- bit-equality debug taps (P3a harness) -----------------------------

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -39,6 +40,29 @@ struct DiarizenPipeline::Impl {
     bool                      loaded = false;
     std::string               err;
     vires::ConsumerId         vires_id = vires::kInvalidConsumer;
+
+    // diarize() is NOT re-entrant: every pass drives this one shared set of
+    // WavLM / Conformer GPU scratch buffers on a single CUDA stream, and the
+    // Vires V3 glymphatic reclaim fired at note_pass_complete() hands that
+    // scratch back. Two overlapping passes therefore corrupt each other's
+    // working memory (observed as CUDNN_STATUS_EXECUTION_FAILED -> empty
+    // segmentation) AND can reclaim scratch out from under an in-flight pass.
+    // The pipeline owns the invariant, not its callers: any caller (periodic
+    // worker, detached finalize WS handler, future direct user) is serialised
+    // here so exactly one pass — including its Vires submit/reclaim envelope —
+    // executes at any instant. Compute-only; no effect on the result, which is
+    // a pure function of (wave, n_samples).
+    std::mutex                pass_mutex;
+
+    // Per-cluster mean speaker embedding (L2-normalised, kEmbedDim each) from
+    // the most recent diarize() pass, indexed by cluster id == output label
+    // "speaker<k>". This is the acoustic anchor the cross-window identity
+    // registry needs: time overlap alone cannot re-bind a speaker who is
+    // silent through the inter-window overlap zone, but their voiceprint can.
+    // Overwritten every pass; only meaningful to a caller that reads it
+    // immediately after a successful diarize() (the periodic worker does, and
+    // pass_mutex already serialises passes so no two writers race).
+    std::vector<std::vector<float>> last_centroids;
 
     // Crop chunk c from `wave` into `out` (length kWindowSamples), zero-padded
     // (pyannote Audio.crop mode="pad"). start = c * kStepSamples.
@@ -312,6 +336,11 @@ const std::string& DiarizenPipeline::last_error() const noexcept {
     return impl_->err;
 }
 
+const std::vector<std::vector<float>>&
+DiarizenPipeline::last_cluster_centroids() const {
+    return impl_->last_centroids;
+}
+
 bool DiarizenPipeline::debug_get_embeddings(const float* wave, int n_samples,
                                             const float* seg, int num_chunks,
                                             int num_frames, int num_speakers,
@@ -339,6 +368,11 @@ std::vector<DiarizenSegment> DiarizenPipeline::diarize(const float* wave,
         impl_->err = "diarize: pipeline not loaded";
         return {};
     }
+    // Serialise the whole pass (compute + its Vires submit/reclaim envelope):
+    // diarize() is not re-entrant (one shared GPU scratch set, one stream, and
+    // the V3 reclaim hook below frees that scratch). Held for the full body so
+    // no second pass can start until this one has reclaimed. See Impl::pass_mutex.
+    std::lock_guard<std::mutex> pass_lk(impl_->pass_mutex);
     // Background back-pressure (Vires V2): this is a non-real-time refinement
     // pass. Before launching the GPU-heavy segmentation, conservatively yield
     // to live Foreground speaker-ID activity. Yielding only delays *when* the
@@ -385,6 +419,37 @@ std::vector<DiarizenSegment> DiarizenPipeline::diarize(const float* wave,
     }
     std::vector<int> hard(hard8.begin(), hard8.end());
     auto t3 = clk::now();
+
+    // 3b. Per-cluster mean embedding (acoustic anchor for cross-window
+    //     identity). cluster id k == output label "speaker<k>"; centroid k is
+    //     the L2-normalised mean of every (chunk, speaker) embedding assigned
+    //     to k (hard >= 0; -2 is inactive/excluded). One-shot host reduction
+    //     over C*S ≈ a few hundred rows — orchestration glue, not a hot loop.
+    {
+        constexpr int D = DiarizenResnet34Arch::kEmbedDim;
+        int max_k = -1;
+        for (int i = 0; i < C * S; ++i) max_k = std::max(max_k, hard[i]);
+        impl_->last_centroids.assign(std::max(0, max_k + 1),
+                                     std::vector<float>(D, 0.0f));
+        std::vector<int> nseen(std::max(0, max_k + 1), 0);
+        for (int i = 0; i < C * S; ++i) {
+            const int k = hard[i];
+            if (k < 0) continue;
+            const float* e = &emb[static_cast<std::size_t>(i) * D];
+            float* acc = impl_->last_centroids[k].data();
+            for (int d = 0; d < D; ++d) acc[d] += e[d];
+            ++nseen[k];
+        }
+        for (int k = 0; k <= max_k; ++k) {
+            if (nseen[k] == 0) continue;
+            float* acc = impl_->last_centroids[k].data();
+            double nrm = 0.0;
+            for (int d = 0; d < D; ++d) nrm += (double)acc[d] * acc[d];
+            const float inv =
+                (nrm > 0.0) ? static_cast<float>(1.0 / std::sqrt(nrm)) : 0.0f;
+            for (int d = 0; d < D; ++d) acc[d] *= inv;
+        }
+    }
 
     // 4. reconstruct + speaker_count + to_diarization.
     std::vector<float> count, binary;

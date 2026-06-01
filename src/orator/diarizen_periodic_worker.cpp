@@ -80,13 +80,12 @@ void DiarizenPeriodicWorker::finalize() {
     // The final pass is always FULL-session (window_sec=0): it produces
     // the canonical end-of-session diarisation the accuracy gate scores.
     //
-    // Stop the periodic loop FIRST (join the worker thread) so no timed
-    // window pass can run concurrently with this full-session pass —
-    // DiarizenPipeline::diarize is not re-entrant and two overlapping
-    // passes corrupt the shared GPU scratch (CUDNN_STATUS_EXECUTION_FAILED).
-    // stop() blocks until any in-flight periodic pass has finished, after
-    // which this final pass runs exclusively (pass_mutex_ additionally
-    // guards against a second concurrent finalize()).
+    // Stop the periodic loop FIRST (join the worker thread) so this thread
+    // is the sole pass driver, and a wasted trailing periodic pass cannot run
+    // after the final one. Cross-pass exclusion itself is owned one level down
+    // by DiarizenPipeline::diarize (its pass_mutex serialises every caller,
+    // including a second concurrent finalize() on a detached WS thread); this
+    // stop() is a scheduling nicety, not the safety mechanism.
     stop();
     run_one_pass_(/*is_final=*/true, /*window_sec=*/0.0);
     if (holdback_) holdback_->drain_now();
@@ -121,10 +120,8 @@ void DiarizenPeriodicWorker::worker_loop_() {
 }
 
 bool DiarizenPeriodicWorker::run_one_pass_(bool is_final, double window_sec) {
-    // Serialise the whole pass: DiarizenPipeline::diarize drives shared,
-    // non-re-entrant GPU scratch, so at most one pass may run at a time
-    // across the worker thread and any detached finalize() thread.
-    std::lock_guard<std::mutex> pass_lk(pass_mutex_);
+    // Cross-pass serialisation lives in DiarizenPipeline::diarize (pass_mutex),
+    // which guards every caller; no worker-level lock is needed here.
     const uint64_t seq = pass_seq_.fetch_add(1, std::memory_order_relaxed);
 
     std::vector<float> pcm;
@@ -160,10 +157,19 @@ bool DiarizenPeriodicWorker::run_one_pass_(bool is_final, double window_sec) {
     }
 
     size_t changed = holdback_ ? holdback_->apply_diarization(segs, origin_sec) : 0;
+
+    // P2 — bind this window's pipeline-local labels onto durable global
+    // identities so the live broadcast is identity-stable across windows.
+    // Applied AFTER the holdback consumed the raw labels (its LLM-relabel
+    // path is unchanged) and only to partial passes — the full-session
+    // finalize is canonical and keeps its own globally-consistent labels.
+    size_t ids = 0;
+    if (!is_final) ids = identity_.stitch(segs, origin_sec,
+                                          pipeline_.last_cluster_centroids());
     std::fprintf(stderr,
-                 "[diarizen-worker] pass=%llu segs=%zu changed_pending=%zu origin=%.2fs "
-                 "window=%.0fs audio=%.1fs wall=%.2fs final=%d\n",
-                 (unsigned long long)seq, segs.size(), changed, origin_sec,
+                 "[diarizen-worker] pass=%llu segs=%zu changed_pending=%zu ids=%zu "
+                 "origin=%.2fs window=%.0fs audio=%.1fs wall=%.2fs final=%d\n",
+                 (unsigned long long)seq, segs.size(), changed, ids, origin_sec,
                  window_sec, (double)n / 16000.0, wall_sec, (int)is_final);
 
     // Broadcast WS message. Use the array-segment schema understood by BOTH

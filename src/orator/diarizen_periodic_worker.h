@@ -16,6 +16,8 @@
  */
 #pragma once
 
+#include "diarizen_identity_registry.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -83,19 +85,18 @@ private:
     double                       period_sec_;
     std::atomic<uint64_t>        pass_seq_{0};
 
+    // P2 — cross-window persistent identity. Windowed (partial) passes return
+    // pipeline-local labels with no memory of earlier windows; the registry
+    // binds them onto durable global identities by time-overlap before the
+    // broadcast, so the live label stream is identity-stable. The full-session
+    // finalize pass is canonical and is NOT stitched (its single clustering is
+    // already globally consistent). Only ever touched from the pass thread.
+    DiarizenIdentityRegistry     identity_;
+
     std::mutex                   mu_;
     std::condition_variable      cv_;
     std::thread                  th_;
     bool                         running_ = false;
-    // DiarizenPipeline::diarize() is NOT re-entrant: it drives one shared
-    // set of WavLM / Conformer GPU scratch buffers on one CUDA stream, so
-    // two concurrent passes corrupt each other (observed as
-    // CUDNN_STATUS_EXECUTION_FAILED → empty segmentation). Periodic and
-    // on-demand passes all run on the worker thread and are serial by
-    // construction, but finalize() runs on a detached WS-handler thread and
-    // can be invoked more than once; pass_mutex_ guarantees at most one
-    // diarize() pass executes at any instant across all callers.
-    std::mutex                   pass_mutex_;
     bool                         stop_req_ = false;
     bool                         trigger_req_ = false;
     // Timed full-session re-diarise is OFF by default. A full re-diarise
