@@ -12,6 +12,7 @@
 #include "marlin.h"
 #include "fp16_gemm.h"
 #include "../communis/log.h"
+#include "../vires/vires_facade.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cmath>
@@ -168,6 +169,9 @@ int forward_one_token(const ModelWeights& model,
     cudaMemcpyAsync(&result, state.sample_out, sizeof(int),
                     cudaMemcpyDeviceToHost, s);
     cudaStreamSynchronize(s);
+    // Vires Foreground heartbeat: this decode pass just finished on the
+    // compute stream — mark the consumer active so Background work yields.
+    vires::Arbiter::instance().note_submit(state.vires_compute_id);
     return result;
 }
 
@@ -240,6 +244,8 @@ int forward_one_token_sampled(const ModelWeights& model,
     cudaMemcpyAsync(&result, state.sample_out, sizeof(int),
                     cudaMemcpyDeviceToHost, s);
     cudaStreamSynchronize(s);
+    // Vires Foreground heartbeat (sampled decode path).
+    vires::Arbiter::instance().note_submit(state.vires_compute_id);
     return result;
 }
 

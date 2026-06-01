@@ -13,6 +13,7 @@
 #include "marlin.h"
 #include "fp16_gemm.h"
 #include "../communis/log.h"
+#include "../vires/vires_facade.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cmath>
@@ -408,6 +409,8 @@ int forward_prefill(const ModelWeights& model,
     cudaMemcpyAsync(&result, state.sample_out, sizeof(int),
                     cudaMemcpyDeviceToHost, s);
     cudaStreamSynchronize(s);
+    // Vires Foreground heartbeat: prefill pass complete on compute stream.
+    vires::Arbiter::instance().note_submit(state.vires_compute_id);
 
     return result;
 }

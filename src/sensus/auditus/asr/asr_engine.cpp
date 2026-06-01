@@ -333,6 +333,9 @@ ASRResult ASREngine::transcribe(const float* samples, int num_samples,
     int encoder_out_len = 0;
     encoder_->forward(mel_gpu_, mel_frames, encoder_out_, encoder_out_len, stream_);
     cudaStreamSynchronize(stream_);
+    // Vires Foreground heartbeat: ASR encoder pass complete on its stream --
+    // mark the consumer active so Background DiariZen work yields.
+    vires::Arbiter::instance().note_submit(vires_id_);
     t1 = std::chrono::steady_clock::now();
     result.encoder_ms = std::chrono::duration<float, std::milli>(t1 - t0).count();
     result.encoder_out_len = encoder_out_len;
