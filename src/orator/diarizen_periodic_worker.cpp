@@ -35,6 +35,10 @@ DiarizenPeriodicWorker::DiarizenPeriodicWorker(
     if (const char* e = std::getenv("DEUSRIDET_DIARIZEN_PERIODIC")) {
         periodic_enabled_ = (std::string(e) == "1");
     }
+    if (const char* e = std::getenv("DEUSRIDET_DIARIZEN_WINDOW_SEC")) {
+        double w = std::atof(e);
+        window_sec_ = (w > 0.0) ? w : 0.0;
+    }
 }
 
 DiarizenPeriodicWorker::~DiarizenPeriodicWorker() { stop(); }
@@ -73,7 +77,9 @@ void DiarizenPeriodicWorker::finalize() {
     // the holdback so the LLM sees every pending transcript with the
     // freshly-relabelled speaker_id. With no holdback (audio-only
     // session) the final broadcast is the whole contribution.
-    run_one_pass_(/*is_final=*/true);
+    // The final pass is always FULL-session (window_sec=0): it produces
+    // the canonical end-of-session diarisation the accuracy gate scores.
+    run_one_pass_(/*is_final=*/true, /*window_sec=*/0.0);
     if (holdback_) holdback_->drain_now();
     stop();
 }
@@ -97,24 +103,31 @@ void DiarizenPeriodicWorker::worker_loop_() {
             // diarise — first pass on an empty buffer wastes ~30 s on Orin.
             size_t samples = audio_.diarizen_capture_samples();
             if (samples >= 16000 * 8) {  // need ≥ 8 s of audio
-                run_one_pass_(/*is_final=*/false);
+                // Live partials use the sliding window (direction C) when
+                // configured; 0 means full-session as before.
+                run_one_pass_(/*is_final=*/false, window_sec_);
             }
         }
         lk.lock();
     }
 }
 
-bool DiarizenPeriodicWorker::run_one_pass_(bool is_final) {
+bool DiarizenPeriodicWorker::run_one_pass_(bool is_final, double window_sec) {
     const uint64_t seq = pass_seq_.fetch_add(1, std::memory_order_relaxed);
 
     std::vector<float> pcm;
-    size_t n = audio_.diarizen_copy_pcm_f32(pcm);
+    // Sliding window (direction C): copy only the most recent window_sec
+    // seconds and the matching absolute stream origin, atomically under one
+    // lock. window_sec <= 0 ⇒ whole session (origin == buffer origin).
+    const size_t window_samples =
+        (window_sec > 0.0) ? (size_t)(window_sec * 16000.0) : 0;
+    double origin_sec = 0.0;
+    size_t n = audio_.diarizen_copy_pcm_f32_window(pcm, window_samples,
+                                                   origin_sec);
     if (n == 0) {
         std::fprintf(stderr, "[diarizen-worker] copy_pcm_f32 returned 0 samples; skipping\n");
         return false;
     }
-
-    double origin_sec = audio_.diarizen_capture_origin_sec();
 
     auto t0 = std::chrono::steady_clock::now();
     auto segs = pipeline_.diarize(pcm.data(), (int)pcm.size());
@@ -136,8 +149,10 @@ bool DiarizenPeriodicWorker::run_one_pass_(bool is_final) {
 
     size_t changed = holdback_ ? holdback_->apply_diarization(segs, origin_sec) : 0;
     std::fprintf(stderr,
-                 "[diarizen-worker] pass=%llu segs=%zu changed_pending=%zu origin=%.2fs final=%d\n",
-                 (unsigned long long)seq, segs.size(), changed, origin_sec, (int)is_final);
+                 "[diarizen-worker] pass=%llu segs=%zu changed_pending=%zu origin=%.2fs "
+                 "window=%.0fs audio=%.1fs wall=%.2fs final=%d\n",
+                 (unsigned long long)seq, segs.size(), changed, origin_sec,
+                 window_sec, (double)n / 16000.0, wall_sec, (int)is_final);
 
     // Broadcast WS message. Use the array-segment schema understood by BOTH
     // the live score client (tools/diarizen_live_score.py expects `ok` +

@@ -137,7 +137,41 @@ size_t AudioPipeline::diarizen_copy_pcm_f32(std::vector<float>& out) const {
     return out.size();
 }
 
-// Public hook for audio_pipeline.cpp::push_pcm so capture is appended on
+size_t AudioPipeline::diarizen_copy_pcm_f32_window(
+    std::vector<float>& out, size_t window_samples,
+    double& origin_sec_out) const {
+    // Snapshot the tail window AND its absolute origin under one lock, so
+    // the returned PCM and origin can never race against push_pcm.
+    std::vector<int16_t> snapshot;
+    size_t skip = 0;
+    {
+        std::lock_guard<std::mutex> lk(diarizen_capture_mu_);
+        const size_t total = diarizen_capture_buf_.size();
+        if (total == 0) {
+            out.clear();
+            origin_sec_out = diarizen_capture_origin_samples_ / 16000.0;
+            return 0;
+        }
+        // window_samples == 0 (or >= total) ⇒ whole buffer.
+        if (window_samples != 0 && window_samples < total) {
+            skip = total - window_samples;
+        }
+        const size_t take = total - skip;
+        snapshot.assign(diarizen_capture_buf_.begin() + skip,
+                        diarizen_capture_buf_.end());
+        // Absolute stream-time of the first copied sample: buffer-origin
+        // plus the number of samples skipped from the front.
+        origin_sec_out =
+            (diarizen_capture_origin_samples_ + skip) / 16000.0;
+        (void)take;
+    }
+    out.resize(snapshot.size());
+    constexpr float kInv = 1.0f / 32768.0f;
+    for (size_t i = 0; i < snapshot.size(); ++i) {
+        out[i] = static_cast<float>(snapshot[i]) * kInv;
+    }
+    return out.size();
+}
 // every successful WS binary frame. Implemented as a member so it can
 // touch the private buffer/lock fields directly.
 void AudioPipeline::diarizen_capture_tap_(const int16_t* data, int n_samples) {

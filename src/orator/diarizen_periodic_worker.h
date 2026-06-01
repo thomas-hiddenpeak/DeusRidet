@@ -71,8 +71,10 @@ public:
 private:
     void worker_loop_();
     /// Runs one pass. `is_final` controls the WS broadcast type.
-    /// Returns true on success (DiariZen returned a non-empty segment list).
-    bool run_one_pass_(bool is_final);
+    /// `window_sec` bounds the diarised audio to the most recent N seconds
+    /// (0 = whole accumulated session). Returns true on success (DiariZen
+    /// returned a non-empty segment list).
+    bool run_one_pass_(bool is_final, double window_sec);
 
     AudioPipeline&               audio_;
     DiarizenPipeline&            pipeline_;
@@ -95,6 +97,17 @@ private:
     // re-enable the timed cadence; otherwise the worker only runs on an
     // explicit trigger_async() or finalize().
     bool                         periodic_enabled_ = false;
+    // Direction C — sliding-window live diarise. When > 0, periodic and
+    // on-demand passes diarise only the most recent `window_sec_` seconds
+    // of captured audio, bounding per-pass GPU wall regardless of session
+    // length (a full-session pass is O(N) and on a long session blocks the
+    // GPU long enough to overflow the live front-end audio buffer). The
+    // canonical end-of-session finalize() always runs a FULL pass so the
+    // accuracy verdict is unchanged. 0 (default) preserves full-session
+    // behaviour on every pass. Set DEUSRIDET_DIARIZEN_WINDOW_SEC=<sec> to
+    // opt in. Should be ≥ the holdback horizon so live transcripts pending
+    // for the LLM still fall inside the re-diarised window.
+    double                       window_sec_ = 0.0;
 };
 
 }  // namespace orator

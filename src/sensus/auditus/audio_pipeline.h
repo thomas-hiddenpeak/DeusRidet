@@ -549,6 +549,19 @@ public:
     // the dump-to-wav + reload step for the in-process DiarizenPipeline.
     // Returns the number of samples copied; 0 on empty buffer.
     size_t diarizen_copy_pcm_f32(std::vector<float>& out) const;
+
+    // Hybrid P2 / direction C — sliding-window snapshot. Copies only the
+    // tail `window_samples` of the capture buffer (the most recent audio)
+    // as float32, and writes the *absolute* stream-time origin of the first
+    // copied sample into `origin_sec_out`. With `window_samples == 0` or a
+    // window larger than the buffer, copies the whole buffer (identical to
+    // diarizen_copy_pcm_f32, origin == diarizen_capture_origin_sec). Both
+    // the copy and the matching origin are taken under one lock, so the
+    // returned PCM and its origin can never race against push_pcm. Returns
+    // the number of samples copied; 0 on empty buffer.
+    size_t diarizen_copy_pcm_f32_window(std::vector<float>& out,
+                                        size_t window_samples,
+                                        double& origin_sec_out) const;
     void diarizen_capture_clear();
 
     // Hybrid P2 — origin of the capture buffer in stream-time seconds.

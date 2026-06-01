@@ -416,17 +416,27 @@ int awaken(const std::string& webui_dir,
                 periodic_on
                     ? ("ON period=" + std::to_string((long)diarizen_period_sec) + "s")
                     : std::string("OFF (trigger/finalize only)");
+            // Direction C — sliding-window live diarise (env-gated). 0/unset
+            // keeps full-session passes; finalize is always full regardless.
+            const char* win_env = std::getenv("DEUSRIDET_DIARIZEN_WINDOW_SEC");
+            const double win_sec = win_env ? std::atof(win_env) : 0.0;
+            std::string window_desc =
+                (win_sec > 0.0)
+                    ? ("window=" + std::to_string((long)win_sec) + "s (finalize=full)")
+                    : std::string("window=OFF (full-session passes)");
             if (diarizen_holdback) {
                 printf("[awaken] DiariZen-v2 Hybrid P2 ENABLED "
-                       "(cap=%.0fs holdback=%.0fs; periodic=%s); "
+                       "(cap=%.0fs holdback=%.0fs; periodic=%s; %s); "
                        "WS commands: diarizen_trigger / diarizen_finalize\n",
-                       diarizen_cap_sec, diarizen_holdback_sec, periodic_desc.c_str());
+                       diarizen_cap_sec, diarizen_holdback_sec,
+                       periodic_desc.c_str(), window_desc.c_str());
             } else {
                 printf("[awaken] DiariZen-v2 worker ENABLED "
                        "(cap=%.0fs, LLM not loaded so no holdback drain; "
-                       "periodic=%s); WS commands: diarizen_trigger / "
+                       "periodic=%s; %s); WS commands: diarizen_trigger / "
                        "diarizen_finalize\n",
-                       diarizen_cap_sec, periodic_desc.c_str());
+                       diarizen_cap_sec, periodic_desc.c_str(),
+                       window_desc.c_str());
             }
         }
     }
