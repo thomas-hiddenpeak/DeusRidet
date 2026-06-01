@@ -397,10 +397,16 @@ int awaken(const std::string& webui_dir,
                    "diarizen disabled\n", np->last_error().c_str());
             diarizen_enabled = false;
         }
-        if (diarizen_enabled && diarizen_holdback) {
-            diarizen_holdback->start();
+        if (diarizen_enabled) {
+            // A: the periodic worker is created unconditionally so
+            // diarizen_trigger / periodic re-diarise work in audio-only
+            // sessions too. The holdback (LLM-only Conscientia drain) is
+            // passed as a nullable pointer — when the LLM is not loaded the
+            // worker still diarises and broadcasts speaker_diarize_* for the
+            // live WebUI, it just has no transcript queue to rewrite.
+            if (diarizen_holdback) diarizen_holdback->start();
             diarizen_worker = std::make_unique<orator::DiarizenPeriodicWorker>(
-                audio, *diarizen_native, *diarizen_holdback, server,
+                audio, *diarizen_native, diarizen_holdback.get(), server,
                 diarizen_period_sec);
             diarizen_worker->start();
             const bool periodic_on =
@@ -410,15 +416,18 @@ int awaken(const std::string& webui_dir,
                 periodic_on
                     ? ("ON period=" + std::to_string((long)diarizen_period_sec) + "s")
                     : std::string("OFF (trigger/finalize only)");
-            printf("[awaken] DiariZen-v2 Hybrid P2 ENABLED "
-                   "(cap=%.0fs holdback=%.0fs; periodic=%s); "
-                   "WS commands: diarizen_trigger / diarizen_finalize\n",
-                   diarizen_cap_sec, diarizen_holdback_sec, periodic_desc.c_str());
-        } else if (diarizen_enabled) {
-            printf("[awaken] DiariZen-v2 capture ENABLED (cap=%.0fs, "
-                   "LLM not loaded so holdback is no-op); "
-                   "send WS text `diarizen_finalize` to score session\n",
-                   diarizen_cap_sec);
+            if (diarizen_holdback) {
+                printf("[awaken] DiariZen-v2 Hybrid P2 ENABLED "
+                       "(cap=%.0fs holdback=%.0fs; periodic=%s); "
+                       "WS commands: diarizen_trigger / diarizen_finalize\n",
+                       diarizen_cap_sec, diarizen_holdback_sec, periodic_desc.c_str());
+            } else {
+                printf("[awaken] DiariZen-v2 worker ENABLED "
+                       "(cap=%.0fs, LLM not loaded so no holdback drain; "
+                       "periodic=%s); WS commands: diarizen_trigger / "
+                       "diarizen_finalize\n",
+                       diarizen_cap_sec, periodic_desc.c_str());
+            }
         }
     }
 

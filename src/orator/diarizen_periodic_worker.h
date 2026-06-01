@@ -37,9 +37,13 @@ class DiarizenPipeline;
 
 class DiarizenPeriodicWorker {
 public:
+    /// `holdback` is nullable: in audio-only sessions (LLM not loaded)
+    /// there is no Conscientia stream to drain into, so the worker still
+    /// runs diarisation passes and broadcasts `speaker_diarize_*` for the
+    /// live WebUI, but skips the holdback rewrite/drain entirely.
     DiarizenPeriodicWorker(AudioPipeline& audio,
                            DiarizenPipeline& pipeline,
-                           auditus::TranscriptHoldback& holdback,
+                           auditus::TranscriptHoldback* holdback,
                            WsServer& server,
                            double period_sec);
 
@@ -72,7 +76,7 @@ private:
 
     AudioPipeline&               audio_;
     DiarizenPipeline&            pipeline_;
-    auditus::TranscriptHoldback& holdback_;
+    auditus::TranscriptHoldback* holdback_;  // nullable — see ctor doc
     WsServer&                    server_;
     double                       period_sec_;
     std::atomic<uint64_t>        pass_seq_{0};

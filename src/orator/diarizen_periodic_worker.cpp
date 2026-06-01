@@ -24,7 +24,7 @@ namespace deusridet::orator {
 DiarizenPeriodicWorker::DiarizenPeriodicWorker(
     AudioPipeline& audio,
     DiarizenPipeline& pipeline,
-    auditus::TranscriptHoldback& holdback,
+    auditus::TranscriptHoldback* holdback,
     WsServer& server,
     double period_sec)
     : audio_(audio),
@@ -71,9 +71,10 @@ void DiarizenPeriodicWorker::trigger_async() {
 void DiarizenPeriodicWorker::finalize() {
     // One final pass, broadcast as `speaker_diarize_final`, then drain
     // the holdback so the LLM sees every pending transcript with the
-    // freshly-relabelled speaker_id.
+    // freshly-relabelled speaker_id. With no holdback (audio-only
+    // session) the final broadcast is the whole contribution.
     run_one_pass_(/*is_final=*/true);
-    holdback_.drain_now();
+    if (holdback_) holdback_->drain_now();
     stop();
 }
 
@@ -133,7 +134,7 @@ bool DiarizenPeriodicWorker::run_one_pass_(bool is_final) {
         return false;
     }
 
-    size_t changed = holdback_.apply_diarization(segs, origin_sec);
+    size_t changed = holdback_ ? holdback_->apply_diarization(segs, origin_sec) : 0;
     std::fprintf(stderr,
                  "[diarizen-worker] pass=%llu segs=%zu changed_pending=%zu origin=%.2fs final=%d\n",
                  (unsigned long long)seq, segs.size(), changed, origin_sec, (int)is_final);
