@@ -25,15 +25,18 @@ namespace deusridet {
 int bootstrap_consciousness(const std::string& llm_model_dir,
                             const std::string& persona_conf_path,
                             ConscientiaBootstrap& out) {
+    // LLM loads by default now that the speaker-only benchmark stage is over.
+    // Opt out only with an explicit DEUSRIDET_TEST_WS_ENABLE_LLM=0.
     const char* test_ws_enable_llm = std::getenv("DEUSRIDET_TEST_WS_ENABLE_LLM");
     bool enable_llm_in_test_ws =
-        (test_ws_enable_llm != nullptr) && std::string(test_ws_enable_llm) == "1";
+        (test_ws_enable_llm == nullptr) || std::string(test_ws_enable_llm) != "0";
 
     if (!enable_llm_in_test_ws || llm_model_dir.empty()) {
         if (enable_llm_in_test_ws && llm_model_dir.empty()) {
             printf("[awaken] LLM load requested but model dir is empty, skip\n");
+        } else {
+            printf("[awaken] LLM load disabled via DEUSRIDET_TEST_WS_ENABLE_LLM=0\n");
         }
-        printf("[awaken] LLM load disabled for speaker-only benchmark stage\n");
         return 0;
     }
 
