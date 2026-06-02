@@ -55,7 +55,12 @@ export class Conversation {
         if (!msg.text || !msg.text.trim()) return;
         this._clearHint();
         const id = (typeof msg.speaker_id === 'number') ? msg.speaker_id : -1;
-        const name = msg.speaker_name || (id >= 0 ? `#${id}` : i18n.t('turn.you'));
+        const hasSpeakerName = (typeof msg.speaker_name === 'string') && msg.speaker_name.trim();
+        const name = hasSpeakerName
+            ? msg.speaker_name
+            : (id >= 0
+                ? `${i18n.t('turn.speaker_prefix')} ${id}`
+                : i18n.t('turn.unknown'));
         this._appendTurn({ who: name, color: spkColor(id), text: msg.text, entity: false });
     }
 
