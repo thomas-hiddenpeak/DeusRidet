@@ -34,74 +34,12 @@
 }
 .lang:hover { color: var(--c-text); border-color: var(--c-accent); }
 
-/* Presence (entity wakefulness orb) ---------------------------------- */
-.presence {
-  display: flex;
+/* Top status chips --------------------------------------------------- */
+.presence-chip,
+.mic-chip {
+  display: inline-flex;
   align-items: center;
-  gap: var(--sp-4);
-  padding: var(--sp-4);
-  background: var(--c-bg-elev);
-}
-.presence__orb {
-  width: 44px; height: 44px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 35% 30%, var(--c-accent), var(--c-accent-soft));
-  flex: 0 0 auto;
-  animation: orb-breathe 4s ease-in-out infinite;
-}
-.presence--active .presence__orb { animation-duration: 2.4s; }
-.presence--dreaming .presence__orb {
-  background: radial-gradient(circle at 35% 30%, var(--c-think), #2a1f44);
-  animation-duration: 6s;
-}
-@keyframes orb-breathe {
-  0%, 100% { transform: scale(0.92); opacity: 0.7; }
-  50%      { transform: scale(1.0);  opacity: 1; }
-}
-.presence__body { display: flex; flex-direction: column; gap: 2px; }
-.presence__state { font-size: var(--fs-md); font-weight: 600; }
-.presence__meta { font-size: var(--fs-xs); color: var(--c-text-dim); }
-.presence__wake {
-  margin-top: var(--sp-1);
-  width: 160px; max-width: 40vw;
-  height: 4px; border-radius: var(--r-pill);
-  background: var(--c-bg-elev-2);
-  overflow: hidden;
-}
-.presence__wake-fill {
-  height: 100%;
-  background: var(--c-accent);
-  transition: width var(--t-slow);
-}
-
-/* Listening strip ---------------------------------------------------- */
-.listen {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding: var(--sp-2) var(--sp-4);
-  background: var(--c-bg-elev);
-  font-size: var(--fs-sm);
-}
-.listen__icon {
-  width: 10px; height: 10px; border-radius: 50%;
-  background: var(--c-text-faint);
-  transition: background var(--t-fast), box-shadow var(--t-fast);
-}
-.listen--hot .listen__icon { background: var(--c-listen); box-shadow: 0 0 8px var(--c-listen); }
-.listen__label { color: var(--c-text-dim); }
-.listen__meter {
-  flex: 1;
-  height: 6px; border-radius: var(--r-pill);
-  background: var(--c-bg-elev-2);
-  overflow: hidden;
-}
-.listen__meter-fill {
-  height: 100%; width: 0;
-  background: var(--c-listen);
-  transition: width var(--t-fast);
-}
-.listen__mic {
+  gap: var(--sp-2);
   border: 1px solid var(--c-line);
   background: transparent;
   color: var(--c-text-dim);
@@ -110,7 +48,29 @@
   font-size: var(--fs-xs);
   cursor: pointer;
 }
-.listen__mic--on { color: var(--c-listen); border-color: var(--c-listen); }
+.presence-chip__lamp,
+.mic-chip__lamp {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c-text-faint);
+}
+
+.presence-chip--active { border-color: var(--c-accent); color: var(--c-accent); }
+.presence-chip--active .presence-chip__lamp { background: var(--c-accent); box-shadow: 0 0 8px var(--c-accent); }
+.presence-chip--daydream,
+.presence-chip--dreaming { border-color: var(--c-think); color: var(--c-think); }
+.presence-chip--daydream .presence-chip__lamp,
+.presence-chip--dreaming .presence-chip__lamp { background: var(--c-think); box-shadow: 0 0 8px var(--c-think); }
+
+.mic-chip--on { border-color: var(--c-listen); color: var(--c-listen); }
+.mic-chip--hot .mic-chip__lamp { background: var(--c-listen); box-shadow: 0 0 8px var(--c-listen); }
+.mic-chip--lvl0 { background: rgba(68, 214, 161, 0.05); }
+.mic-chip--lvl1 { background: rgba(68, 214, 161, 0.10); }
+.mic-chip--lvl2 { background: rgba(68, 214, 161, 0.15); }
+.mic-chip--lvl3 { background: rgba(68, 214, 161, 0.20); }
+.mic-chip--lvl4 { background: rgba(68, 214, 161, 0.28); }
+.mic-chip--lvl5 { background: rgba(68, 214, 161, 0.36); }
 
 /* Speaker band ------------------------------------------------------- */
 .speakers {
@@ -193,18 +153,30 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--sp-3);
+  height: 100%;
 }
 .conversation__lane {
   min-width: 0;
   display: flex;
   flex-direction: column;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-md);
+  background: var(--c-bg-elev);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--sp-2);
 }
 .conversation__lane-title {
+  position: sticky;
+  top: 0;
+  z-index: 1;
   margin: 0 0 var(--sp-2) 0;
+  padding: var(--sp-1) var(--sp-2);
   font-size: var(--fs-xs);
   font-weight: 600;
   color: var(--c-text-faint);
   letter-spacing: 0.04em;
+  background: var(--c-bg-elev);
 }
 .conversation__lane--prefill .conversation__lane-title {
   color: var(--c-accent);

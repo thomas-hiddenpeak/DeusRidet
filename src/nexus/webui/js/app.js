@@ -26,9 +26,11 @@ function syncMicDrivenRuntime() {
 const connEl = document.querySelector('[data-role=conn]');
 const langBtn = document.querySelector('[data-role=lang]');
 const titleEl = document.querySelector('[data-role=title]');
+const entityEl = document.querySelector('[data-role=entity]');
 
 function renderHeader() {
     titleEl.textContent = i18n.t('app.title');
+    entityEl.textContent = presence.entityName() ? ` · ${presence.entityName()}` : '';
     langBtn.textContent = i18n.t('lang.toggle');
     connEl.className = 'conn ' + (online ? 'conn--on' : 'conn--off');
     connEl.querySelector('[data-role=conn-label]').textContent =
@@ -50,8 +52,8 @@ const speakers = new Speakers();
 const conversation = new Conversation();
 const composer = new Composer();
 
-presence.mount(document.querySelector('[data-slot=presence]'));
-listening.mount(document.querySelector('[data-slot=strips]'));
+presence.mount(document.querySelector('[data-slot=top]'));
+listening.mount(document.querySelector('[data-slot=top]'));
 speakers.mount(document.querySelector('[data-slot=strips]'));
 conversation.mount(document.querySelector('[data-slot=stream]'));
 composer.mount(document.querySelector('[data-slot=composer]'));
@@ -119,6 +121,7 @@ ws.onText = (raw) => {
     try { msg = JSON.parse(raw); } catch { return; }
     if (!msg || typeof msg.type !== 'string') return;
     for (const c of components) c.onMessage?.(msg);
+    if (msg.type === 'consciousness_state') renderHeader();
 };
 
 composer.setEnabled(false);

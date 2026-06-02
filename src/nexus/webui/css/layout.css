@@ -42,7 +42,19 @@ body { overflow: hidden; }
   letter-spacing: 0.01em;
 }
 
+.app__entity {
+  font-size: var(--fs-sm);
+  color: var(--c-accent);
+  font-weight: 500;
+}
+
 .app__spacer { flex: 1; }
+
+.app__top {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
 
 /* Status strips between header and stream. */
 .app__strips {
@@ -54,10 +66,9 @@ body { overflow: hidden; }
 
 /* Conversation stream (the scrolling middle). */
 .app__stream {
-  overflow-y: auto;
+  overflow: hidden;
   overflow-x: hidden;
   padding: var(--sp-4);
-  scroll-behavior: smooth;
 }
 
 /* Composer (typing input). */

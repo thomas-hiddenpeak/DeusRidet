@@ -12,16 +12,15 @@
 <body>
   <main class="app">
     <header class="app__header">
-      <h1 class="app__title" data-role="title">DeusRidet</h1>
+      <h1 class="app__title"><span data-role="title">DeusRidet</span><span class="app__entity" data-role="entity"></span></h1>
       <span class="app__spacer"></span>
+      <div class="app__top" data-slot="top"></div>
       <span class="conn conn--off" data-role="conn">
         <span class="conn__dot" aria-hidden="true"></span>
         <span data-role="conn-label"></span>
       </span>
       <button type="button" class="lang" data-role="lang">中文</button>
     </header>
-
-    <div data-slot="presence"></div>
 
     <div class="app__strips" data-slot="strips"></div>
 

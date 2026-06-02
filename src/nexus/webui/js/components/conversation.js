@@ -19,6 +19,7 @@ export class Conversation {
         this._lanePrefill = null;
         this._liveEntity = null;   // DOM node accumulating speech_token text
         this._turnsBySpan = new Map();
+        this._aliasKey = 'dr_speaker_aliases';
     }
 
     mount(parent) {
@@ -27,11 +28,11 @@ export class Conversation {
         el.setAttribute('role', 'log');
         el.setAttribute('aria-live', 'polite');
         el.innerHTML = `
-            <section class="conversation__lane conversation__lane--live" data-role="lane-live">
-                <h2 class="conversation__lane-title" data-role="title-live"></h2>
-            </section>
             <section class="conversation__lane conversation__lane--prefill" data-role="lane-prefill">
                 <h2 class="conversation__lane-title" data-role="title-prefill"></h2>
+            </section>
+            <section class="conversation__lane conversation__lane--live" data-role="lane-live">
+                <h2 class="conversation__lane-title" data-role="title-live"></h2>
             </section>`;
         parent.appendChild(el);
         this._el = el;
@@ -78,6 +79,14 @@ export class Conversation {
     }
 
     _speakerLabel(id, name) {
+        let alias = '';
+        if (id >= 0) {
+            try {
+                const map = JSON.parse(localStorage.getItem(this._aliasKey) || '{}');
+                alias = (typeof map[String(id)] === 'string') ? map[String(id)].trim() : '';
+            } catch {}
+        }
+        if (alias) return alias;
         const hasSpeakerName = (typeof name === 'string') && name.trim();
         return hasSpeakerName
             ? name
@@ -204,8 +213,8 @@ export class Conversation {
     }
 
     _scroll() {
-        const stream = this._el.parentElement;
-        if (stream) stream.scrollTop = stream.scrollHeight;
+        if (this._laneLive) this._laneLive.scrollTop = this._laneLive.scrollHeight;
+        if (this._lanePrefill) this._lanePrefill.scrollTop = this._lanePrefill.scrollHeight;
     }
 
     unmount() { this._el?.remove(); this._el = null; }

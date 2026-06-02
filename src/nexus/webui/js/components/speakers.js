@@ -113,8 +113,9 @@ export class Speakers {
             : (this._window.running === 'finalizing'
                 ? 'speakers.window_finalizing'
                 : 'speakers.window_idle'));
-        wLabel.textContent = `${i18n.t('speakers.window_cycle')} · ${i18n.t(phase)}`;
-        wFill.style.width = `${Math.round(Math.max(0, Math.min(1, this._window.progress)) * 100)}%`;
+        const pct = Math.round(Math.max(0, Math.min(1, this._window.progress)) * 100);
+        wLabel.textContent = `${i18n.t('speakers.window_cycle')} · ${i18n.t(phase)} · ${pct}%`;
+        wFill.style.width = `${pct}%`;
         wFill.dataset.state = this._window.running;
         if (this._seen.size === 0) {
             this._list.innerHTML = `<span class="speakers__label">${i18n.t('speakers.none')}</span>`;
