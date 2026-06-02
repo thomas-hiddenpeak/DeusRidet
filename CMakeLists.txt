@@ -49,7 +49,12 @@ file(GLOB_RECURSE MACHINA_SOURCES
 )
 
 add_library(machina STATIC ${MACHINA_SOURCES})
-target_link_libraries(machina PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt)
+# vires is PUBLIC: model_runtime.cpp + forward_{prefill,decode}.cu register
+# priority streams via vires::Arbiter, so the symbol requirement propagates to
+# every consumer of machina (deusridet + test_forward / test_sample / the
+# auditus_separatio_* tools). vires is defined below; CMake resolves
+# same-directory target references at generation time.
+target_link_libraries(machina PUBLIC vires PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt)
 
 # ============================================================================
 # Common utilities static library
@@ -93,7 +98,10 @@ file(GLOB_RECURSE SENSUS_SOURCES CONFIGURE_DEPENDS
 )
 
 add_library(sensus STATIC ${SENSUS_SOURCES})
-target_link_libraries(sensus PRIVATE communis machina CUDA::cudart CUDA::cublas CUDA::cufft cudnn)
+# vires is PUBLIC: speech_separator.cpp registers with vires::Arbiter, so the
+# symbol requirement propagates to every consumer of sensus (deusridet + the
+# auditus_separatio_* / *mossformer2 tool targets) without re-listing it.
+target_link_libraries(sensus PUBLIC vires PRIVATE communis machina CUDA::cudart CUDA::cublas CUDA::cufft cudnn)
 
 # ============================================================================
 # Speaker identification static library (orator — CAM++ speaker encoder)
