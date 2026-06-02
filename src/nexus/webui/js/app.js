@@ -104,6 +104,7 @@ ws.onOpen = () => {
     online = true;
     presence.setOnline(true);
     composer.setEnabled(true);
+    speakers.reapplyAliases((msg) => ws.sendText(msg));
     syncMicDrivenRuntime();
     renderHeader();
 };

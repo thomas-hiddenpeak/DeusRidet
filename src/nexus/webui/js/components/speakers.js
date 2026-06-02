@@ -11,14 +11,40 @@ export class Speakers {
         this._list = null;
         this._seen = new Map();   // id -> { name }
         this._activeId = null;
+        this._aliasKey = 'dr_speaker_aliases';
+        this._aliases = this._loadAliases(); // id(string) -> alias
         this._window = {
             audioSec: 0,
             lastEndSec: 0,
             lastPass: 0,
             progress: 0,
             running: 'idle',
+            periodicEnabled: true,
         };
         this.onRename = null;
+    }
+
+    _loadAliases() {
+        try {
+            const raw = localStorage.getItem(this._aliasKey);
+            const obj = raw ? JSON.parse(raw) : {};
+            return (obj && typeof obj === 'object') ? obj : {};
+        } catch {
+            return {};
+        }
+    }
+
+    _saveAliases() {
+        localStorage.setItem(this._aliasKey, JSON.stringify(this._aliases));
+    }
+
+    reapplyAliases(sendText) {
+        if (typeof sendText !== 'function') return;
+        for (const [idStr, alias] of Object.entries(this._aliases)) {
+            const id = Number(idStr);
+            if (!Number.isInteger(id) || id < 0 || !alias) continue;
+            sendText(`speaker_name:${id}:${alias}`);
+        }
     }
 
     mount(parent) {
@@ -41,11 +67,11 @@ export class Speakers {
     onMessage(msg) {
         if (msg.type === 'speaker') {
             if (typeof msg.id !== 'number' || msg.id < 0) return;
-            this._seen.set(msg.id, { name: msg.name || null });
+            this._seen.set(msg.id, { name: this._aliases[String(msg.id)] || msg.name || null });
             this._activeId = msg.id;
         } else if (msg.type === 'speaker_name') {
             if (typeof msg.id !== 'number' || msg.id < 0) return;
-            this._seen.set(msg.id, { name: msg.name || null });
+            this._seen.set(msg.id, { name: this._aliases[String(msg.id)] || msg.name || null });
         } else if (msg.type === 'pipeline_stats') {
             this._window.audioSec = (msg.audio_t1 ?? 0) / 16000.0;
             if (Array.isArray(msg.speaker_lists)) {
@@ -53,7 +79,7 @@ export class Speakers {
                     if (!Array.isArray(model?.speakers)) continue;
                     for (const spk of model.speakers) {
                         if (typeof spk.id === 'number' && spk.id >= 0) {
-                            this._seen.set(spk.id, { name: spk.name || null });
+                            this._seen.set(spk.id, { name: this._aliases[String(spk.id)] || spk.name || null });
                         }
                     }
                 }
@@ -61,6 +87,7 @@ export class Speakers {
         } else if (msg.type === 'speaker_diarize_status') {
             this._window.progress = Number(msg.cycle_progress || 0);
             this._window.running = msg.phase || 'idle';
+            this._window.periodicEnabled = (msg.periodic_enabled !== false);
         } else if (msg.type === 'speaker_diarize_partial' || msg.type === 'speaker_diarize_final') {
             const origin = Number(msg.origin_sec || 0);
             const audio = Number(msg.audio_sec || 0);
@@ -79,12 +106,14 @@ export class Speakers {
         this._el.querySelector('[data-role=label]').textContent = i18n.t('speakers.label');
         const wLabel = this._el.querySelector('[data-role=window-label]');
         const wFill = this._el.querySelector('[data-role=window-fill]');
-        const phase = (this._window.running === 'running' || this._window.running === 'periodic' || this._window.running === 'triggered')
+        const phase = !this._window.periodicEnabled
+            ? 'speakers.window_disabled'
+            : ((this._window.running === 'running' || this._window.running === 'periodic' || this._window.running === 'triggered')
             ? 'speakers.window_running'
             : (this._window.running === 'finalizing'
                 ? 'speakers.window_finalizing'
-                : 'speakers.window_idle');
-        wLabel.textContent = `${i18n.t('speakers.window_label')} · ${i18n.t(phase)}`;
+                : 'speakers.window_idle'));
+        wLabel.textContent = `${i18n.t('speakers.window_cycle')} · ${i18n.t(phase)}`;
         wFill.style.width = `${Math.round(Math.max(0, Math.min(1, this._window.progress)) * 100)}%`;
         wFill.dataset.state = this._window.running;
         if (this._seen.size === 0) {
@@ -106,7 +135,11 @@ export class Speakers {
                 if (typeof next !== 'string') return;
                 const trimmed = next.trim();
                 if (!trimmed || trimmed === info.name) return;
+                this._aliases[String(id)] = trimmed;
+                this._saveAliases();
+                this._seen.set(id, { name: trimmed });
                 this.onRename?.(id, trimmed);
+                this.render();
             });
             return chip;
         }));

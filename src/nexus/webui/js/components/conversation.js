@@ -15,6 +15,8 @@ export class Conversation {
     constructor() {
         this._el = null;
         this._hint = null;
+        this._laneLive = null;
+        this._lanePrefill = null;
         this._liveEntity = null;   // DOM node accumulating speech_token text
         this._turnsBySpan = new Map();
     }
@@ -24,18 +26,41 @@ export class Conversation {
         el.className = 'conversation';
         el.setAttribute('role', 'log');
         el.setAttribute('aria-live', 'polite');
+        el.innerHTML = `
+            <section class="conversation__lane conversation__lane--live" data-role="lane-live">
+                <h2 class="conversation__lane-title" data-role="title-live"></h2>
+            </section>
+            <section class="conversation__lane conversation__lane--prefill" data-role="lane-prefill">
+                <h2 class="conversation__lane-title" data-role="title-prefill"></h2>
+            </section>`;
         parent.appendChild(el);
         this._el = el;
+        this._laneLive = el.querySelector('[data-role=lane-live]');
+        this._lanePrefill = el.querySelector('[data-role=lane-prefill]');
+        this._renderTitles();
         this._renderHint();
-        i18n.onChange(() => this._renderHint());
+        i18n.onChange(() => {
+            this._renderTitles();
+            this._renderHint();
+        });
+    }
+
+    _renderTitles() {
+        this._el?.querySelector('[data-role=title-live]')?.replaceChildren(i18n.t('turn.lane_live'));
+        this._el?.querySelector('[data-role=title-prefill]')?.replaceChildren(i18n.t('turn.lane_prefill'));
     }
 
     _renderHint() {
-        if (this._el.children.length > (this._hint ? 1 : 0)) return;
+        const hasTurn = this._laneLive?.querySelector('.turn') || this._lanePrefill?.querySelector('.turn');
+        if (hasTurn) {
+            this._hint?.remove();
+            this._hint = null;
+            return;
+        }
         if (!this._hint) {
             this._hint = document.createElement('p');
             this._hint.className = 'hint';
-            this._el.appendChild(this._hint);
+            this._laneLive.appendChild(this._hint);
         }
         this._hint.textContent = i18n.t('hint.empty');
     }
@@ -73,7 +98,7 @@ export class Conversation {
         this._clearHint();
         const id = (typeof msg.speaker_id === 'number') ? msg.speaker_id : -1;
         const name = this._speakerLabel(id, msg.speaker_name);
-        const turn = this._appendTurn({ who: name, color: spkColor(id), text: msg.text, entity: false });
+        const turn = this._appendTurn({ who: name, color: spkColor(id), text: msg.text, entity: false, lane: 'live' });
         const note = document.createElement('div');
         note.className = 'turn__amend';
         note.innerHTML = `
@@ -103,6 +128,7 @@ export class Conversation {
             <span class="turn__amend-tag turn__amend-tag--prefill">${i18n.t('turn.prefill')}</span>
             <span>${finalLabel}</span>`;
         rec.turn.classList.add('turn--amended');
+        this._lanePrefill.appendChild(rec.turn);
         this._scroll();
     }
 
@@ -112,7 +138,7 @@ export class Conversation {
         this._clearHint();
         if (!this._liveEntity) {
             this._liveEntity = this._appendTurn({
-                who: '', color: 'var(--c-accent)', text: '', entity: true,
+                who: '', color: 'var(--c-accent)', text: '', entity: true, lane: 'live',
             }).querySelector('.turn__text');
         }
         this._liveEntity.textContent += msg.text;
@@ -131,11 +157,11 @@ export class Conversation {
             if (msg.text) this._liveEntity.textContent = msg.text;
             this._liveEntity = null;
         } else if (msg.text && msg.text.trim()) {
-            this._appendTurn({ who: '', color: 'var(--c-accent)', text: msg.text, entity: true });
+            this._appendTurn({ who: '', color: 'var(--c-accent)', text: msg.text, entity: true, lane: 'live' });
         }
     }
 
-    _appendTurn({ who, color, text, entity }) {
+    _appendTurn({ who, color, text, entity, lane = 'live' }) {
         const turn = document.createElement('article');
         turn.className = 'turn' + (entity ? ' turn--entity' : '');
         turn.innerHTML = `
@@ -149,7 +175,7 @@ export class Conversation {
         turn.querySelector('.turn__name').textContent = who;
         turn.querySelector('.turn__time').textContent = clockNow();
         turn.querySelector('.turn__text').textContent = text;
-        this._el.appendChild(turn);
+        (lane === 'prefill' ? this._lanePrefill : this._laneLive).appendChild(turn);
         this._scroll();
         return turn;
     }
@@ -173,7 +199,7 @@ export class Conversation {
             btn.setAttribute('aria-expanded', String(open));
             btn.firstElementChild.textContent = open ? '▾' : '▸';
         });
-        this._el.appendChild(box);
+        this._laneLive.appendChild(box);
         this._scroll();
     }
 

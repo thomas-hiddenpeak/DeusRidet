@@ -157,7 +157,14 @@
   background: linear-gradient(90deg, var(--c-listen), var(--c-speak), var(--c-warn));
   transition: width var(--t-med);
 }
+.speakers__window-fill[data-state="idle"] {
+  background: linear-gradient(90deg, #2a3448, var(--c-accent));
+}
 .speakers__window-fill[data-state="running"] {
+  background: linear-gradient(90deg, var(--c-accent), var(--c-think));
+}
+.speakers__window-fill[data-state="periodic"],
+.speakers__window-fill[data-state="triggered"] {
   background: linear-gradient(90deg, var(--c-accent), var(--c-think));
 }
 .speakers__window-fill[data-state="finalizing"] {
@@ -182,6 +189,26 @@
 .speaker-chip--active { outline: 1px solid var(--c-accent); }
 
 /* Conversation turns ------------------------------------------------- */
+.conversation {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-3);
+}
+.conversation__lane {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.conversation__lane-title {
+  margin: 0 0 var(--sp-2) 0;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--c-text-faint);
+  letter-spacing: 0.04em;
+}
+.conversation__lane--prefill .conversation__lane-title {
+  color: var(--c-accent);
+}
 .turn {
   display: flex;
   flex-direction: column;
@@ -230,6 +257,12 @@
 .turn__amend-tag--prefill { color: var(--c-accent); }
 .turn--amended .turn__text {
   box-shadow: inset 0 0 0 1px rgba(122, 162, 255, 0.55);
+}
+
+@media (max-width: 860px) {
+  .conversation {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Thinking layer (collapsible) -------------------------------------- */
