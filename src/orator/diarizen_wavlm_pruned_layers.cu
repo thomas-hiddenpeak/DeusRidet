@@ -105,21 +105,24 @@ __global__ void gather_pos_bias_kernel(const int* __restrict__ bucket,  // [T*T]
     out[idx] = emb[(long)b * 16 + h];
 }
 
-// Gated relative-position scalar per (head h in 0..15, query t). Reads the
-// attention input x [T, 1024] reshaped to (16 heads, 64), applies the shared
-// gru_rel_pos_linear (64->8), folds 8->2 by summing 4-wide groups, sigmoids,
-// then gate_a_1 = ga*(gb*const[h] - 1) + 2. One thread per (h, t).
-__global__ void gru_gate_kernel(const float* __restrict__ x,       // [T,1024]
-                                const float* __restrict__ W,       // [8,64]
-                                const float* __restrict__ b,       // [8]
-                                const float* __restrict__ cst,     // [16]
-                                float* __restrict__ gate,          // [16,T]
-                                int T) {
+// Gated relative-position scalar per (chunk b, head h in 0..15, query t).
+// Reads the attention input x [B,T,1024] reshaped to (16 heads, 64), applies
+// the shared gru_rel_pos_linear (64->8), folds 8->2 by summing 4-wide groups,
+// sigmoids, then gate_a_1 = ga*(gb*const[h] - 1) + 2.
+__global__ void gru_gate_batch_kernel(const float* __restrict__ x,   // [B,T,1024]
+                                      const float* __restrict__ W,   // [8,64]
+                                      const float* __restrict__ b,   // [8]
+                                      const float* __restrict__ cst, // [16]
+                                      float* __restrict__ gate,      // [B,16,T]
+                                      int B, int T) {
     long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= (long)16 * T) return;
-    int h = (int)(idx / T);
-    int t = (int)(idx % T);
-    const float* xh = x + (long)t * 1024 + h * 64;
+    long ht = (long)16 * T;
+    if (idx >= (long)B * ht) return;
+    int cb = (int)(idx / ht);
+    long r = idx % ht;
+    int h = (int)(r / T);
+    int t = (int)(r % T);
+    const float* xh = x + ((long)cb * T + t) * 1024 + h * 64;
     float lin[8];
 #pragma unroll
     for (int o = 0; o < 8; ++o) {
@@ -132,7 +135,7 @@ __global__ void gru_gate_kernel(const float* __restrict__ x,       // [T,1024]
     float s1 = lin[4] + lin[5] + lin[6] + lin[7];
     float ga = 1.0f / (1.0f + expf(-s0));
     float gb = 1.0f / (1.0f + expf(-s1));
-    gate[(long)h * T + t] = ga * (gb * cst[h] - 1.0f) + 2.0f;
+    gate[((long)cb * 16 + h) * T + t] = ga * (gb * cst[h] - 1.0f) + 2.0f;
 }
 
 // Add the gated relative-position bias to raw batched-GEMM scores. The
@@ -191,11 +194,17 @@ __global__ void softmax_rows_kernel(float* __restrict__ S, int T) {
     for (int k = threadIdx.x; k < T; k += blockDim.x) s[k] *= inv;
 }
 
-// a += b, elementwise.
-__global__ void add_inplace_kernel(float* __restrict__ a,
-                                   const float* __restrict__ b, long n) {
+// a += (b + bias[col]) with the same addition order as the old two-kernel
+// path: first add the bias into the projection value, then add to residual.
+__global__ void add_bias_inplace_kernel(float* __restrict__ a,
+                                        const float* __restrict__ b,
+                                        const float* __restrict__ bias,
+                                        int cols, long n) {
     long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) a[i] += b[i];
+    if (i >= n) return;
+    float v = b[i];
+    v += bias[i % cols];
+    a[i] += v;
 }
 
 // Incremental weighted-tap accumulate: sum[i] += ws[l] * src[i]. Replaces the
@@ -387,7 +396,7 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
         cudaMemcpyAsync(d_rh, remaining_heads_[layer].data(), nh * sizeof(int),
                         cudaMemcpyHostToDevice, stream_);
 
-        const std::size_t bytes_gate = (std::size_t)16 * T * sizeof(float);
+        const std::size_t bytes_gate = (std::size_t)B * 16 * T * sizeof(float);
         float* gate = static_cast<float*>(scratch_acquire(bytes_gate));
         const std::size_t bytes_S = (std::size_t)nh * T * T * sizeof(float);
         float* S = static_cast<float*>(scratch_acquire(bytes_S));
@@ -395,19 +404,20 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
         const float scaling = 0.125f;  // 64^-0.5
         const float zero = 0.0f, one = 1.0f;
 
+        gru_gate_batch_kernel<<<div_ceil_(B * 16 * T, kBlock), kBlock, 0,
+                    stream_>>>(xn, Wg, bg, cst, gate, B, T);
+
         // Attention is block-diagonal: chunk c attends only within its own T
         // frames. Loop chunks; per chunk the Q·Kᵀ scores and S·V context are
         // tensor-core strided-batched GEMMs over the nh heads (the dense parts
         // above are already fused over all chunks).
         for (int c = 0; c < B; ++c) {
-            float* xn_c = xn + (std::size_t)c * T * H;
             float* Q_c = Q + (std::size_t)c * T * inner;
             float* K_c = K + (std::size_t)c * T * inner;
             float* V_c = V + (std::size_t)c * T * inner;
             float* ctx_c = ctx + (std::size_t)c * T * inner;
+            float* gate_c = gate + (std::size_t)c * 16 * T;
 
-            gru_gate_kernel<<<div_ceil_(16 * T, kBlock), kBlock, 0, stream_>>>(
-                xn_c, Wg, bg, cst, gate, T);
             cublasSgemmStridedBatched(
                 blas, CUBLAS_OP_T, CUBLAS_OP_N, T, T, 64, &scaling,
                 K_c, nh * 64, 64,
@@ -415,7 +425,7 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
                 &zero, S, T, (long long)T * T, nh);
             long stot = (long)nh * T * T;
             attn_bias_kernel<<<(int)((stot + kBlock - 1) / kBlock), kBlock, 0,
-                              stream_>>>(d_rh, gate, d_pos_bias, S, T, nh);
+                              stream_>>>(d_rh, gate_c, d_pos_bias, S, T, nh);
             softmax_rows_kernel<<<nh * T, 256, 0, stream_>>>(S, T);
             cublasSgemmStridedBatched(
                 blas, CUBLAS_OP_N, CUBLAS_OP_N, 64, T, T, &one,
@@ -426,9 +436,9 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
 
         // out_proj then residual add fuse across chunks: [B*T, H].
         float* attn_out = static_cast<float*>(scratch_acquire(bytes_BTH));
-        linear_(blas, ctx, Wo, bo, attn_out, BT, H, inner);
-        add_inplace_kernel<<<div_ceil_(BT * H, kBlock), kBlock, 0, stream_>>>(
-            d_hidden, attn_out, (long)BT * H);
+        linear_(blas, ctx, Wo, nullptr, attn_out, BT, H, inner);
+        add_bias_inplace_kernel<<<div_ceil_(BT * H, kBlock), kBlock, 0, stream_>>>(
+            d_hidden, attn_out, bo, H, (long)BT * H);
 
         scratch_release(xn, bytes_BTH);
         scratch_release(Q, bytes_BTinner);
@@ -463,9 +473,9 @@ bool DiarizenWavlmPruned::run_encoder_layer_(int layer, float* d_hidden, int B,
     linear_(blas, fn, Wi, bi, inter, BT, ffn, H);
     gelu_exact_kernel<<<div_ceil_(BT * ffn, kBlock), kBlock, 0, stream_>>>(inter, BT * ffn);
     float* ff = static_cast<float*>(scratch_acquire(bytes_BTH_ff));
-    linear_(blas, inter, Wo2, bo2, ff, BT, H, ffn);
-    add_inplace_kernel<<<div_ceil_(BT * H, kBlock), kBlock, 0, stream_>>>(d_hidden, ff,
-                                                              (long)BT * H);
+    linear_(blas, inter, Wo2, nullptr, ff, BT, H, ffn);
+    add_bias_inplace_kernel<<<div_ceil_(BT * H, kBlock), kBlock, 0, stream_>>>(
+        d_hidden, ff, bo2, H, (long)BT * H);
     scratch_release(fn, bytes_BTH_ff);
     scratch_release(inter, bytes_BTffn);
     scratch_release(ff, bytes_BTH_ff);
