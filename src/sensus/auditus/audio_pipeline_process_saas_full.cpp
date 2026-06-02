@@ -18,6 +18,7 @@
  */
 #include "audio_pipeline.h"
 #include "separatio_orator_probe.h"
+#include "../../orator/orator_online_judgment.h"  // ② concern seam (redesign S1)
 #include "../../communis/log.h"
 #include "../../communis/tempus.h"
 
