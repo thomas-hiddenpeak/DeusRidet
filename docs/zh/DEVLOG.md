@@ -5,8 +5,7 @@
 新增条目：在 `devlog/YYYY-MM-DD.md` 中创建文件，并在下方列表顶端追加链接。
 
 ## 开发日志
-
-- [2026-05-30](devlog/2026-05-30.md) — DiariZen-v2 原生 CUDA 流水线活体验证：接入 `awaken`，受 `DEUSRIDET_DIARIZEN_NATIVE` 控制（`d1b9d82`）；`tests/test.mp3` 精度 93.5% → 93.7%（+0.2 pp）。默认未翻转——原生单 chunk finalize RTF 0.54 vs Python-IPC 0.21；batch 是翻转默认前的关键性能任务
+- [2026-06-02](devlog/2026-06-02.md) — Orator 在线重设计：诊断 holdback 为何零修正（周期 worker 默认关闭），live 验证 B1+滑动窗口修复（17 次 pass、124 次改写、干净 4 簇双射），翻转 ASR/周期默认值（`cee2b02`），清理 0 消费说话人 id 配置面 + 按 R1 拆分 `audio_pipeline.h` 795→500（`9cc6741`），并修复 vires PUBLIC 链接欠债使全部 43 个目标可构建（`fe84f20`）- [2026-05-30](devlog/2026-05-30.md) — DiariZen-v2 原生 CUDA 流水线活体验证：接入 `awaken`，受 `DEUSRIDET_DIARIZEN_NATIVE` 控制（`d1b9d82`）；`tests/test.mp3` 精度 93.5% → 93.7%（+0.2 pp）。默认未翻转——原生单 chunk finalize RTF 0.54 vs Python-IPC 0.21；batch 是翻转默认前的关键性能任务
 - [2026-04-30](devlog/2026-04-30.md) — Step 18n-18aa：Auditus 分离源 identity fusion selector、runtime fusion shadow ASR/speaker evidence、arbitrium + ledger/canary telemetry、deterministic/strong-pending/newborn enrollment、stable canary precision gate，以及 Mel rolling compaction；r2 replay 恢复 4/4 个 birth、0 stable wrong、0 authority violation
 - [2026-04-29](devlog/2026-04-29.md) — Step 18l-18m：在隔离 py313_audio_labs 中完成上游 ClearerVoice + 3D-Speaker + FunASR smoke，并跑通 top30 Auditus 上游-vs-C++ 探针；生产 py313 CUDA torch 保持不变
 - [2026-04-28](devlog/2026-04-28.md) — Step 18g-18k：Auditus 分离源 ASR + speaker-ID 对 GT 时间线验证；identity monitor 保持 raw_o16000 为生产主状态并完成失败归因
