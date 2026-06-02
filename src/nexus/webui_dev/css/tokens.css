@@ -1,0 +1,33 @@
+/* tokens.css — Design tokens for the redesigned DeusRidet cockpit. */
+:root {
+    --clr-bg: #f5f1e8;
+    --clr-surface: #fffaf2;
+    --clr-surface-strong: #fffef9;
+    --clr-border: #d4c6af;
+    --clr-border-strong: #b49b77;
+    --clr-text: #1a2a36;
+    --clr-text-dim: #586776;
+    --clr-accent: #0f6f6b;
+    --clr-accent-strong: #0a4f58;
+    --clr-success: #2b8f4e;
+    --clr-danger: #b63c2d;
+    --clr-warn: #a5741f;
+
+    --font-mono: 'IBM Plex Mono', 'JetBrains Mono', 'Fira Code', monospace;
+    --font-sans: 'Space Grotesk', 'Manrope', 'Avenir Next', 'Segoe UI', sans-serif;
+
+    --sp-xs: 4px;
+    --sp-sm: 8px;
+    --sp-md: 16px;
+    --sp-lg: 24px;
+    --sp-xl: 32px;
+    --sp-2xl: 44px;
+
+    --radius-sm: 10px;
+    --radius: 16px;
+    --radius-lg: 22px;
+
+    --shadow-soft: 0 10px 28px rgba(28, 33, 37, 0.08);
+    --shadow-strong: 0 18px 40px rgba(24, 30, 34, 0.12);
+    --transition: 170ms ease;
+}

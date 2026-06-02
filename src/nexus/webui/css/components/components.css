@@ -1,0 +1,225 @@
+/* components.css — styles for the user-facing components.
+ * BEM class names; one block per major component. No inline styles anywhere. */
+
+/* Connection pill ---------------------------------------------------- */
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-xs);
+  background: var(--c-bg-elev-2);
+  color: var(--c-text-dim);
+}
+.conn__dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--c-text-faint);
+  transition: background var(--t-med);
+}
+.conn--on .conn__dot { background: var(--c-ok); box-shadow: 0 0 8px var(--c-ok); }
+.conn--off .conn__dot { background: var(--c-warn); }
+
+/* Language toggle ---------------------------------------------------- */
+.lang {
+  border: 1px solid var(--c-line);
+  background: transparent;
+  color: var(--c-text-dim);
+  border-radius: var(--r-pill);
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+.lang:hover { color: var(--c-text); border-color: var(--c-accent); }
+
+/* Presence (entity wakefulness orb) ---------------------------------- */
+.presence {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4);
+  background: var(--c-bg-elev);
+}
+.presence__orb {
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, var(--c-accent), var(--c-accent-soft));
+  flex: 0 0 auto;
+  animation: orb-breathe 4s ease-in-out infinite;
+}
+.presence--active .presence__orb { animation-duration: 2.4s; }
+.presence--dreaming .presence__orb {
+  background: radial-gradient(circle at 35% 30%, var(--c-think), #2a1f44);
+  animation-duration: 6s;
+}
+@keyframes orb-breathe {
+  0%, 100% { transform: scale(0.92); opacity: 0.7; }
+  50%      { transform: scale(1.0);  opacity: 1; }
+}
+.presence__body { display: flex; flex-direction: column; gap: 2px; }
+.presence__state { font-size: var(--fs-md); font-weight: 600; }
+.presence__meta { font-size: var(--fs-xs); color: var(--c-text-dim); }
+.presence__wake {
+  margin-top: var(--sp-1);
+  width: 160px; max-width: 40vw;
+  height: 4px; border-radius: var(--r-pill);
+  background: var(--c-bg-elev-2);
+  overflow: hidden;
+}
+.presence__wake-fill {
+  height: 100%;
+  background: var(--c-accent);
+  transition: width var(--t-slow);
+}
+
+/* Listening strip ---------------------------------------------------- */
+.listen {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--c-bg-elev);
+  font-size: var(--fs-sm);
+}
+.listen__icon {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--c-text-faint);
+  transition: background var(--t-fast), box-shadow var(--t-fast);
+}
+.listen--hot .listen__icon { background: var(--c-listen); box-shadow: 0 0 8px var(--c-listen); }
+.listen__label { color: var(--c-text-dim); }
+.listen__meter {
+  flex: 1;
+  height: 6px; border-radius: var(--r-pill);
+  background: var(--c-bg-elev-2);
+  overflow: hidden;
+}
+.listen__meter-fill {
+  height: 100%; width: 0;
+  background: var(--c-listen);
+  transition: width var(--t-fast);
+}
+.listen__mic {
+  border: 1px solid var(--c-line);
+  background: transparent;
+  color: var(--c-text-dim);
+  border-radius: var(--r-pill);
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.listen__mic--on { color: var(--c-listen); border-color: var(--c-listen); }
+
+/* Speaker band ------------------------------------------------------- */
+.speakers {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--c-bg-elev);
+  overflow-x: auto;
+  min-height: 36px;
+}
+.speakers__label { font-size: var(--fs-xs); color: var(--c-text-faint); flex: 0 0 auto; }
+.speaker-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-xs);
+  background: var(--c-bg-elev-2);
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.speaker-chip__dot { width: 8px; height: 8px; border-radius: 50%; }
+.speaker-chip--active { outline: 1px solid var(--c-accent); }
+
+/* Conversation turns ------------------------------------------------- */
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-4);
+  animation: turn-in var(--t-med);
+}
+@keyframes turn-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.turn__who {
+  display: flex; align-items: center; gap: var(--sp-2);
+  font-size: var(--fs-xs); color: var(--c-text-dim);
+}
+.turn__dot { width: 8px; height: 8px; border-radius: 50%; }
+.turn__time { color: var(--c-text-faint); }
+.turn__text {
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-md);
+  background: var(--c-bg-elev);
+  font-size: var(--fs-md);
+}
+.turn--entity .turn__text {
+  background: var(--c-accent-soft);
+  color: var(--c-text);
+}
+.turn--entity .turn__dot { background: var(--c-accent); }
+
+/* Thinking layer (collapsible) -------------------------------------- */
+.thinking { margin-bottom: var(--sp-4); }
+.thinking__toggle {
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  border: none; background: transparent;
+  color: var(--c-think);
+  font-size: var(--fs-xs); cursor: pointer;
+  padding: var(--sp-1) 0;
+}
+.thinking__body {
+  margin-top: var(--sp-2);
+  padding: var(--sp-3);
+  border-left: 2px solid var(--c-think);
+  background: var(--c-bg-elev);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  font-family: var(--f-mono);
+  font-size: var(--fs-sm);
+  color: var(--c-text-dim);
+  white-space: pre-wrap;
+}
+.thinking__body[hidden] { display: none; }
+
+/* Composer ----------------------------------------------------------- */
+.composer { display: flex; gap: var(--sp-2); align-items: flex-end; }
+.composer__input {
+  flex: 1;
+  resize: none;
+  min-height: 40px; max-height: 120px;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--c-line);
+  background: var(--c-bg-elev-2);
+  color: var(--c-text);
+  font-family: var(--f-sans);
+  font-size: var(--fs-md);
+}
+.composer__input:focus { outline: none; border-color: var(--c-accent); }
+.composer__send {
+  border: none;
+  border-radius: var(--r-md);
+  background: var(--c-accent);
+  color: #0b0e14;
+  font-weight: 600;
+  padding: var(--sp-2) var(--sp-5);
+  cursor: pointer;
+  height: 40px;
+}
+.composer__send:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Empty hint --------------------------------------------------------- */
+.hint {
+  text-align: center;
+  color: var(--c-text-faint);
+  font-size: var(--fs-sm);
+  margin-top: var(--sp-7);
+}

@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeusRidet</title>
+    <link rel="stylesheet" href="css/tokens.css">
+    <link rel="stylesheet" href="css/layout.css">
+    <link rel="stylesheet" href="css/components/panels.css">
+    <link rel="stylesheet" href="css/components/eval-run-panel.css">
+    <link rel="stylesheet" href="css/components/vires-panel.css">
+</head>
+<body>
+    <header class="app-header">
+        <div class="app-brand">
+            <span class="app-kicker">Nexus realtime cockpit</span>
+            <h1 class="app-title">DeusRidet</h1>
+            <p class="app-subtitle">One-page operations surface for live speaker, ASR, DiariZen, and consciousness telemetry.</p>
+        </div>
+        <div class="app-header__actions" aria-label="Runtime status">
+            <span class="runtime-chip">Live WS + HTTP</span>
+            <span class="runtime-chip">Fixture: tests/test.mp3</span>
+            <span class="connection-status" id="conn-status" aria-live="polite">
+                Disconnected
+            </span>
+        </div>
+    </header>
+
+    <main class="app-main">
+        <section class="stage-deck" aria-label="Live Evaluation Stage">
+            <article class="panel eval-run-panel" aria-label="Evaluation Run" id="eval-run-panel">
+            </article>
+            <aside class="stage-brief" aria-label="System brief and principles">
+                <section class="panel brief-card brief-card--session">
+                    <h2 class="panel__title">Session Promise</h2>
+                    <dl class="brief-list">
+                        <div><dt>Capture</dt><dd>Listen, detect, and keep the live floor visible.</dd></div>
+                        <div><dt>Understand</dt><dd>Track speakers and surface transcript flow in one place.</dd></div>
+                        <div><dt>Review</dt><dd>Finalize and inspect evidence only when the run is worth reviewing.</dd></div>
+                    </dl>
+                </section>
+                <section class="panel brief-card brief-card--accent brief-card--studio">
+                    <h2 class="panel__title">Assistant Studio</h2>
+                    <p class="brief-copy">Only open tuning and persona controls when you need to shape the assistant. The live surface stays focused on the conversation.</p>
+                    <div class="brief-actions">
+                        <button class="btn" id="open-assistant-studio" type="button">Open Assistant Studio</button>
+                        <button class="btn" id="open-diagnostics-live" type="button">Open Live Diagnostics</button>
+                        <button class="btn" id="open-diagnostics-review" type="button">Open Review Diagnostics</button>
+                    </div>
+                </section>
+            </aside>
+        </section>
+
+        <section class="panel mission-flow" aria-label="Session Workflow">
+            <div class="mission-flow__head">
+                <h2 class="panel__title">Session Workflow</h2>
+                <p class="mission-flow__subtitle">按流程操作：先准备，再采集，再识别，最后复盘。界面会给出当前推荐动作。</p>
+            </div>
+            <div class="mission-flow__body">
+                <ol class="mission-steps" id="mission-steps">
+                    <li><button class="mission-step" type="button" data-step="1" data-target="eval-run-panel">1. 准备连接</button></li>
+                    <li><button class="mission-step" type="button" data-step="2" data-target="audio-panel">2. 开始采集</button></li>
+                    <li><button class="mission-step" type="button" data-step="3" data-target="speaker-panel">3. 说话人识别</button></li>
+                    <li><button class="mission-step" type="button" data-step="4" data-target="asr-panel">4. 语音转写</button></li>
+                    <li><button class="mission-step" type="button" data-step="5" data-target="diarizen-panel">5. 结束与复盘</button></li>
+                </ol>
+                <div class="mission-next" aria-live="polite">
+                    <span class="mission-next__label">推荐动作</span>
+                    <p class="mission-next__text" id="mission-next-text">等待连接后开始采集。</p>
+                </div>
+                <div class="mission-actions" aria-label="Workflow quick actions">
+                    <button class="btn" id="mission-act-capture" type="button">切换麦克风</button>
+                    <button class="btn" id="mission-act-asr" type="button">切换 ASR</button>
+                    <button class="btn" id="mission-act-finalize" type="button">执行 Finalize</button>
+                    <button class="btn" id="mission-act-reset" type="button">重置 Run</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="product-shell" aria-label="Unified Command Surface">
+            <aside class="product-rail product-rail--left" aria-label="Input and Control">
+                <section class="panel audio-panel" aria-label="Audio Capture" id="audio-panel">
+                    <h2 class="panel__title">Audio Input</h2>
+                    <div class="audio-controls">
+                        <button id="mic-toggle" class="btn btn--mic" aria-pressed="false"
+                                disabled>
+                            Enable Mic
+                        </button>
+                        <button id="loopback-toggle" class="btn btn--loop" disabled>
+                            Loopback Off
+                        </button>
+                    </div>
+                    <div class="audio-stats" id="audio-stats" aria-live="polite">
+                        <span class="stat">Sent: <strong id="stat-sent">0</strong></span>
+                        <span class="stat"><strong id="stat-bytes">0</strong></span>
+                    </div>
+                    <canvas id="audio-viz" class="audio-viz" width="400" height="48"
+                            aria-label="Mic audio level"></canvas>
+
+                    <h3 class="panel__subtitle">Server</h3>
+                    <div class="audio-stats" id="server-stats" aria-live="polite">
+                        <span class="stat">Recv: <strong id="srv-frames">0</strong></span>
+                        <span class="stat">RMS: <strong id="srv-rms">0</strong></span>
+                        <span class="stat">Peak: <strong id="srv-peak">0</strong></span>
+                    </div>
+                    <div class="level-bar-wrap">
+                        <div class="level-bar" id="srv-rms-bar"></div>
+                    </div>
+                    <div class="level-bar-wrap level-bar-wrap--peak">
+                        <div class="level-bar level-bar--peak" id="srv-peak-bar"></div>
+                    </div>
+
+                    <h3 class="panel__subtitle">Pipeline</h3>
+                    <div class="audio-stats" aria-live="polite">
+                        <span class="stat">Mel: <strong id="pipe-mel">0</strong></span>
+                        <span class="stat">Speech: <strong id="pipe-speech">0</strong></span>
+                    </div>
+                    <div class="vad-indicator" id="vad-indicator" aria-live="polite">
+                        <span class="vad-dot" id="vad-dot"></span>
+                        <span id="vad-label">Silence</span>
+                        <span class="stat silero-prob">Silero: <strong id="silero-prob">—</strong></span>
+                    </div>
+                    <div class="vad-threshold-control">
+                        <label for="input-gain" class="vad-threshold-label">
+                            Gain: <strong id="input-gain-val">1.0</strong>x
+                        </label>
+                        <input type="range" id="input-gain" class="vad-threshold-slider"
+                               min="0.5" max="10" step="0.5" value="1"
+                               aria-label="Input gain multiplier">
+                    </div>
+                    <div class="vad-threshold-control">
+                        <label for="silero-threshold" class="vad-threshold-label">
+                            <button id="silero-toggle" class="btn btn--vad btn--active"
+                                    aria-pressed="true">Silero</button>
+                            <strong id="silero-threshold-val">0.50</strong>
+                        </label>
+                        <input type="range" id="silero-threshold" class="vad-threshold-slider"
+                               min="0" max="1" step="0.05" value="0.5"
+                               aria-label="Silero VAD threshold">
+                    </div>
+                    <div class="level-bar-wrap">
+                        <div class="level-bar level-bar--silero" id="silero-prob-bar"></div>
+                    </div>
+                </section>
+
+                <section class="panel speaker-panel" aria-label="Speaker Identification" id="speaker-panel">
+                    <h2 class="panel__title">Speaker ID</h2>
+                    <div class="spk-controls">
+                    <span class="spk-engine-chip" aria-live="polite">Engine: CAM++ (Auto)</span>
+                        <button id="spk-clear-all" class="btn btn--vad">Clear All</button>
+                        <button id="spk-settings-toggle" class="btn btn--vad">Settings</button>
+                    </div>
+                    <div class="spk-settings" id="spk-settings" hidden>
+                        <div class="vad-source-control">
+                            <label class="vad-threshold-label">
+                                VAD → Speaker:
+                            </label>
+                            <select id="vad-source-select" class="vad-source-select">
+                                <option value="any">Any (OR)</option>
+                                <option value="silero" selected>Silero</option>
+                            </select>
+                        </div>
+                        <div class="spk-thresh-row">
+                            <label class="spk-thresh-label">CAM++
+                                <strong id="speaker-threshold-val">0.75</strong></label>
+                            <input type="range" id="speaker-threshold" class="vad-threshold-slider"
+                                   min="0.3" max="0.95" step="0.05" value="0.75">
+                        </div>
+                        <div class="spk-thresh-divider"></div>
+                        <div class="spk-thresh-row">
+                            <label class="spk-thresh-label">
+                                <button id="spk-early-toggle" class="btn btn--vad btn--active btn--sm"
+                                        aria-pressed="true">Early</button>
+                                Trigger at <strong id="spk-early-val">1.7</strong>s
+                            </label>
+                            <input type="range" id="spk-early-slider" class="vad-threshold-slider"
+                                   min="0.5" max="5.0" step="0.1" value="1.7"
+                                   aria-label="Early trigger threshold in seconds">
+                        </div>
+                        <div class="spk-thresh-row">
+                            <label class="spk-thresh-label">Min Speech
+                                <strong id="spk-minspeech-val">1.0</strong>s</label>
+                            <input type="range" id="spk-minspeech-slider" class="vad-threshold-slider"
+                                   min="0.5" max="5.0" step="0.1" value="1.0"
+                                   aria-label="Minimum speech duration for full-segment identification">
+                        </div>
+                    </div>
+                    <div id="speaker-roster" class="speaker-roster"></div>
+                </section>
+            </aside>
+
+            <section class="conversation-stage" aria-label="Conversation Stage">
+                <section class="panel conversation-shell">
+                    <div class="conversation-shell__intro">
+                        <span class="conversation-shell__eyebrow">Live conversation</span>
+                        <h2 class="conversation-shell__title">Assistant session</h2>
+                        <p class="conversation-shell__lede">主界面只保留听、说、转写与当前会话，让用户像在使用实时助手，而不是盯着工程状态机。</p>
+                    </div>
+                </section>
+                <section class="panel asr-panel" aria-label="ASR" id="asr-panel">
+                </section>
+
+                <section class="panel text-output-panel panel--hero-dialogue" aria-label="Dialogue" id="text-output-panel">
+                </section>
+            </section>
+
+            <aside class="product-rail product-rail--right lane--analysis" aria-label="Diagnostics and Records">
+                <section class="panel analysis-switch" aria-label="Analysis View Switch">
+                    <div class="analysis-switch__head">
+                        <h2 class="panel__title">Analysis Focus</h2>
+                    </div>
+                    <div class="analysis-switch__actions" role="tablist" aria-label="Analysis views">
+                        <button class="btn btn--vad analysis-switch__btn is-active" id="analysis-tab-live"
+                            role="tab" aria-selected="true"
+                                data-analysis-mode="live" type="button">实时视图</button>
+                        <button class="btn btn--vad analysis-switch__btn" id="analysis-tab-review"
+                            role="tab" aria-selected="false"
+                                data-analysis-mode="review" type="button">复盘视图</button>
+                    </div>
+                </section>
+
+                <section class="panel speaker-debug-panel" aria-label="Speaker Debug" id="speaker-debug"
+                         data-analysis-view="live">
+                </section>
+
+                <section class="panel asr-transcript-panel" aria-label="ASR Transcripts" id="asr-transcript-panel"
+                         data-analysis-view="review">
+                </section>
+
+                <section class="panel asr-log-panel" aria-label="ASR Logs" id="asr-log-panel"
+                         data-analysis-view="live">
+                </section>
+
+                <section class="panel diarizen-panel" aria-label="DiariZen Recluster" id="diarizen-panel"
+                         data-analysis-view="review">
+                </section>
+
+                <section class="panel vires-panel" aria-label="Vires Compute Substrate" id="vires-panel"
+                         data-analysis-view="live">
+                </section>
+
+                <section class="panel timeline-panel" aria-label="Timeline" id="timeline-panel"
+                         data-analysis-view="live">
+                </section>
+
+                <section class="panel log-panel" aria-label="Server Log" data-analysis-view="review">
+                    <h2 class="panel__title">Log</h2>
+                    <pre id="log-output" class="log-output" role="log" aria-live="polite"></pre>
+                </section>
+            </aside>
+        </section>
+
+        <dialog id="assistant-studio-modal" class="app-modal app-modal--studio" aria-label="Assistant Studio">
+            <div class="app-modal__card app-modal__card--studio">
+                <div class="app-modal__head">
+                    <h3 class="app-modal__title">Assistant Studio</h3>
+                    <button id="close-assistant-studio" class="btn btn--vad" type="button">Close</button>
+                </div>
+                <p class="app-modal__desc">这里处理人格、思维和生成参数。它属于二级工作区，不占用主会话视野。</p>
+                <div class="studio-grid">
+                    <section class="panel consciousness-panel" aria-label="Consciousness" id="consciousness-panel">
+                    </section>
+                    <section class="panel config-panel" aria-label="Configuration" id="config-panel">
+                    </section>
+                </div>
+            </div>
+        </dialog>
+    </main>
+
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>

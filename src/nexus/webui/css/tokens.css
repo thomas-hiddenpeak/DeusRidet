@@ -1,33 +1,66 @@
-/* tokens.css — Design tokens for the redesigned DeusRidet cockpit. */
+/* tokens.css — design tokens for the user-facing interface.
+ * Single source of truth for colour, spacing, type, motion. No component
+ * may hard-code a raw value; everything references a custom property here. */
+
 :root {
-    --clr-bg: #f5f1e8;
-    --clr-surface: #fffaf2;
-    --clr-surface-strong: #fffef9;
-    --clr-border: #d4c6af;
-    --clr-border-strong: #b49b77;
-    --clr-text: #1a2a36;
-    --clr-text-dim: #586776;
-    --clr-accent: #0f6f6b;
-    --clr-accent-strong: #0a4f58;
-    --clr-success: #2b8f4e;
-    --clr-danger: #b63c2d;
-    --clr-warn: #a5741f;
+  /* Palette — calm, entity-presence oriented (dark substrate, warm accent). */
+  --c-bg:          #0b0e14;
+  --c-bg-elev:     #131823;
+  --c-bg-elev-2:   #1b2230;
+  --c-line:        #283041;
+  --c-text:        #e6eaf2;
+  --c-text-dim:    #9aa4b8;
+  --c-text-faint:  #6b7689;
+  --c-accent:      #7aa2ff;
+  --c-accent-soft: #2d3a5e;
+  --c-listen:      #44d6a1;
+  --c-listen-soft: #163a30;
+  --c-think:       #c79bff;
+  --c-speak:       #ffd27a;
+  --c-warn:        #ff6b6b;
+  --c-ok:          #44d6a1;
 
-    --font-mono: 'IBM Plex Mono', 'JetBrains Mono', 'Fira Code', monospace;
-    --font-sans: 'Space Grotesk', 'Manrope', 'Avenir Next', 'Segoe UI', sans-serif;
+  /* Spacing scale (4 px base). */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
 
-    --sp-xs: 4px;
-    --sp-sm: 8px;
-    --sp-md: 16px;
-    --sp-lg: 24px;
-    --sp-xl: 32px;
-    --sp-2xl: 44px;
+  /* Radius. */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 16px;
+  --r-pill: 999px;
 
-    --radius-sm: 10px;
-    --radius: 16px;
-    --radius-lg: 22px;
+  /* Typography. */
+  --f-sans: system-ui, -apple-system, "Segoe UI", "PingFang SC",
+            "Microsoft YaHei", Roboto, sans-serif;
+  --f-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 15px;
+  --fs-lg: 18px;
+  --fs-xl: 24px;
+  --fs-2xl: 34px;
 
-    --shadow-soft: 0 10px 28px rgba(28, 33, 37, 0.08);
-    --shadow-strong: 0 18px 40px rgba(24, 30, 34, 0.12);
-    --transition: 170ms ease;
+  /* Motion. */
+  --t-fast: 120ms ease;
+  --t-med:  240ms ease;
+  --t-slow: 600ms ease;
+
+  /* Layout. */
+  --maxw: 880px;
+  --header-h: 56px;
+  --composer-h: 72px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --t-fast: 0ms;
+    --t-med: 0ms;
+    --t-slow: 0ms;
+  }
 }

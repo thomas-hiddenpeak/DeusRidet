@@ -50,8 +50,15 @@ public:
     void send_text(int client_fd, const std::string& msg);
     void send_binary(int client_fd, const uint8_t* data, size_t len);
 
-    // Broadcast to all WebSocket clients.
+    // Broadcast to all WebSocket clients (and any registered mirrors).
     void broadcast_text(const std::string& msg);
+
+    // Register a peer server that should receive a copy of every
+    // broadcast_text. Used to fan one entity-side stream out to both the
+    // user UI server and the dev-console server without the facade layer
+    // ever learning there is more than one socket. Mirrors are one-way:
+    // the mirror's own broadcasts are NOT echoed back here.
+    void add_broadcast_mirror(WsServer* peer);
 
     // Register callbacks (set before start()).
     void set_on_connect(OnConnect cb)       { on_connect_ = std::move(cb); }
@@ -95,6 +102,10 @@ private:
     // Client tracking (accessed only from epoll thread except send paths).
     std::recursive_mutex clients_mu_;
     std::unordered_map<int, Client> clients_;
+
+    // Broadcast fan-out targets (set once at startup, read-only thereafter).
+    std::vector<WsServer*> broadcast_mirrors_;
+    void broadcast_local_(const std::string& msg);  // own clients only
 
     // Callbacks.
     OnConnect    on_connect_;

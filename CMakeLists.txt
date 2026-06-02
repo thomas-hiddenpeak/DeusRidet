@@ -150,6 +150,7 @@ add_executable(deusridet
     src/actus/awaken_router.cpp
     src/actus/awaken_router_consciousness.cpp
     src/actus/awaken_hello.cpp
+    src/actus/awaken_serve.cpp
     src/communis/timeline_logger.cpp
     src/communis/tempus.h
     src/sensus/auditus/auditus_facade.h

@@ -34,6 +34,7 @@
 #include "awaken_router.h"
 #include "awaken_hello.h"
 #include "awaken_consciousness.h"
+#include "awaken_serve.h"
 #include "orator/wavlm_ecapa_encoder.h"
 #include "orator/diarizen_pipeline.h"
 #include "orator/diarizen_periodic_worker.h"
@@ -100,11 +101,24 @@ int awaken(const std::string& webui_dir,
         return rc;
     }
 
+    // Two front doors, one entity: `server` (9527) serves the user UI,
+    // `dev_server` (3721) the debug console; broadcasts mirror to dev.
+    auto port_env = [](const char* name, int dflt) -> int {
+        const char* v = getenv(name);
+        if (!v || !*v) return dflt;
+        int p = atoi(v);
+        return (p > 0 && p < 65536) ? p : dflt;
+    };
+    const std::string dev_webui_dir = webui_dir + "_dev";
     WsServer server;
     WsServerConfig ws_cfg;
-    ws_cfg.port = 8080;
+    ws_cfg.port = port_env("DEUSRIDET_WEBUI_PORT", 9527);
     ws_cfg.static_dir = webui_dir;
-
+    WsServer dev_server;
+    WsServerConfig dev_ws_cfg;
+    dev_ws_cfg.port = port_env("DEUSRIDET_DEV_WEBUI_PORT", 3721);
+    dev_ws_cfg.static_dir = dev_webui_dir;
+    server.add_broadcast_mirror(&dev_server);   // fan broadcasts to dev console
     // Audio pipeline.
     AudioPipeline audio;
     AudioPipelineConfig audio_cfg;
@@ -278,27 +292,11 @@ int awaken(const std::string& webui_dir,
         conscientia::install_speech_token_callback(cb.stream, server);
         conscientia::install_state_callback(cb.stream, server);
     }
-
-    server.set_on_connect([&](int fd) {
-        actus::send_consciousness_hello(fd, server, cb.stream, cb.cache, cb.persona_cfg, cb.loaded);
-    });
-
-
-    server.set_on_disconnect([&](int fd) {
-        printf("[awaken] WS client disconnected (fd=%d)\n", fd);
-    });
-
-    // Text WS frames (runtime-control command router) — migrated to Actus helper.
-    server.set_on_text([&](int fd, const std::string& msg) {
-        actus::handle_ws_text_command(fd, msg, audio, server, cb.stream, loopback, cb.loaded,
-                                       diarizen_worker.get(),
-                                       diarizen_native.get());
-    });
-
-
-    // Binary WS frames (PCM ingress + audio_stats + loopback) — migrated to
-    // Auditus facade.
-    auditus::install_ws_binary_callback(server, audio, total_frames, total_bytes, loopback);
+    // WS ingress wired per front door; broadcasts mirror from `server`.
+    actus::wire_server_ingress(server, audio, cb, loopback, total_frames, total_bytes,
+                               diarizen_worker.get(), diarizen_native.get());
+    actus::wire_server_ingress(dev_server, audio, cb, loopback, total_frames, total_bytes,
+                               diarizen_worker.get(), diarizen_native.get());
 
     // Default runtime policy: Silero is the sole VAD (FSMN removed April 2026,
     // lost to Silero at every tested threshold per Step 2 evaluation matrix).
@@ -411,14 +409,21 @@ int awaken(const std::string& webui_dir,
         }
     }
 
-    // Start WS server.
+    // Start both WS servers (user UI + dev console).
     if (!server.start(ws_cfg)) {
         fprintf(stderr, "[awaken] Failed to start WS server\n");
         audio.stop();
         return 1;
     }
+    if (!dev_server.start(dev_ws_cfg)) {
+        fprintf(stderr, "[awaken] Failed to start dev-console server\n");
+        server.stop();
+        audio.stop();
+        return 1;
+    }
 
-    printf("[awaken] Server running on http://localhost:%d\n", ws_cfg.port);
+    printf("[awaken] User UI %d (%s) | Dev console %d (%s)\n",
+           ws_cfg.port, webui_dir.c_str(), dev_ws_cfg.port, dev_webui_dir.c_str());
     printf("[awaken] Audio pipeline: Mel(n_fft=%d hop=%d mels=%d) + VAD\n",
            audio_cfg.mel.n_fft, audio_cfg.mel.hop_length, audio_cfg.mel.n_mels);
 
@@ -475,6 +480,7 @@ int awaken(const std::string& webui_dir,
 
     audio.stop();
     server.stop();
+    dev_server.stop();
     timeline.close();
     printf("[awaken] Timeline log closed: %s\n", timeline.path().c_str());
     printf("[awaken] Total: %lu WS frames, %.1f KB\n",

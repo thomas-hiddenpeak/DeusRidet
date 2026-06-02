@@ -38,6 +38,8 @@ A `LICENSE` file must be present at the repository root.
 | 10 | [10-nexus.md](10-nexus.md) | WebUI & observability |
 | 11 | [11-machina.md](11-machina.md) | Technical stack, quantization, models, memory budget |
 | 12 | [12-diarizen.md](12-diarizen.md) | DiariZen session-boundary reclusterer (speaker re-attribution) |
+| 13 | [13-vires.md](13-vires.md) | Vires GPU substrate allocator (autonomic, demand-driven) |
+| 14 | [14-nexus-protocol.md](14-nexus-protocol.md) | Nexus WS / HTTP wire contract (shared by WebUI and hardware clients) |
 
 ## Refactor Backlog
 

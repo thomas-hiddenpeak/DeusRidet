@@ -348,12 +348,24 @@ void WsServer::send_binary(int client_fd, const uint8_t* data, size_t len) {
     ws_send_frame(it->second, 0x2, data, len);
 }
 
-void WsServer::broadcast_text(const std::string& msg) {
+void WsServer::broadcast_local_(const std::string& msg) {
     std::lock_guard<std::recursive_mutex> lk(clients_mu_);
     for (auto& [fd, c] : clients_) {
         if (c.is_ws)
             ws_send_frame(c, 0x1, (const uint8_t*)msg.data(), msg.size());
     }
+}
+
+void WsServer::broadcast_text(const std::string& msg) {
+    broadcast_local_(msg);
+    // Fan out to mirrors. Each mirror sends only to its own clients, so there
+    // is no recursion (mirrors are one-way and hold no mirrors of their own).
+    for (WsServer* peer : broadcast_mirrors_)
+        if (peer) peer->broadcast_local_(msg);
+}
+
+void WsServer::add_broadcast_mirror(WsServer* peer) {
+    if (peer && peer != this) broadcast_mirrors_.push_back(peer);
 }
 
 } // namespace deusridet
