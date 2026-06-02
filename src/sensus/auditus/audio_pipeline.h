@@ -27,6 +27,7 @@
 #include "../../orator/speaker_db.h"
 #include "../../orator/speaker_vector_store.h"
 #include "../../orator/orator_reclusterer.h"
+#include "../../orator/orator_online.h"  // clean three-concern online facade
 
 #include <algorithm>
 #include <atomic>
@@ -636,6 +637,11 @@ private:
     // Uses both encoders for better discrimination of similar voices.
     SpeakerVectorStore dual_db_{"DualDb", 384, 0.15f};
     bool use_dual_encoder_ = false;  // set true once WL-ECAPA is confirmed initialized
+
+    // Clean three-concern online speaker decision facade (replaces the legacy
+    // entangled greedy logic in process_saas_full_extract_). Owns concern-①
+    // registration-gate state; read-only on the store for concern ②.
+    orator::OratorOnline orator_online_{};
 
     AudioPipelineStats stats_{};
     std::atomic<float> gain_{1.0f};
