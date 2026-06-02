@@ -16,6 +16,7 @@ export class Conversation {
         this._el = null;
         this._hint = null;
         this._liveEntity = null;   // DOM node accumulating speech_token text
+        this._turnsBySpan = new Map();
     }
 
     mount(parent) {
@@ -44,10 +45,26 @@ export class Conversation {
     onMessage(msg) {
         switch (msg.type) {
             case 'asr_transcript':      return this._heard(msg);
+            case 'asr_transcript_amend': return this._amend(msg);
             case 'speech_token':        return this._streamToken(msg);
             case 'consciousness_decode': return this._decode(msg);
             case 'text_input_ack':      return;   // echo handled by composer
         }
+    }
+
+    _speakerLabel(id, name) {
+        const hasSpeakerName = (typeof name === 'string') && name.trim();
+        return hasSpeakerName
+            ? name
+            : (id >= 0
+                ? `${i18n.t('turn.speaker_prefix')} ${id}`
+                : i18n.t('turn.unknown'));
+    }
+
+    _turnKey(msg) {
+        const start = Number(msg.stream_start_sec ?? -1).toFixed(2);
+        const end = Number(msg.stream_end_sec ?? -1).toFixed(2);
+        return `${start}:${end}:${msg.text || ''}`;
     }
 
     // A human utterance was transcribed.
@@ -55,13 +72,30 @@ export class Conversation {
         if (!msg.text || !msg.text.trim()) return;
         this._clearHint();
         const id = (typeof msg.speaker_id === 'number') ? msg.speaker_id : -1;
-        const hasSpeakerName = (typeof msg.speaker_name === 'string') && msg.speaker_name.trim();
-        const name = hasSpeakerName
-            ? msg.speaker_name
-            : (id >= 0
-                ? `${i18n.t('turn.speaker_prefix')} ${id}`
-                : i18n.t('turn.unknown'));
-        this._appendTurn({ who: name, color: spkColor(id), text: msg.text, entity: false });
+        const name = this._speakerLabel(id, msg.speaker_name);
+        const turn = this._appendTurn({ who: name, color: spkColor(id), text: msg.text, entity: false });
+        const note = document.createElement('div');
+        note.className = 'turn__amend';
+        note.textContent = `${i18n.t('turn.online')}: ${name}`;
+        turn.appendChild(note);
+        this._turnsBySpan.set(this._turnKey(msg), {
+            turn,
+            onlineLabel: name,
+            finalLabel: null,
+        });
+    }
+
+    _amend(msg) {
+        const rec = this._turnsBySpan.get(this._turnKey(msg));
+        if (!rec) return;
+        const id = (typeof msg.speaker_id === 'number') ? msg.speaker_id : -1;
+        const finalLabel = this._speakerLabel(id, msg.speaker_name);
+        rec.finalLabel = finalLabel;
+        rec.turn.querySelector('.turn__name').textContent = finalLabel;
+        rec.turn.querySelector('.turn__dot').style.background = spkColor(id);
+        const note = rec.turn.querySelector('.turn__amend');
+        note.textContent = `${i18n.t('turn.online')}: ${rec.onlineLabel}  ->  ${i18n.t('turn.prefill')}: ${finalLabel}`;
+        rec.turn.classList.add('turn--amended');
     }
 
     // Streaming spoken output token-by-token.

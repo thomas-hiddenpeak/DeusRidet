@@ -116,6 +116,7 @@
 .speakers {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-4);
   background: var(--c-bg-elev);
@@ -123,6 +124,38 @@
   min-height: 36px;
 }
 .speakers__label { font-size: var(--fs-xs); color: var(--c-text-faint); flex: 0 0 auto; }
+.speakers__window {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 132px;
+  flex: 0 0 auto;
+}
+.speakers__window-label {
+  font-size: var(--fs-xs);
+  color: var(--c-text-faint);
+  white-space: nowrap;
+}
+.speakers__window-bar {
+  width: 52px;
+  height: 4px;
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  background: var(--c-bg-elev-2);
+}
+.speakers__window-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--c-listen), var(--c-speak), var(--c-warn));
+  transition: width var(--t-med);
+}
+.speakers__window-fill[data-state="running"] {
+  background: linear-gradient(90deg, var(--c-accent), var(--c-think));
+}
+.speakers__window-fill[data-state="finalizing"] {
+  background: linear-gradient(90deg, var(--c-speak), var(--c-think));
+}
 .speaker-chip {
   display: inline-flex;
   align-items: center;
@@ -131,9 +164,13 @@
   border-radius: var(--r-pill);
   font-size: var(--fs-xs);
   background: var(--c-bg-elev-2);
+  border: 1px solid transparent;
+  color: var(--c-text);
   white-space: nowrap;
   flex: 0 0 auto;
+  cursor: pointer;
 }
+.speaker-chip:hover { border-color: var(--c-accent-soft); }
 .speaker-chip__dot { width: 8px; height: 8px; border-radius: 50%; }
 .speaker-chip--active { outline: 1px solid var(--c-accent); }
 
@@ -166,6 +203,14 @@
   color: var(--c-text);
 }
 .turn--entity .turn__dot { background: var(--c-accent); }
+.turn__amend {
+  font-size: var(--fs-xs);
+  color: var(--c-text-faint);
+  margin-top: calc(-1 * var(--sp-1));
+}
+.turn--amended .turn__text {
+  box-shadow: inset 0 0 0 1px rgba(122, 162, 255, 0.35);
+}
 
 /* Thinking layer (collapsible) -------------------------------------- */
 .thinking { margin-bottom: var(--sp-4); }

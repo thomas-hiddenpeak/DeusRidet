@@ -59,6 +59,7 @@ components.push(presence, listening, speakers, conversation, composer);
 
 // ── User intent → upstream ─────────────────────────────────────────────
 composer.onSend = (text) => ws.sendText('text_input:' + text);
+speakers.onRename = (id, name) => ws.sendText(`speaker_name:${id}:${name}`);
 listening.onMic = (on) => {
     micWanted = on;
     syncMicDrivenRuntime();
