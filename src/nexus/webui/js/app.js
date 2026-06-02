@@ -15,6 +15,12 @@ import { Composer } from './components/composer.js';
 const ws = new WsClient();
 const components = [];
 let online = false;
+let micWanted = false;
+
+function syncMicDrivenRuntime() {
+    if (!ws.connected) return;
+    ws.sendText(micWanted ? 'asr_enable:on' : 'asr_enable:off');
+}
 
 // ── Header: connection pill + language toggle ──────────────────────────
 const connEl = document.querySelector('[data-role=conn]');
@@ -53,12 +59,18 @@ components.push(presence, listening, speakers, conversation, composer);
 
 // ── User intent → upstream ─────────────────────────────────────────────
 composer.onSend = (text) => ws.sendText('text_input:' + text);
-listening.onMic = (on) => (on ? mic.start() : mic.stop());
+listening.onMic = (on) => {
+    micWanted = on;
+    syncMicDrivenRuntime();
+    if (on) mic.start();
+    else mic.stop();
+};
 
 // ── Mic capture (16 kHz mono int16 PCM, raw waveform preserved) ─────────
 const mic = {
     ctx: null, stream: null, node: null,
     async start() {
+        if (this.node) return;
         try {
             this.ctx = new AudioContext({ sampleRate: 16000 });
             this.stream = await navigator.mediaDevices.getUserMedia({
@@ -91,6 +103,7 @@ ws.onOpen = () => {
     online = true;
     presence.setOnline(true);
     composer.setEnabled(true);
+    syncMicDrivenRuntime();
     renderHeader();
 };
 ws.onClose = () => {
