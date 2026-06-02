@@ -156,16 +156,20 @@ bool DiarizenPeriodicWorker::run_one_pass_(bool is_final, double window_sec) {
         return false;
     }
 
-    size_t changed = holdback_ ? holdback_->apply_diarization(segs, origin_sec) : 0;
+    // P2-B — bind this window's pipeline-local clusters onto durable
+    // voiceprint-anchored global identities ("S<gid>") FIRST, via the single
+    // identity authority (DiarizenIdentityRegistry). This rewrite is bijective
+    // (one input label ⇒ one distinct gid), so the canonical first-seen /
+    // Hungarian accuracy of the broadcast is invariant under it. Running it on
+    // EVERY pass (partial AND final) means BOTH the LLM holdback path and the
+    // live broadcast read the same voiceprint-anchored identity — three
+    // stitchers collapsed into one.
+    size_t ids = identity_.stitch(segs, origin_sec,
+                                  pipeline_.last_cluster_centroids());
 
-    // P2 — bind this window's pipeline-local labels onto durable global
-    // identities so the live broadcast is identity-stable across windows.
-    // Applied AFTER the holdback consumed the raw labels (its LLM-relabel
-    // path is unchanged) and only to partial passes — the full-session
-    // finalize is canonical and keeps its own globally-consistent labels.
-    size_t ids = 0;
-    if (!is_final) ids = identity_.stitch(segs, origin_sec,
-                                          pipeline_.last_cluster_centroids());
+    // Hand the already-stitched "S<gid>" labels to the holdback; it parses the
+    // global id directly instead of running its own time-overlap stitcher.
+    size_t changed = holdback_ ? holdback_->apply_diarization(segs, origin_sec) : 0;
     std::fprintf(stderr,
                  "[diarizen-worker] pass=%llu segs=%zu changed_pending=%zu ids=%zu "
                  "origin=%.2fs window=%.0fs audio=%.1fs wall=%.2fs final=%d\n",
