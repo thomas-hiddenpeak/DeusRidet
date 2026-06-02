@@ -19,6 +19,7 @@
 #include "diarizen_identity_registry.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -39,6 +40,16 @@ class DiarizenPipeline;
 
 class DiarizenPeriodicWorker {
 public:
+    struct StatusSnapshot {
+        bool periodic_enabled = true;
+        bool running = false;
+        double period_sec = 0.0;
+        double window_sec = 0.0;
+        double cycle_progress = 0.0;
+        uint64_t pass_seq = 0;
+        std::string phase = "idle";
+    };
+
     /// `holdback` is nullable: in audio-only sessions (LLM not loaded)
     /// there is no Conscientia stream to drain into, so the worker still
     /// runs diarisation passes and broadcasts `speaker_diarize_*` for the
@@ -70,6 +81,9 @@ public:
     /// drained here (caller decides). Idempotent.
     void stop();
 
+    /// Thread-safe live status for WS/UI observability.
+    StatusSnapshot snapshot_status();
+
 private:
     void worker_loop_();
     /// Runs one pass. `is_final` controls the WS broadcast type.
@@ -99,6 +113,7 @@ private:
     bool                         running_ = false;
     bool                         stop_req_ = false;
     bool                         trigger_req_ = false;
+    std::string                  phase_ = "idle";
     // Timed live re-diarise is ON by default after the Jun 2 B1 live proof.
     // It is bounded by window_sec_ (120 s default) so each pass has finite GPU
     // wall time and cannot grow with session length. Set
@@ -116,6 +131,7 @@ private:
     // live transcripts pending
     // for the LLM still fall inside the re-diarised window.
     double                       window_sec_ = 120.0;
+    std::chrono::steady_clock::time_point next_due_ = {};
 };
 
 }  // namespace orator

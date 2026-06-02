@@ -15,6 +15,7 @@ export class Speakers {
             audioSec: 0,
             lastEndSec: 0,
             lastPass: 0,
+            progress: 0,
             running: 'idle',
         };
         this.onRename = null;
@@ -47,24 +48,26 @@ export class Speakers {
             this._seen.set(msg.id, { name: msg.name || null });
         } else if (msg.type === 'pipeline_stats') {
             this._window.audioSec = (msg.audio_t1 ?? 0) / 16000.0;
-            const campp = Array.isArray(msg.speaker_lists)
-                ? msg.speaker_lists.find((x) => x.model === 'CAM++')
-                : null;
-            if (campp && Array.isArray(campp.speakers)) {
-                for (const spk of campp.speakers) {
-                    if (typeof spk.id === 'number' && spk.id >= 0) {
-                        this._seen.set(spk.id, { name: spk.name || null });
+            if (Array.isArray(msg.speaker_lists)) {
+                for (const model of msg.speaker_lists) {
+                    if (!Array.isArray(model?.speakers)) continue;
+                    for (const spk of model.speakers) {
+                        if (typeof spk.id === 'number' && spk.id >= 0) {
+                            this._seen.set(spk.id, { name: spk.name || null });
+                        }
                     }
                 }
             }
-        } else if (msg.type === 'speaker_diarize_progress') {
-            this._window.running = msg.status || 'idle';
+        } else if (msg.type === 'speaker_diarize_status') {
+            this._window.progress = Number(msg.cycle_progress || 0);
+            this._window.running = msg.phase || 'idle';
         } else if (msg.type === 'speaker_diarize_partial' || msg.type === 'speaker_diarize_final') {
             const origin = Number(msg.origin_sec || 0);
             const audio = Number(msg.audio_sec || 0);
             this._window.lastEndSec = origin + audio;
             this._window.lastPass = Number(msg.pass || this._window.lastPass || 0);
             this._window.running = 'idle';
+            this._window.progress = 0;
         } else {
             return;
         }
@@ -74,17 +77,15 @@ export class Speakers {
     render() {
         if (!this._el) return;
         this._el.querySelector('[data-role=label]').textContent = i18n.t('speakers.label');
-        const backlogSec = Math.max(0, this._window.audioSec - this._window.lastEndSec);
-        const progress = Math.max(0, Math.min(1, backlogSec / 20.0));
         const wLabel = this._el.querySelector('[data-role=window-label]');
         const wFill = this._el.querySelector('[data-role=window-fill]');
-        const phase = this._window.running === 'running'
+        const phase = (this._window.running === 'running' || this._window.running === 'periodic' || this._window.running === 'triggered')
             ? 'speakers.window_running'
             : (this._window.running === 'finalizing'
                 ? 'speakers.window_finalizing'
                 : 'speakers.window_idle');
         wLabel.textContent = `${i18n.t('speakers.window_label')} · ${i18n.t(phase)}`;
-        wFill.style.width = `${Math.round(progress * 100)}%`;
+        wFill.style.width = `${Math.round(Math.max(0, Math.min(1, this._window.progress)) * 100)}%`;
         wFill.dataset.state = this._window.running;
         if (this._seen.size === 0) {
             this._list.innerHTML = `<span class="speakers__label">${i18n.t('speakers.none')}</span>`;

@@ -152,6 +152,7 @@ min_diversity}]}` 数组，覆盖 CAM++、CAM++Legacy、WL-ECAPA）。
 | `speaker_amend` | `target_t_close_sec`、`prior_id`、`prior_sim`、`id`、`sim`、`name` —— 对此前某句话的回溯重标 |
 | `speaker_relabel` | `segment_id`、`old_id`、`new_id`、`confidence` —— 重聚类全局合并 / K 上限 |
 | `speaker_diarize_progress` | `status`（`triggered`/`running`/`finalizing`）或 `ok:false`+`error`；可选 `samples`、`sec` |
+| `speaker_diarize_status` | 周期 worker 的实时状态：`running`、`periodic_enabled`、`phase`（`idle`/`periodic`/`triggered`/`finalizing`）、`cycle_progress`（严格后端周期上的 0–1 进度）、`period_sec`、`window_sec`、`pass` |
 | `speaker_diarize_partial` | `pass`、`origin_sec`、`audio_sec`、`wall_sec`、`segment_count`、`n_segments`、`changed_pending`、`segments:[[start,end,label],…]` |
 | `speaker_diarize_final` | 与 partial 同形（终态），或 `ok:false`+`error` |
 

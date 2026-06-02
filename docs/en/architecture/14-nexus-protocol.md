@@ -157,6 +157,7 @@ count, exemplars, min_diversity}]}` for CAM++, CAM++Legacy, WL-ECAPA).
 | `speaker_amend` | `target_t_close_sec`, `prior_id`, `prior_sim`, `id`, `sim`, `name` — retroactive relabel of an earlier utterance |
 | `speaker_relabel` | `segment_id`, `old_id`, `new_id`, `confidence` — reclusterer global-merge / K-cap |
 | `speaker_diarize_progress` | `status` (`triggered`/`running`/`finalizing`) or `ok:false`+`error`; optional `samples`, `sec` |
+| `speaker_diarize_status` | Periodic-worker live status: `running`, `periodic_enabled`, `phase` (`idle`/`periodic`/`triggered`/`finalizing`), `cycle_progress` (0–1 over the strict backend period), `period_sec`, `window_sec`, `pass` |
 | `speaker_diarize_partial` | `pass`, `origin_sec`, `audio_sec`, `wall_sec`, `segment_count`, `n_segments`, `changed_pending`, `segments:[[start,end,label],…]` |
 | `speaker_diarize_final` | Same shape as partial (terminal), or `ok:false`+`error` |
 

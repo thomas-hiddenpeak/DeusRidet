@@ -76,7 +76,9 @@ export class Conversation {
         const turn = this._appendTurn({ who: name, color: spkColor(id), text: msg.text, entity: false });
         const note = document.createElement('div');
         note.className = 'turn__amend';
-        note.textContent = `${i18n.t('turn.online')}: ${name}`;
+        note.innerHTML = `
+            <span class="turn__amend-tag turn__amend-tag--online">${i18n.t('turn.online')}</span>
+            <span>${name}</span>`;
         turn.appendChild(note);
         this._turnsBySpan.set(this._turnKey(msg), {
             turn,
@@ -94,8 +96,14 @@ export class Conversation {
         rec.turn.querySelector('.turn__name').textContent = finalLabel;
         rec.turn.querySelector('.turn__dot').style.background = spkColor(id);
         const note = rec.turn.querySelector('.turn__amend');
-        note.textContent = `${i18n.t('turn.online')}: ${rec.onlineLabel}  ->  ${i18n.t('turn.prefill')}: ${finalLabel}`;
+        note.innerHTML = `
+            <span class="turn__amend-tag turn__amend-tag--online">${i18n.t('turn.online')}</span>
+            <span>${rec.onlineLabel}</span>
+            <span>-></span>
+            <span class="turn__amend-tag turn__amend-tag--prefill">${i18n.t('turn.prefill')}</span>
+            <span>${finalLabel}</span>`;
         rec.turn.classList.add('turn--amended');
+        this._scroll();
     }
 
     // Streaming spoken output token-by-token.

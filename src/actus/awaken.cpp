@@ -80,6 +80,22 @@ static void broadcast_vires_snapshot(WsServer& server) {
     server.broadcast_text(js);
 }
 
+static void broadcast_diarizen_status(WsServer& server,
+                                      orator::DiarizenPeriodicWorker* worker) {
+    if (!worker) return;
+    const auto st = worker->snapshot_status();
+    char json[384];
+    snprintf(json, sizeof(json),
+             R"({"type":"speaker_diarize_status","running":%s,"periodic_enabled":%s,)"
+             R"("phase":"%s","cycle_progress":%.3f,"period_sec":%.1f,"window_sec":%.1f,"pass":%lu})",
+             st.running ? "true" : "false",
+             st.periodic_enabled ? "true" : "false",
+             st.phase.c_str(), st.cycle_progress,
+             st.period_sec, st.window_sec,
+             (unsigned long)st.pass_seq);
+    server.broadcast_text(json);
+}
+
 int awaken(const std::string& webui_dir,
                 const std::string& llm_model_dir,
                 const std::string& persona_conf_path,
@@ -452,6 +468,7 @@ int awaken(const std::string& webui_dir,
         if (sig > 0) break;                 // SIGINT/SIGTERM received
         if (errno == EAGAIN) {              // cadence elapsed — emit telemetry
             broadcast_vires_snapshot(server);
+            broadcast_diarizen_status(server, diarizen_worker.get());
             continue;
         }
         if (errno == EINTR) continue;       // interrupted by another signal

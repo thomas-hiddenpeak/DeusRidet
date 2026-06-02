@@ -51,6 +51,10 @@ void DiarizenPeriodicWorker::start() {
     running_ = true;
     stop_req_ = false;
     trigger_req_ = false;
+    phase_ = "idle";
+    next_due_ = std::chrono::steady_clock::now()
+              + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(period_sec_));
     th_ = std::thread(&DiarizenPeriodicWorker::worker_loop_, this);
 }
 
@@ -64,6 +68,7 @@ void DiarizenPeriodicWorker::stop() {
     if (th_.joinable()) th_.join();
     std::lock_guard<std::mutex> lk(mu_);
     running_ = false;
+    phase_ = "idle";
 }
 
 void DiarizenPeriodicWorker::trigger_async() {
@@ -89,36 +94,73 @@ void DiarizenPeriodicWorker::finalize() {
     // including a second concurrent finalize() on a detached WS thread); this
     // stop() is a scheduling nicety, not the safety mechanism.
     stop();
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        phase_ = "finalizing";
+    }
     run_one_pass_(/*is_final=*/true, /*window_sec=*/0.0);
     if (holdback_) holdback_->drain_now();
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        phase_ = "idle";
+    }
 }
 
 void DiarizenPeriodicWorker::worker_loop_() {
-    using namespace std::chrono_literals;
     std::unique_lock<std::mutex> lk(mu_);
-    auto period = std::chrono::duration<double>(period_sec_);
     while (!stop_req_) {
-        cv_.wait_for(lk, period, [this] { return stop_req_ || trigger_req_; });
+        cv_.wait_until(lk, next_due_, [this] { return stop_req_ || trigger_req_; });
         if (stop_req_) break;
         bool was_triggered = trigger_req_;
         trigger_req_ = false;
+        const auto now = std::chrono::steady_clock::now();
+        const bool periodic_due = periodic_enabled_ && (now >= next_due_);
+        if (periodic_due) {
+            next_due_ = now
+                      + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                            std::chrono::duration<double>(period_sec_));
+        }
         lk.unlock();
-        // Skip bare periodic wakeups unless the timed cadence is explicitly
-        // re-enabled. Full-session re-diarise on the shared GPU starves the
-        // live perception pipeline (see periodic_enabled_ in the header) —
-        // the default path only diarises on an explicit trigger / finalize.
-        if (was_triggered || periodic_enabled_) {
+        if (was_triggered || periodic_due) {
             // Only pay the diarisation cost when there is actual audio to
             // diarise — first pass on an empty buffer wastes ~30 s on Orin.
             size_t samples = audio_.diarizen_capture_samples();
             if (samples >= 16000 * 8) {  // need ≥ 8 s of audio
+                {
+                    std::lock_guard<std::mutex> g(mu_);
+                    phase_ = was_triggered ? "triggered" : "periodic";
+                }
                 // Live partials use the sliding window (direction C) when
                 // configured; 0 means full-session as before.
                 run_one_pass_(/*is_final=*/false, window_sec_);
+                {
+                    std::lock_guard<std::mutex> g(mu_);
+                    phase_ = "idle";
+                }
             }
         }
         lk.lock();
     }
+}
+
+DiarizenPeriodicWorker::StatusSnapshot DiarizenPeriodicWorker::snapshot_status() {
+    std::lock_guard<std::mutex> lk(mu_);
+    StatusSnapshot snap;
+    snap.periodic_enabled = periodic_enabled_;
+    snap.running = running_;
+    snap.period_sec = period_sec_;
+    snap.window_sec = window_sec_;
+    snap.pass_seq = pass_seq_.load(std::memory_order_relaxed);
+    snap.phase = phase_;
+    if (running_ && periodic_enabled_ && phase_ == "idle" && period_sec_ > 0.0) {
+        const auto now = std::chrono::steady_clock::now();
+        const double rem = std::chrono::duration<double>(next_due_ - now).count();
+        const double clamped = rem < 0.0 ? 0.0 : (rem > period_sec_ ? period_sec_ : rem);
+        snap.cycle_progress = 1.0 - (clamped / period_sec_);
+    } else if (phase_ == "periodic" || phase_ == "triggered" || phase_ == "finalizing") {
+        snap.cycle_progress = 1.0;
+    }
+    return snap;
 }
 
 bool DiarizenPeriodicWorker::run_one_pass_(bool is_final, double window_sec) {
