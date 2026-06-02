@@ -106,7 +106,7 @@ private:
     // and poisoning the CUDA context. Set DEUSRIDET_DIARIZEN_PERIODIC=1 to
     // re-enable the timed cadence; otherwise the worker only runs on an
     // explicit trigger_async() or finalize().
-    bool                         periodic_enabled_ = false;
+    bool                         periodic_enabled_ = true;
     // Direction C — sliding-window live diarise. When > 0, periodic and
     // on-demand passes diarise only the most recent `window_sec_` seconds
     // of captured audio, bounding per-pass GPU wall regardless of session
@@ -117,7 +117,7 @@ private:
     // behaviour on every pass. Set DEUSRIDET_DIARIZEN_WINDOW_SEC=<sec> to
     // opt in. Should be ≥ the holdback horizon so live transcripts pending
     // for the LLM still fall inside the re-diarised window.
-    double                       window_sec_ = 0.0;
+    double                       window_sec_ = 120.0;
 };
 
 }  // namespace orator

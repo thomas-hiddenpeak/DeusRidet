@@ -32,8 +32,10 @@ DiarizenPeriodicWorker::DiarizenPeriodicWorker(
       holdback_(holdback),
       server_(server),
       period_sec_(period_sec < 5.0 ? 5.0 : period_sec) {
+    // Periodic recluster is ON by default (proven Jun 2 to close the live
+    // holdback correction loop). Opt out with DEUSRIDET_DIARIZEN_PERIODIC=0.
     if (const char* e = std::getenv("DEUSRIDET_DIARIZEN_PERIODIC")) {
-        periodic_enabled_ = (std::string(e) == "1");
+        periodic_enabled_ = (std::string(e) != "0");
     }
     if (const char* e = std::getenv("DEUSRIDET_DIARIZEN_WINDOW_SEC")) {
         double w = std::atof(e);
