@@ -311,62 +311,20 @@ int awaken(const std::string& webui_dir,
 
     // Load configs/auditus.conf (diarization runtime knobs). Missing keys
     // fall back to AudioPipelineConfig defaults, so the file is optional.
+    // Only the four gates the clean three-concern online facade consumes are
+    // parsed; the pre-redesign discovery/recency/short-identify/multi-gate/
+    // campp-shadow/inherit-peek knobs were removed (2026-06-02 anti-entropy).
     {
         Config aud_cfg;
         if (aud_cfg.load("configs/auditus.conf")) {
             audio_cfg.speaker_threshold          = (float)aud_cfg.get_double("speaker_threshold",          audio_cfg.speaker_threshold);
             audio_cfg.speaker_register_threshold = (float)aud_cfg.get_double("speaker_register_threshold", audio_cfg.speaker_register_threshold);
-            audio_cfg.speaker_discovery_count    =        aud_cfg.get_int   ("speaker_discovery_count",    audio_cfg.speaker_discovery_count);
-            audio_cfg.speaker_discovery_boost    = (float)aud_cfg.get_double("speaker_discovery_boost",    audio_cfg.speaker_discovery_boost);
-            audio_cfg.speaker_discovery_reg_relax = (float)aud_cfg.get_double("speaker_discovery_reg_relax", audio_cfg.speaker_discovery_reg_relax);
-            audio_cfg.speaker_recency_window_sec = (float)aud_cfg.get_double("speaker_recency_window_sec", audio_cfg.speaker_recency_window_sec);
-            audio_cfg.speaker_recency_bonus      = (float)aud_cfg.get_double("speaker_recency_bonus",      audio_cfg.speaker_recency_bonus);
-            audio_cfg.speaker_margin_abstain       = (float)aud_cfg.get_double("speaker_margin_abstain",       audio_cfg.speaker_margin_abstain);
-            audio_cfg.speaker_max_auto_reg_count   =        aud_cfg.get_int   ("speaker_max_auto_reg_count",   audio_cfg.speaker_max_auto_reg_count);
-            audio_cfg.speaker_min_fbank_frames     =        aud_cfg.get_int   ("speaker_min_fbank_frames",     audio_cfg.speaker_min_fbank_frames);
-            audio_cfg.speaker_short_inherit_enable =        aud_cfg.get_int   ("speaker_short_inherit_enable", audio_cfg.speaker_short_inherit_enable ? 1 : 0) != 0;
-            audio_cfg.speaker_short_identify_enable=        aud_cfg.get_int   ("speaker_short_identify_enable",audio_cfg.speaker_short_identify_enable ? 1 : 0) != 0;
-            audio_cfg.speaker_min_fbank_frames_identify =   aud_cfg.get_int   ("speaker_min_fbank_frames_identify", audio_cfg.speaker_min_fbank_frames_identify);
-            audio_cfg.speaker_short_identify_threshold =(float)aud_cfg.get_double("speaker_short_identify_threshold", audio_cfg.speaker_short_identify_threshold);
-            audio_cfg.speaker_short_identify_margin    =(float)aud_cfg.get_double("speaker_short_identify_margin",    audio_cfg.speaker_short_identify_margin);
-            audio_cfg.speaker_multi_gate_enable        =        aud_cfg.get_int   ("speaker_multi_gate_enable",        audio_cfg.speaker_multi_gate_enable ? 1 : 0) != 0;
-            audio_cfg.speaker_multi_gate_threshold     =(float)aud_cfg.get_double("speaker_multi_gate_threshold",     audio_cfg.speaker_multi_gate_threshold);
-            audio_cfg.speaker_multi_gate_min_fbank     =        aud_cfg.get_int   ("speaker_multi_gate_min_fbank",     audio_cfg.speaker_multi_gate_min_fbank);
-            audio_cfg.speaker_si_refresh_prev_full_threshold = (float)aud_cfg.get_double("speaker_si_refresh_prev_full_threshold", audio_cfg.speaker_si_refresh_prev_full_threshold);
-            audio_cfg.speaker_si_wl_tile_pad_enable    =        aud_cfg.get_int   ("speaker_si_wl_tile_pad_enable",    audio_cfg.speaker_si_wl_tile_pad_enable ? 1 : 0) != 0;
-            audio_cfg.speaker_campp_shadow_enable      =        aud_cfg.get_int   ("speaker_campp_shadow_enable",      audio_cfg.speaker_campp_shadow_enable ? 1 : 0) != 0;
-            audio_cfg.speaker_campp_shadow_threshold   = (float)aud_cfg.get_double("speaker_campp_shadow_threshold",   audio_cfg.speaker_campp_shadow_threshold);
-            audio_cfg.speaker_campp_shadow_margin      = (float)aud_cfg.get_double("speaker_campp_shadow_margin",      audio_cfg.speaker_campp_shadow_margin);
-            audio_cfg.speaker_inherit_peek_veto_enable    =        aud_cfg.get_int   ("speaker_inherit_peek_veto_enable",    audio_cfg.speaker_inherit_peek_veto_enable ? 1 : 0) != 0;
-            audio_cfg.speaker_inherit_peek_veto_threshold = (float)aud_cfg.get_double("speaker_inherit_peek_veto_threshold", audio_cfg.speaker_inherit_peek_veto_threshold);
-            audio_cfg.speaker_inherit_peek_rescue_enable  =        aud_cfg.get_int   ("speaker_inherit_peek_rescue_enable",  audio_cfg.speaker_inherit_peek_rescue_enable ? 1 : 0) != 0;
+            audio_cfg.speaker_margin_abstain     = (float)aud_cfg.get_double("speaker_margin_abstain",     audio_cfg.speaker_margin_abstain);
+            audio_cfg.speaker_min_fbank_frames   =        aud_cfg.get_int   ("speaker_min_fbank_frames",   audio_cfg.speaker_min_fbank_frames);
             printf("[awaken] Auditus diarization knobs loaded from configs/auditus.conf:\n"
-                   "           match=%.3f reg=%.3f disc=[count=%d,boost=%.3f,reg_relax=%.3f] recency=[win=%.1fs,bonus=%.3f] margin=%.3f max_autoreg=%d min_fbank=%d short_inherit=%s short_identify=%s min_fbank_ident=%d si_thresh=%.3f si_margin=%.3f\n",
+                   "           match=%.3f reg=%.3f margin=%.3f min_fbank=%d\n",
                    audio_cfg.speaker_threshold, audio_cfg.speaker_register_threshold,
-                   audio_cfg.speaker_discovery_count, audio_cfg.speaker_discovery_boost,
-                   audio_cfg.speaker_discovery_reg_relax,
-                   audio_cfg.speaker_recency_window_sec, audio_cfg.speaker_recency_bonus,
-                   audio_cfg.speaker_margin_abstain, audio_cfg.speaker_max_auto_reg_count,
-                   audio_cfg.speaker_min_fbank_frames,
-                   audio_cfg.speaker_short_inherit_enable ? "ON" : "off",
-                   audio_cfg.speaker_short_identify_enable ? "ON" : "off",
-                   audio_cfg.speaker_min_fbank_frames_identify,
-                   audio_cfg.speaker_short_identify_threshold,
-                   audio_cfg.speaker_short_identify_margin);
-            printf("[awaken]   multi_gate=%s thr=%.3f min_fb=%d si_refresh_prev_full_thr=%.3f si_wl_tile_pad=%s campp_shadow=%s\n",
-                   audio_cfg.speaker_multi_gate_enable ? "ON" : "off",
-                   audio_cfg.speaker_multi_gate_threshold,
-                   audio_cfg.speaker_multi_gate_min_fbank,
-                   audio_cfg.speaker_si_refresh_prev_full_threshold,
-                   audio_cfg.speaker_si_wl_tile_pad_enable ? "ON" : "off",
-                   audio_cfg.speaker_campp_shadow_enable ? "ON" : "off");
-            printf("[awaken]   campp_shadow_gate: thr=%.3f margin=%.3f\n",
-                   audio_cfg.speaker_campp_shadow_threshold,
-                   audio_cfg.speaker_campp_shadow_margin);
-            printf("[awaken]   inherit_peek_veto: %s thr=%.3f rescue=%s\n",
-                   audio_cfg.speaker_inherit_peek_veto_enable ? "ON" : "off",
-                   audio_cfg.speaker_inherit_peek_veto_threshold,
-                   audio_cfg.speaker_inherit_peek_rescue_enable ? "ON" : "off");
+                   audio_cfg.speaker_margin_abstain, audio_cfg.speaker_min_fbank_frames);
         } else {
             printf("[awaken] configs/auditus.conf not found — using compiled defaults\n");
         }

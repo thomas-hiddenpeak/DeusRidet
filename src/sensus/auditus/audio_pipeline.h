@@ -4,25 +4,16 @@
  * @serves Nexus, Conscientia, Actus (awaken).
  */
 // audio_pipeline.h — Real-time audio processing pipeline.
-//
-// Wires: WS PCM input → Ring Buffer → Gain → Mel (GPU)
-//                                          └→ Silero VAD (native C++)
-//                                          └→ Speaker Encoder (CAM++ GPU)
-//                                          └→ ASR (Qwen3-ASR, native CUDA)
-// Runs a processing thread that pulls from the ring buffer, computes
-// Mel frames on GPU, runs Silero VAD, extracts speaker embeddings, and reports results.
+// PCM → ring buffer → GPU Mel → Silero VAD → CAM++/WL-ECAPA speaker
+// encoders → Qwen3-ASR. A processing thread pulls from the ring buffer
+// and reports stats; see the @serves consumers above.
 
 #pragma once
 
-#include "mel_gpu.h"
-#include "frcrn_enhancer.h"
-#include "overlap_detector.h"
-#include "speech_separator.h"
-#include "silero_vad.h"
+// Engine-config headers arrive via audio_pipeline_config.h (its canonical owner).
 #include "povey_fbank_gpu.h"  // generic Povey/Hamming GPU Fbank (CAM++ frontend)
 #include "asr/asr_engine.h"
 #include "../../communis/ring_buffer.h"
-#include "../../orator/speaker_encoder.h"
 #include "../../orator/wavlm_ecapa_encoder.h"
 #include "../../orator/speaker_db.h"
 #include "../../orator/speaker_vector_store.h"
@@ -42,285 +33,10 @@
 #include <string>
 
 #include "pipeline_stats.h"
-#include "retro_full_ring.h"
 #include "speaker_tracking.h"
+#include "audio_pipeline_config.h"
 
 namespace deusridet {
-
-// Which VAD engine drives the speech detection for speaker extraction.
-// Historical enum values preserved to keep WebUI + router wire format stable;
-// only SILERO and DIRECT are live after FSMN was removed (April 2026,
-// data-driven: FSMN lost to Silero at every tested threshold).
-enum class VadSource : int {
-    SILERO = 0,
-    ANY    = 2,  // alias for SILERO (kept for backward-compat WS messages)
-    DIRECT = 3,  // bypass VAD — ASR triggers on buffer duration only
-};
-
-struct AudioPipelineConfig {
-    MelConfig mel;
-    FrcrnConfig frcrn;                  // FRCRN speech enhancement (P0)
-    OverlapDetectorConfig overlap_det;  // pyannote overlap detection (P1)
-    SpeechSeparatorConfig separator;    // MossFormer2 speech separation (P2)
-    SileroVadConfig silero;             // Silero VAD model config
-    SpeakerEncoderConfig speaker;       // CAM++ speaker encoder config
-    std::string wavlm_ecapa_model;         // WavLM-Large+ECAPA-TDNN safetensors path (native GPU)
-    float wavlm_ecapa_threshold = 0.55f;   // default cosine sim threshold
-    std::string asr_model_path;            // Qwen3-ASR model directory (empty = disabled)
-    size_t ring_buffer_bytes = 1 << 22;  // 4 MB (~128 seconds of int16 mono 16kHz)
-    int process_chunk_ms     = 100;      // process in 100ms chunks (10 mel frames)
-    float speaker_threshold  = 0.45f;    // dual 384D cosine sim match threshold (v22c level)
-    // Diarization knobs — overridable via configs/auditus.conf (no rebuild
-    // required). Defaults mirror the historical hardcoded values in
-    // audio_pipeline_process_saas_full.cpp so behavior is unchanged when
-    // the file is absent. See configs/auditus.conf for documentation.
-    float speaker_register_threshold = 0.55f; // pending-pool confirmation sim
-    int   speaker_discovery_count    = 50;    // # FULL extractions treated as cold-start
-    float speaker_discovery_boost    = 0.07f; // additive to match_thresh during discovery
-    float speaker_discovery_reg_relax = 0.07f; // subtractive from reg_thresh during discovery
-                                               // (Step 16e symmetric to discovery_boost:
-                                               //  match stricter + pending coalesce easier,
-                                               //  so quiet 3rd/4th speakers with self-sim
-                                               //  ~0.52 still spawn their own cluster.)
-    float speaker_recency_window_sec = 15.0f; // recency stabilizer window
-    float speaker_recency_bonus      = 0.05f; // match_thresh lowered by this while recency active
-    float speaker_margin_abstain     = 0.05f; // min (top1 - top2) to trust a match
-    int   speaker_max_auto_reg_count = 1000;  // disable auto-reg after this many FULLs
-    // Minimum fbank-frame count required to run CAM++ FULL extraction on
-    // a completed speech segment. Exposed as a config knob for
-    // diagnostics; default matches the long-standing hardcoded 150
-    // (~1.5 s) because the Step 4b experiment showed that lowering
-    // this value floods the EMA-updated speaker library with noisy
-    // short-segment embeddings, poisoning centroids enough that two
-    // legitimate speakers never cross the register threshold. See
-    // docs/{en,zh}/devlog/ for the full negative result.
-    int   speaker_min_fbank_frames   = 150;
-    // Step 19b — short-segment IDENTIFY-ONLY rescue.
-    //
-    // Empirical (devlog 2026-05-22, r3 600s): 86/139 isolated GT segments
-    // (54.5% of all-GT) end with VAD durations clustered at 0.5–1.5 s,
-    // which falls below speaker_min_fbank_frames (150 = 1.5 s) and so
-    // never produces a runtime cluster decision. Sub-segment diarization
-    // was empirically a low-leverage path (~11% upper bound).
-    //
-    // When this flag is ON and a segment is too short for FULL but at
-    // or above speaker_min_fbank_frames_identify (~50 frames = 500 ms),
-    // the encoder still runs and the embedding is scored against the
-    // existing speaker store via SpeakerVectorStore::peek_best — i.e.
-    // read-only cosine search, NO register, NO EMA, NO pending. If the
-    // best cluster sim >= speaker_threshold the identity is broadcast
-    // as a normal speaker event. Otherwise the path falls through to
-    // the SAAS_INHERIT broadcast as before. This avoids the Step 4b
-    // regression (centroid pollution by noisy short-seg embeddings)
-    // because the speaker library is never written.
-    bool  speaker_short_identify_enable      = false;
-    int   speaker_min_fbank_frames_identify  = 50;
-    // Step 19b — SHORT-IDENTIFY similarity floor. Default 0.65 (vs the
-    // standard speaker_threshold=0.50) because the r1 experiment showed
-    // that scoring noisy short-segment embeddings at the default
-    // threshold catastrophically over-attributes to the dominant
-    // speaker (coverage 26%→87% but decided_macro 0.86→0.31). A
-    // strictly tighter floor restores macro while keeping the coverage
-    // lift on segments whose short embedding genuinely resembles a
-    // known cluster.
-    float speaker_short_identify_threshold   = 0.65f;
-    // Minimum (top1 - top2) margin required for a SHORT-IDENTIFY match
-    // to be accepted. Defends against the absorb-into-dominant failure
-    // mode: even a 0.66 match must be at least M points above the next
-    // best cluster. 0.0 disables the margin gate.
-    float speaker_short_identify_margin      = 0.05f;
-    // Step 19c — VAD-internal multi-speaker probe gate (library
-    // protection). When ON, the FULL extraction first runs a sliding
-    // CAM++ cosine probe over seg_fbank_buf_ (1.5 s window, 0.5 s hop).
-    // If the minimum adjacent-window cosine falls below
-    // speaker_multi_gate_threshold, this VAD is treated as
-    // multi-speaker and the identify path switches to peek_best —
-    // best-effort label, NO exemplar admission, NO auto-register, NO
-    // EMA. Probe is skipped on VADs shorter than ~2.5 s (need ≥2
-    // windows). Empirical AUC 0.819 vs single/multi GT-label on
-    // /tmp/cam_change_points_r3.jsonl (47 probed VADs, devlog
-    // 2026-05-22, tools/eval_changepoint_binary.py). At threshold 0.58
-    // precision=1.000 / recall=0.375; at 0.60 precision=0.800 /
-    // recall=0.500.
-    bool  speaker_multi_gate_enable          = false;
-    float speaker_multi_gate_threshold       = 0.58f;
-    int   speaker_multi_gate_min_fbank       = 250;  // ~2.5 s
-    // Step 21 — SHORT-IDENTIFY → prev_full recency refresh. When a SHORT-
-    // IDENTIFY match clears this similarity floor (and the existing
-    // margin gate), the matched identity refreshes prev_full_time_ so
-    // that subsequent short backchannels within the inherit-recency
-    // window (4 s, Step 20) can broadcast under it. 0.0 disables the
-    // refresh (= pre-Step-21 behaviour: SI labels apply only to their
-    // own segment, never seed INHERIT-BROADCAST).
-    //
-    // Default 0.60 (SHIPPED Step 22). Step 21's first sweep on the
-    // 600 s fixture was inconclusive because run-to-run noise (~0.055
-    // on coverage) exceeded the proposed effect. Re-evaluation on the
-    // 1800 s slice of tests/test.mp3 (571 GT segs, replay 1x) tightened
-    // the noise floor to ~0.02 on coverage and exposed a clean,
-    // reproducible 4σ effect:
-    //   baseline (thr=0.0)  run1 cov=0.538/dec_macro=0.790
-    //                       run2 cov=0.559/dec_macro=0.822
-    //   thr=0.60            run1 cov=0.627/dec_macro=0.783
-    //                       run2 cov=0.631/dec_macro=0.785
-    //   Δcov = +0.081 (~4σ), Δmacro = +0.034, Δdec_macro = -0.022.
-    // The coverage gain dominates the small precision cost; overall
-    // macro improves. Env DEUSRIDET_SI_REFRESH_PREVFULL_THR overrides
-    // for further sweeps (set to 0.0 to disable).
-    float speaker_si_refresh_prev_full_threshold = 0.60f;
-    // Step 23 — SHORT-IDENTIFY WL-ECAPA tile-padding for sub-1 s speech.
-    // EXPERIMENTAL. Shipped default OFF after 1800 s ablation.
-    //
-    // WL-ECAPA requires ≥1 s (16000 samples) of PCM. The 1800 s
-    // reference fixture shows 223 SI band events (fbank ∈ [50,150))
-    // skipped because speech_pcm_buf_ < 16000 — the largest single
-    // source of lost short-band identifications. Zero-padding fails
-    // (silence dilutes ECAPA stat pool, dec_macro 0.95→0.27).
-    // Tile-padding (looping actual speech up to 16000) preserves
-    // mean/variance/energy stats while filling temporal context.
-    //
-    // 1800 s ablation result (Step 23, thr=0.60):
-    //   • baseline pooled 3-run: cov=0.620 σ=0.013, macro=0.46
-    //   • tile-pad 8k floor (factor ≤2×) 2-run: cov=0.628 σ=0.022, macro=0.481
-    //   • tile-pad 12k floor (factor ≤1.33×) 1-run: cov=0.613, macro=0.459
-    // The 8k floor doubles run-to-run σ (periodicity artefact in the
-    // ECAPA stat pool); the 12k floor reduces SI recovery to ~25 of
-    // 223 skips and washes out vs baseline. No floor yielded a
-    // signal exceeding noise. The proper fix for the 223 skips is a
-    // short-segment encoder (3D-Speaker ERes2Net-base / ECAPA-small),
-    // deferred to a separate RFC. The knob is kept default-OFF as
-    // scaffolding for that future work; env DEUSRIDET_SI_WL_TILE_PAD
-    // overrides for sweeps.
-    bool speaker_si_wl_tile_pad_enable = false;
-
-    // Step 24: CAM++ shadow store for SI-skip-wl fallback.
-    // When dual-encoder mode is active and a SI-band segment has
-    // samples<16000 (WL-ECAPA hard floor), the current code logs
-    // "SI-skip-wl" and emits no event. On the 1800 s reference fixture
-    // this accounts for 76% (82/108) of all no_segment GTs.
-    // With this flag enabled, every confirmed FULL admission mirrors
-    // the 192-D CAM++ vector into campp_db_ under the SAME
-    // external_id as dual_db_, building a parallel shadow library.
-    // The SI-skip-wl branch then queries campp_db_.peek_best(si_emb)
-    // and emits a short-identify event when the standard SI
-    // threshold/margin gates pass. ID space is unified with dual_db_,
-    // so downstream consumers need no remapping.
-    // Risk: campp_db_ exemplar admission has no shadow-side gates
-    // (admit_margin, hit_ratio, etc) — it accumulates one exemplar
-    // per FULL admission, may bloat relative to dual_db_. Acceptable
-    // for the 1800 s fixture; revisit if production-scale grows.
-    bool speaker_campp_shadow_enable = true;
-
-    // Step 24-b: separate gates for the CAM++ shadow path. The SI
-    // threshold/margin (default 0.40/0.05) were tuned for the
-    // **dual 384-D** encoder. Reusing them for the **single 192-D**
-    // CAM++ shadow lets in too many weak matches (Step 24 r1+r2:
-    // 222 shadow events, median sim 0.443, mean 0.440 — barely above
-    // the gate; resulting shadow decisions ~45% accurate vs ~78%
-    // for full-pool, dragging dec_macro 0.780 -> 0.754). The shadow
-    // path now applies its own (tighter) threshold and margin to
-    // ensure recovered decisions are at least as trustworthy as the
-    // dual-encoder baseline. Disabled if <= 0.
-    float speaker_campp_shadow_threshold = 0.48f;
-    float speaker_campp_shadow_margin    = 0.10f;
-
-    // Step 25a: SI-peek-veto on INHERIT-BROADCAST. When SHORT-IDENTIFY
-    // abstained but its peek had a confident DIFFERENT opinion from the
-    // prev_seg/prev_full inherit identity, suppress the inherit-broadcast
-    // (emit no_segment) rather than emit a likely-wrong label. Diagnostic
-    // on Step 24-b run r2 (382 decided, dec_macro=0.788) showed inherit
-    // broadcasts contribute 83% of all wrong decisions, while the SI peek
-    // — even when below the SI fire threshold — often has the correct
-    // opinion. This gate converts those wrongs to no_segment, lifting
-    // dec_macro at modest coverage cost. Default veto threshold 0.45 is
-    // conservative (only veto when peek's confidence comfortably exceeds
-    // a "noise" baseline). Disabled if <= 0.
-    // DEFAULT OFF after Step 25 negative result: a 3-run replay on the
-    // 1800 s fixture with veto on (rescue off) gave macro = (0.494 +
-    // 0.483 + 0.467)/3 = 0.481, vs 24-b shipped baseline 0.487 — within
-    // σ on every metric. Veto fired only ~8 times per run, too rarely to
-    // move macro meaningfully (it converts wrong-inherit to no_segment,
-    // which scores 0 in macro just like the wrong label did, so only
-    // dec_macro is touched). Knob retained for opt-in experimentation.
-    bool  speaker_inherit_peek_veto_enable    = false;
-    float speaker_inherit_peek_veto_threshold = 0.45f;
-
-    // Step 25b: SI-peek-RESCUE on INHERIT-BROADCAST. When the veto would
-    // fire (peek confidently disagrees with inherit), instead of dropping
-    // the broadcast and emitting no_segment, **substitute peek's identity**
-    // as the broadcast label. Rationale: Step 25a r1+r2 (1800 s mean
-    // cov=0.648 macro=0.488 dec_macro=0.793) showed only ~8 vetoes per
-    // run — turning a wrong inherit into no_segment lifts dec_macro by
-    // ~0.005 but leaves macro flat (the abstained segment scores 0 in
-    // macro just like the wrong label did). Substituting peek's answer
-    // converts those same wrongs into CORRECT decisions, lifting BOTH
-    // macro AND dec_macro. The peek's similarity is already confident
-    // (>= veto threshold) and the SI gate also fired off the same peek,
-    // so the substituted identity is trustworthy. Requires
-    // speaker_inherit_peek_veto_enable=1 (rescue is a strictly-stronger
-    // form of veto). DEFAULT OFF: Step 25b r1+r2 on the 1800 s fixture
-    // showed high run-to-run variance (cov 0.553 vs 0.657, dec_macro 0.848
-    // vs 0.780 between the two runs with the same knobs) and a macro
-    // regression on the 2-run mean (0.472 vs 0.488 for Step 25a). Mean
-    // dec_macro gain (+0.021) does not justify the macro drop and
-    // variance growth. Code retained as an opt-in knob for future
-    // diagnostics; not enabled by default.
-    bool speaker_inherit_peek_rescue_enable = false;
-
-    // Short-segment inheritance broadcast: when a speech segment ends
-    // with fewer than speaker_min_fbank_frames fbank frames, the FULL
-    // CAM++ extraction is skipped (short audio produces noisy
-    // embeddings that poison the library). But the VAD-start hook has
-    // already populated stats_.speaker_id from the previous segment
-    // under a strict 0.8 s gap gate (SAAS_INHERIT). If this flag is
-    // enabled, the segment-end path emits that inherited identity to
-    // the on_speaker_ broadcast channel — giving downstream consumers
-    // coverage on short backchannels / fillers / continuations WITHOUT
-    // running the encoder and WITHOUT touching the speaker library
-    // (no identify, no register, no EMA, no exemplar addition).
-    bool  speaker_short_inherit_enable = true;
-    // Phase 4 — OratorReclusterer runtime wiring.
-    // When enabled, the segment-end FULL path pushes the fused 384D
-    // (CAM++ ⊕ WL-ECAPA) embedding to a rolling-window spectral
-    // reclusterer (src/orator/orator_reclusterer.{h,cpp}). Each tick
-    // produces a globally-consistent speaker assignment over the last
-    // window_sec seconds; whenever the new global id disagrees with
-    // the tentative online id, a RelabelEvent is logged (and, in a
-    // future revision, surfaced as a Nexus `speaker_relabel` WS event
-    // so the WebUI timeline can be patched in place).
-    // 2026-05-26 — DEFAULT FLIPPED BACK TO OFF.
-    //
-    // The previous flip to ON was justified by a fixture-based macro_f1
-    // jump (0.5476 → 0.7025 on the fused 60-min fixture). On the live
-    // pipeline against tests/test.mp3 + ground_truth.json, however,
-    // every reclusterer config (LINK_THRESH ∈ {0.55, 0.60, 0.65, 0.70,
-    // 0.75}) collapses all 4 GT speakers into a single global id —
-    // 4-way speaker-attribution accuracy = 0%. With the reclusterer
-    // OFF, the same audio yields 25.4% best-mapping accuracy and the
-    // 4 speakers occupy 4 distinct raw ids. The reclusterer is
-    // therefore strictly destructive on multi-speaker meeting audio
-    // until its run_pass collapse mechanism is found and fixed.
-    // See docs/{en,zh}/devlog/2026-05-27.md "Layer 2c" for the live
-    // numbers and the constitutional rule that mandated this revert
-    // (accuracy on tests/test.mp3 is the sole metric).
-    // Env override: DEUSRIDET_RECLUSTERER_ENABLE=1 re-enables.
-    bool  speaker_reclusterer_enable        = false;
-    float speaker_reclusterer_window_sec    = 180.0f;
-    float speaker_reclusterer_interval_sec  = 30.0f;
-    float speaker_reclusterer_link_threshold = 0.55f;
-    float speaker_reclusterer_centroid_ema  = 0.20f;
-    int   speaker_reclusterer_min_segments  = 12;
-    int   speaker_reclusterer_max_segments  = 300;
-    int   speaker_reclusterer_min_k         = 2;
-    int   speaker_reclusterer_max_k         = 6;
-    // Replay speed for benchmark/testing input. 1.0 = real-time; >1.0 means
-    // the upstream driver feeds samples faster than wall time (e.g. speed=2.0
-    // pushes two seconds of source audio per wall second). This ONLY affects
-    // the AUDIO T1 <-> T0 anchor: period_ns is scaled so that T0 tracks wall
-    // time regardless of replay rate, keeping cross-domain alignment honest.
-    // All pipeline logic (VAD, ASR, thresholds) remains invariant.
-    float replay_speed       = 1.0f;
-};
 
 class AudioPipeline {
 public:
@@ -532,15 +248,12 @@ public:
     VadSource asr_vad_source() const { return static_cast<VadSource>(asr_vad_source_.load(std::memory_order_relaxed)); }
 
     // DiariZen-v2 session-level capture (Hybrid P1).
-    //   When enabled, every sample pushed via push_pcm() is also appended to
-    //   an internal in-RAM session buffer (mono 16 kHz int16, deinterleaved
-    //   by push_pcm's caller). `max_seconds` caps the buffer to bound RAM
-    //   (default 4000 s = ~125 MB). When the cap is hit, further samples
-    //   are silently dropped from the capture buffer (the live pipeline is
-    //   unaffected). `dump_wav` writes the captured samples to a minimal
-    //   16-kHz mono WAV and returns the number of samples written; 0 on
-    //   failure or empty buffer. `clear` resets the buffer; use it between
-    //   sessions to avoid concatenating audio across replay runs.
+    //   push_pcm() also appends to an in-RAM session buffer (mono 16 kHz
+    //   int16). `max_seconds` caps RAM (default 4000 s ≈ 125 MB); on
+    //   overflow further samples are dropped from capture only (live
+    //   pipeline unaffected). `dump_wav` writes a minimal 16-kHz mono WAV
+    //   and returns samples written (0 on failure/empty). `clear` resets
+    //   the buffer between sessions to avoid cross-run concatenation.
     void diarizen_capture_enable(bool on, double max_seconds = 4000.0);
     bool diarizen_capture_enabled() const;
     size_t diarizen_capture_samples() const;
@@ -619,14 +332,6 @@ private:
     int smoothed_speaker_id_ = -1;       // current smoothed speaker
     int campp_full_count_ = 0;           // count FULL extractions for periodic absorption
 
-    // v24: Temporal recency tracking for FULL speaker identification.
-    // When the previous speaker was active recently, lower the match
-    // threshold to reduce false negatives that cause fragmentation.
-    int prev_full_speaker_id_ = -1;
-    float prev_full_time_ = -100.0f;  // seconds, init far past
-    std::string prev_full_speaker_name_;  // v29: for temporal coherence swap
-    RetroFullRing retro_full_ring_;       // Step 17a: retro-relabel cache
-    int speaker_run_length_ = 0;  // v15d: consecutive same-speaker count
     int seg_overlap_chunks_ = 0;  // count overlap-detected chunks in current segment
     int seg_total_chunks_ = 0;    // total chunks in current segment
 
