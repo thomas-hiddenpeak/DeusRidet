@@ -201,8 +201,8 @@ int awaken(const std::string& webui_dir,
     // LLM-loaded live gate cleared at 93.55% (≥93.5%) with finalize RTF 0.10
     // and zero CUDA errors, so the in-process pipeline is the default speaker
     // re-attribution path. Opt out with DEUSRIDET_DIARIZEN_ENABLE=0. Periodic
-    // full-session re-diarise stays separately gated behind
-    // DEUSRIDET_DIARIZEN_PERIODIC=1 (O(N²); off by default — see the worker).
+    // live correction is ON by default and bounded by the 120 s worker window;
+    // opt out with DEUSRIDET_DIARIZEN_PERIODIC=0.
     bool   diarizen_enabled = true;
     if (const char* en = std::getenv("DEUSRIDET_DIARIZEN_ENABLE")) {
         if (en[0] == '0') diarizen_enabled = false;
@@ -344,8 +344,8 @@ int awaken(const std::string& webui_dir,
     // GPU memory remains Memoria's charge.
     (void)vires::Arbiter::instance();
 
-    // DiariZen-v2 capture + native pipeline. Off by default; enable with
-    // DEUSRIDET_DIARIZEN_ENABLE=1. The in-process CUDA pipeline is loaded
+    // DiariZen-v2 capture + native pipeline. On by default; opt out with
+    // DEUSRIDET_DIARIZEN_ENABLE=0. The in-process CUDA pipeline is loaded
     // once at startup (no Python subprocess). Hybrid P2 also spawns a
     // periodic worker that re-runs DiariZen every
     // DEUSRIDET_DIARIZEN_PERIOD_SEC seconds and rewrites the speaker_id of

@@ -99,13 +99,11 @@ private:
     bool                         running_ = false;
     bool                         stop_req_ = false;
     bool                         trigger_req_ = false;
-    // Timed full-session re-diarise is OFF by default. A full re-diarise
-    // of the whole accumulated session every period is O(N²) and, on a
-    // long session, monopolises the GPU for minutes — starving the live
-    // perception pipeline (FRCRN/VAD/speaker-id) that shares the same GPU
-    // and poisoning the CUDA context. Set DEUSRIDET_DIARIZEN_PERIODIC=1 to
-    // re-enable the timed cadence; otherwise the worker only runs on an
-    // explicit trigger_async() or finalize().
+    // Timed live re-diarise is ON by default after the Jun 2 B1 live proof.
+    // It is bounded by window_sec_ (120 s default) so each pass has finite GPU
+    // wall time and cannot grow with session length. Set
+    // DEUSRIDET_DIARIZEN_PERIODIC=0 to opt out; trigger_async() and finalize()
+    // remain available either way.
     bool                         periodic_enabled_ = true;
     // Direction C — sliding-window live diarise. When > 0, periodic and
     // on-demand passes diarise only the most recent `window_sec_` seconds
@@ -113,9 +111,9 @@ private:
     // length (a full-session pass is O(N) and on a long session blocks the
     // GPU long enough to overflow the live front-end audio buffer). The
     // canonical end-of-session finalize() always runs a FULL pass so the
-    // accuracy verdict is unchanged. 0 (default) preserves full-session
-    // behaviour on every pass. Set DEUSRIDET_DIARIZEN_WINDOW_SEC=<sec> to
-    // opt in. Should be ≥ the holdback horizon so live transcripts pending
+    // accuracy verdict is unchanged. Set DEUSRIDET_DIARIZEN_WINDOW_SEC=0 to
+    // force full-session live passes. Should be ≥ the holdback horizon so
+    // live transcripts pending
     // for the LLM still fall inside the re-diarised window.
     double                       window_sec_ = 120.0;
 };
