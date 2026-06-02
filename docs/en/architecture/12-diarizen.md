@@ -37,28 +37,24 @@ component that must be authored or extended:
 Hard-numbers anchor: the offline run on a 3615 s recording took 740 s
 wall-clock on the Orin GPU (RTF 0.20); the bulk of that is stage S.
 
-## Integration Mode — Hybrid (Reclusterer)
+## Current Integration Mode — Native Hybrid
 
-Three integration shapes were considered. The chosen one is **C —
-Hybrid**:
+As of 2026-06-02, the in-process CUDA `DiarizenPipeline` is the only
+DiariZen runtime path. The retired Python-IPC bridge has no fallback role.
 
-1. **Streaming layer is untouched.** Live `awaken` keeps emitting
-   `speaker_event` from the current WavLM-ECAPA + DualDb path. Latency
-   stays at today's value; the 31.0 % live baseline is the worst-case
-   fallback the system can never drop below.
-2. **DiariZen runs as a session-boundary reclusterer.** When Vigilia
-   detects a session boundary (idle → active transition, sleep,
-   long-silence threshold, or explicit user request from Nexus), the
-   recently-captured PCM ring is fed through the DiariZen stack, top-4
-   cluster ids are mapped to existing live speaker ids by overlap, and
-   a stream of `speaker_amend` events (already implemented in Step
-   17b-A, see [`/memories/auditus-tuning.md`](../../../) note "17b-A
-   PASSED") rewrites the transcript's `speaker_id` field retroactively.
-3. **No default flip until live accuracy is measured.** Per the
-   constitutional rule, the reclusterer is shipped with
-   `DEUSRIDET_DIARIZEN_RECLUSTER=0` by default; flip to `1` only after
-   a live `awaken` run produces the
-   `accuracy(tests/test.mp3, speaker-id 4-way): 31.0% → X%` line.
+1. **Streaming layer remains immediate.** Live `awaken` still emits
+   low-latency online `speaker_event` decisions from the Auditus/Orator
+   streaming path. These are provisional when the offline posterior has
+   better evidence.
+2. **Native DiariZen refines the session.** `awaken` enables an in-RAM
+   PCM capture buffer by default, loads `DiarizenPipeline` once, and wires
+   a `DiarizenPeriodicWorker`. Partial/on-demand passes use the 120 s
+   sliding window for live WebUI broadcasts and transcript-holdback
+   rewrites; finalization always runs a full-session native pass.
+3. **Runtime switches are opt-out, not alternate implementations.** Native
+   DiariZen is default-on and disabled with `DEUSRIDET_DIARIZEN_ENABLE=0`.
+   Timed partial passes are controlled by `DEUSRIDET_DIARIZEN_PERIODIC=0/1`;
+   `diarizen_trigger` and `diarizen_finalize` remain native either way.
 
 ### Why this shape
 
@@ -151,7 +147,7 @@ no step exceeds the soft size cap; each ends with a green build.
 | **P2a** | `diarizen_resnet34_embed.cu` + safetensors loader | embedding cosine ≥ 0.999 vs Python on 10 reference clips | deferred |
 | **P2b** | `diarizen_vbx_cluster.cu` (NumPy → CUDA port of `VBx.py`) | label sequence bit-equality vs Python on a fixed embedding sequence | deferred |
 | **P3a** | `diarizen_pipeline.cpp` facade wiring stages S→C→E→K | offline run on `tests/test.mp3` reproduces 93.5 % ± 0.5 pp via `tools/verification_2026/offline_score.py` | **done via IPC** (`e96255b`) |
-| **P3b** | `awaken` integration: session-boundary trigger + `speaker_amend` broadcast, gated by `DEUSRIDET_DIARIZEN_RECLUSTER=1` | live `awaken` run captured by `tools/replay_to_transcript.py` produces `accuracy(tests/test.mp3, speaker-id 4-way): 31.0% → X%` | **done via IPC** (`b0e3a8f` + `0cc9d0d`) |
+| **P3b** | `awaken` integration: capture buffer + WS `diarizen_trigger` / `diarizen_finalize` + partial/final broadcasts, gated by `DEUSRIDET_DIARIZEN_ENABLE` | live `awaken` run captured by `tools/replay_to_transcript.py` produces a canonical accuracy line | **done via IPC** on 2026-05-29, then **superseded by native in-process CUDA** on 2026-05-30 |
 | **P3c** | Default flip to `=1` *if and only if* P3b accuracy ≥ 80 % live | constitutional accuracy line in commit message | **FLIPPED 2026-05-30** — native DiariZen is now ON by default (`diarizen_enabled = true`; opt out with `DEUSRIDET_DIARIZEN_ENABLE=0`). `accuracy(tests/test.mp3, diarization): 93.6% → 93.6%` (same bit-eq verified path), finalize RTF 0.10 (369 s), 0 CUDA errors. Unblocked by the periodic-worker + broadcast-schema fix (see *Native P3c-verify* row) |
 | **Hybrid IPC P0** | `DiarizenFacade` C++/Python line-JSON bridge using `tools/diarizen_worker.py` | round-trip diarize call returns 1658-seg list on `tests/test.mp3` | **done 2026-05-29** (`e96255b`) |
 | **Hybrid IPC P1** | `AudioPipeline` session capture tap + WS `diarizen_finalize` | `accuracy(tests/test.mp3, diarization): — → 93.6%` via `tools/diarizen_live_score.py` | **done 2026-05-29** (`b0e3a8f`) |

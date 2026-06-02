@@ -7,7 +7,7 @@
 ## 开发日志
 - [2026-06-02](devlog/2026-06-02.md) — Orator 在线重设计：诊断 holdback 为何零修正（周期 worker 默认关闭），live 验证 B1+滑动窗口修复（17 次 pass、124 次改写、干净 4 簇双射），翻转 ASR/周期默认值（`cee2b02`），清理 0 消费说话人 id 配置面 + 按 R1 拆分 `audio_pipeline.h` 795→500（`9cc6741`），并修复 vires PUBLIC 链接欠债使全部 43 个目标可构建（`fe84f20`）
 - [2026-06-01](devlog/2026-06-01.md) — Vires：将前台心跳扩展到 machina 预填充/解码 + ASR（`738fc66`）；`tests/test.mp3` 精度 93.5% → 93.6%（+0.1 pp）
-- [2026-05-30](devlog/2026-05-30.md) — DiariZen-v2 原生 CUDA 流水线活体验证：接入 `awaken`，受 `DEUSRIDET_DIARIZEN_NATIVE` 控制（`d1b9d82`）；`tests/test.mp3` 精度 93.5% → 93.7%（+0.2 pp）。默认未翻转——原生单 chunk finalize RTF 0.54 vs Python-IPC 0.21；batch 是翻转默认前的关键性能任务
+- [2026-05-30](devlog/2026-05-30.md) — DiariZen-v2 原生 CUDA 流水线成为唯一/默认路径：`DEUSRIDET_DIARIZEN_NATIVE` 并入默认开启的 `DEUSRIDET_DIARIZEN_ENABLE`（`=0` 退出），Python-IPC 桥退役，live 精度保持 93.6–93.7%，finalize RTF 提升到约 0.10/0.099
 - [2026-05-29](devlog/2026-05-29.md) — DiariZen-v2 Hybrid 流水线 P0/P1/P2 经 C++/Python IPC 捷径交付：facade 桥、live 接线 + WS finalize 广播、周期 + 按需重聚类 + transcript holdback、WebUI 重聚类面板 + 12-diarizen RFC
 - [2026-05-27](devlog/2026-05-27.md) — Phase 3c：对生产说话人分离链路（`tests/test.mp3` 前 600s）的首次语义阅读（肉眼、禁止脚本打分）——现象 → 证据 → 怀疑成因 → 候选干预
 - [2026-05-26](devlog/2026-05-26.md) — 第十四阶段：reclusterer 内部可靠度加权亲和度（`w_i=min(1,dur_i/1.5)`）；s1800 +1.03 pp 但 full_60m −3.56 pp——连续第三个窗内杠杆被否，`window_sec=180` 天花板依旧

@@ -35,23 +35,22 @@ DiariZen-v2 是三段式流水线，每一段对应一个待新增或扩展的 C
 硬数据锚：3615 s 录音的离线运行在 Orin GPU 上 740 s wall-clock（RTF 0.20），
 其中 S 段占 ~85 % 时间。
 
-## 集成形态——Hybrid（Reclusterer 模式）
+## 当前集成形态——原生 Hybrid
 
-考虑过三种集成形态，最终选 **C — Hybrid**：
+截至 2026-06-02，进程内 CUDA `DiarizenPipeline` 是唯一 DiariZen 运行时
+路径。已退役的 Python-IPC 桥不再承担 fallback 角色。
 
-1. **流式层保持不动。** Live `awaken` 继续从现有 WavLM-ECAPA + DualDb
-   通道发出 `speaker_event`。延迟保持今天水平；31.0 % live baseline 是
-   系统永远不会跌破的最坏情况。
-2. **DiariZen 作为会话边界 reclusterer 运行。** 当 Vigilia 检测到会话
-   边界（idle → active 转换、睡眠、长静默阈值、或 Nexus 显式用户请求）
-   时，最近捕获的 PCM ring 被送入 DiariZen 流水线，top-4 cluster id
-   通过重叠映射到现有 live speaker id，发出一串 `speaker_amend` 事件
-   （Step 17b-A 已实现，见 [`/memories/auditus-tuning.md`](../../../)
-   "17b-A PASSED" 条目），事后改写 transcript 的 `speaker_id` 字段。
-3. **未经 live 验证不切默认。** 按宪法规则，reclusterer 出厂时
-   `DEUSRIDET_DIARIZEN_RECLUSTER=0`；只有当 live `awaken` 跑出
-   `accuracy(tests/test.mp3, speaker-id 4-way): 31.0% → X%` 那条线
-   之后，才允许翻为 `1`。
+1. **流式层仍负责即时响应。** Live `awaken` 继续从 Auditus/Orator
+   流式路径发出低延迟在线 `speaker_event` 决策。当离线后验有更强证据时，
+   这些在线决策可被视为临时标签。
+2. **原生 DiariZen 修正整段会话。** `awaken` 默认启用内存 PCM 捕获缓冲，
+   启动时加载一次 `DiarizenPipeline`，并接入 `DiarizenPeriodicWorker`。
+   partial / 按需 pass 使用 120 s 滑动窗口服务 live WebUI 广播与 transcript
+   holdback 改写；finalize 始终跑完整会话的原生 pass。
+3. **运行时开关是退出开关，不是替代实现。** 原生 DiariZen 默认开启，
+   用 `DEUSRIDET_DIARIZEN_ENABLE=0` 关闭。定时 partial pass 由
+   `DEUSRIDET_DIARIZEN_PERIODIC=0/1` 控制；`diarizen_trigger` 与
+   `diarizen_finalize` 无论如何都走原生路径。
 
 ### 为什么是这个形态
 
@@ -88,24 +87,24 @@ src/orator/
 ```
 tools/convert_diarizen_to_safetensors.py
   → ~/models/dev/diarizen_v2/
-       wavlm_large_s80_md.safetensors          (~1.2 GB FP16)
-       conformer_eend_head.safetensors         (~30 MB FP16)
-       wespeaker_resnet34_lm.safetensors       (~26 MB FP16)
-       xvec_transform.bin                       (LDA 矩阵的原始打包)
-       plda.bin                                 (PLDA 先验的原始打包)
+       wavlm_pruned.safetensors          (127 MB FP16 — BUT-FIT pruned)
+       conformer_head.safetensors        ( 12 MB FP16)
+       wespeaker_resnet34.safetensors    ( 13 MB FP16)
+       xvec_transform.npz                (134 KB — LDA matrices, verbatim)
+       plda.npz                          (134 KB — PLDA priors, verbatim)
+       shapes.json                       (per-tensor shape index)
 ```
 
-`.npz` 先验（`xvec_transform`、`plda`）转为打包二进制：体积小
-（~MB 级），仅 VBx 内核消费，safetensors 是 overkill。
+`.npz` 先验保持原样，因为它们很小，C++ VBx 通过小型自定义读取器解包；
+safetensors 在这里反而是 overkill。
 
 ## 显存预算影响
 
-四份 DiariZen 权重合计 **~1.3 GB FP16**，全部**懒加载**——首次
-reclusterer 触发时加载，会话结束后**释放**（不常驻）。这一点很重要——
-`11-machina.md` 中常驻预算已经紧（~64 GB DRAM）。
+五份 DiariZen 权重制品合计 **~152 MB FP16**，均在 DiariZen 启用时加载；
+与始终常驻的 LLM 相比很小，但仍属于 Orin 64 GB 统一内存预算的一部分。
 
-- 瞬时峰值：~1.3 GB 权重 + ~600 MB 激活 scratch + ~200 MB 每会话嵌入
-  缓存 ≤ **~2.1 GB 瞬时**。
+- 瞬时峰值：~152 MB 权重 + ~600 MB 激活 scratch + ~200 MB 每会话嵌入
+  缓存 ≤ **~1.0 GB 瞬时**。
 - 计算路径：S 段（WavLM-large）占 ~85 % wall-clock，C/E/K 三段各 ≤ 5 %。
 - Stream：reclusterer 跑在专用低优先级 CUDA 流，不能饿死 Conscientia
   prefill / decode。
@@ -132,7 +131,7 @@ Loader 落地时更新 `11-machina.md` Machina 显存预算表，标注为
 | **P2a** | `diarizen_resnet34_embed.cu` + safetensors loader | 10 个参考片段上嵌入与 Python cosine ≥ 0.999 | 延后 |
 | **P2b** | `diarizen_vbx_cluster.cu`（`VBx.py` 的 NumPy → CUDA 移植） | 固定嵌入序列上标签序列与 Python 位等价 | 延后 |
 | **P3a** | `diarizen_pipeline.cpp` 门面把 S→C→E→K 接起来 | 在 `tests/test.mp3` 上离线运行通过 `tools/verification_2026/offline_score.py` 重现 93.5 % ± 0.5 pp | **已经 IPC 完成**（`e96255b`） |
-| **P3b** | `awaken` 集成：会话边界触发器 + `speaker_amend` 广播，受 `DEUSRIDET_DIARIZEN_RECLUSTER=1` 控制 | 由 `tools/replay_to_transcript.py` 捕获的 live `awaken` 跑出 `accuracy(tests/test.mp3, speaker-id 4-way): 31.0% → X%` | **已经 IPC 完成**（`b0e3a8f` + `0cc9d0d`） |
+| **P3b** | `awaken` 集成：capture buffer + WS `diarizen_trigger` / `diarizen_finalize` + partial/final 广播，受 `DEUSRIDET_DIARIZEN_ENABLE` 控制 | 由 `tools/replay_to_transcript.py` 捕获 live `awaken` 并产出宪法 accuracy 行 | 2026-05-29 **经 IPC 完成**，2026-05-30 被**原生进程内 CUDA 路径取代** |
 | **P3c** | 默认翻为 `=1`——**当且仅当** P3b 实测 live 准确率 ≥ 80 % | commit message 中带宪法 accuracy 行 | **已翻转 2026-05-30**——native DiariZen 现在默认开启（`diarizen_enabled = true`；用 `DEUSRIDET_DIARIZEN_ENABLE=0` 退出）。`accuracy(tests/test.mp3, diarization): 93.6% → 93.6%`（同一 bit-eq 已验证路径），finalize RTF 0.10（369 s），0 CUDA 错误。由 periodic-worker + 广播 schema 修复解除阻塞（见 *Native P3c-verify* 行） |
 | **Hybrid IPC P0** | `DiarizenFacade` C++/Python 行 JSON 桥，使用 `tools/diarizen_worker.py` | `tests/test.mp3` 上 round-trip diarize 调用返回 1658 段 | **done 2026-05-29**（`e96255b`） |
 | **Hybrid IPC P1** | `AudioPipeline` session 捕获 tap + WS `diarizen_finalize` | 通过 `tools/diarizen_live_score.py` 得 `accuracy(tests/test.mp3, diarization): — → 93.6%` | **done 2026-05-29**（`b0e3a8f`） |
