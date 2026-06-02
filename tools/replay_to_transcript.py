@@ -186,6 +186,51 @@ def overlap_sec(a0: float, a1: float, b0: float, b1: float) -> float:
     return max(0.0, min(a1, b1) - max(a0, b0))
 
 
+def gt_speaker_for_window(utts: list[dict], w0: float, w1: float):
+    """Return the GT speaker name with the largest time overlap against the
+    window [w0, w1], or None if nothing overlaps. Purely mechanical."""
+    best_name, best_ov = None, 0.0
+    for u in utts:
+        ov = overlap_sec(w0, w1,
+                         float(u["t0_start_sec"]), float(u["t0_end_sec"]))
+        if ov > best_ov:
+            best_ov = ov; best_name = u["speaker"]
+    return best_name if best_ov > 0.0 else None
+
+
+def best_one_to_one_mapping(pairs: list[tuple]):
+    """DISPLAY-NAMING ONLY — NOT a score.
+
+    pairs = [(pred_id, gt_name), ...]. Build a predicted-id -> GT-name
+    label assignment under a strict one-to-one constraint, purely so the
+    chronological table can show a readable name next to each cluster id.
+
+    FORBIDDEN: do NOT use the returned counts to print an accuracy /
+    macro-F1 / micro number. Per .github/instructions/benchmarks.md and
+    workflow.instructions.md, speaker-attribution correctness is judged
+    by the agent reading the table by eye, never by a script. This
+    function therefore returns ONLY the mapping; any caller that derives
+    a percentage from it is re-introducing the exact violation that got
+    tools/diarizen_live_score.py and tools/compute_accuracy.py deleted on
+    2026-06-02.
+    """
+    from collections import defaultdict
+    conf = defaultdict(int)            # (pred_id, gt_name) → count
+    for pid, name in pairs:
+        conf[(pid, name)] += 1
+    # Greedy: repeatedly take the highest-count unused (pred,gt) cell.
+    cells = sorted(conf.items(), key=lambda kv: -kv[1])
+    mapping: dict = {}
+    used_gt: set = set()
+    for (pid, name), _cnt in cells:
+        if pid in mapping or name in used_gt:
+            continue
+        mapping[pid] = name
+        used_gt.add(name)
+    return mapping
+
+
+
 # ─── main ────────────────────────────────────────────────────────────
 
 def fmt_t(t: float) -> str:
@@ -207,6 +252,12 @@ def main() -> int:
     ap.add_argument("--max-sec", type=float, default=600.0,
                     help="truncate audio + GT to first N seconds")
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--asr", dest="asr", action="store_true", default=True,
+                    help="send asr_enable:on after connect (default; the "
+                         "runtime ASR flag defaults OFF, so without this no "
+                         "asr_transcript events are ever broadcast)")
+    ap.add_argument("--no-asr", dest="asr", action="store_false",
+                    help="diarization-only capture; leave ASR runtime off")
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -320,12 +371,43 @@ def main() -> int:
                     "text":        obj.get("text", ""),
                     "speaker_id":  int(obj.get("speaker_id", -1)),
                     "speaker_name": obj.get("speaker_name", ""),
+                    "online_id":   int(obj.get("speaker_id", -1)),
+                    "amended":     False,
                 })
+        elif t == "asr_transcript_amend":
+            # The holdback committed this transcript to the LLM with a
+            # voiceprint-anchored (final) speaker_id. Rewrite the matching
+            # asr event so the captured speaker↔content boundary reflects
+            # what the LLM actually consumed, not the provisional online id.
+            with lock:
+                a_s = float(obj.get("stream_start_sec", 0.0))
+                a_e = float(obj.get("stream_end_sec", 0.0))
+                a_txt = obj.get("text", "")
+                final_id = int(obj.get("speaker_id", -1))
+                final_name = obj.get("speaker_name", "")
+                best_i, best_dt = -1, 1.0
+                for i, ev in enumerate(asr_events):
+                    if ev["text"] != a_txt:
+                        continue
+                    dt = abs(ev["start_sec"] - a_s) + abs(ev["end_sec"] - a_e)
+                    if dt <= best_dt:
+                        best_dt = dt; best_i = i
+                if best_i >= 0:
+                    asr_events[best_i]["speaker_id"] = final_id
+                    asr_events[best_i]["speaker_name"] = final_name
+                    asr_events[best_i]["amended"] = True
 
     connected = threading.Event()
 
     def on_open(_ws):
         print("[ws] connected", flush=True)
+        if args.asr:
+            try:
+                _ws.send("asr_enable:on")
+                print("[ws] sent asr_enable:on", flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"[ws] failed to enable ASR: {e}", file=sys.stderr,
+                      flush=True)
         connected.set()
 
     def on_error(_ws, err):
@@ -394,7 +476,38 @@ def main() -> int:
         f.write(f"- runtime speaker decisions: {len(rt_segs)}\n")
         f.write(f"- speaker_amend in-place: {n_amend}\n")
         f.write(f"- speaker_relabel (forward-map merges): {n_relabel}\n")
+        n_asr_amended = sum(1 for e in asr_events if e.get("amended"))
+        f.write(f"- ASR transcripts captured: {len(asr_events)}\n")
+        f.write(f"- ASR transcripts holdback-amended (final speaker id "
+                f"applied): {n_asr_amended}\n")
         f.write(f"- GT speakers: {gt_obj.get('speakers')}\n\n")
+
+        # ── predicted-cluster → GT-name DISPLAY mapping (NOT a score) ──
+        # FORBIDDEN ZONE. This tool must NOT print an accuracy / macro /
+        # micro percentage. It only builds a readable name for each cluster
+        # id so the agent can read the chronological table below by eye and
+        # judge speaker-attribution correctness personally. Emitting a
+        # "speaker-id accuracy: NN%" line here is the exact violation that
+        # deleted diarizen_live_score.py + compute_accuracy.py on 2026-06-02.
+        # Do not re-add one. See .github/instructions/benchmarks.md and
+        # workflow.instructions.md (Semantic Evaluation, Not Scripted Scoring).
+        eval_pairs = []          # (final_pred_id, gt_name) for naming only
+        for ev in asr_events:
+            gt_name = gt_speaker_for_window(utts, ev["start_sec"], ev["end_sec"])
+            if gt_name is None:
+                continue
+            pid = ev["speaker_id"]
+            if pid < 0:
+                continue
+            eval_pairs.append((pid, gt_name))
+        disp_map = best_one_to_one_mapping(eval_pairs) if eval_pairs else {}
+        f.write("## Predicted-cluster → GT-name (display only, NOT scored)\n\n")
+        f.write("_The agent reads the chronological table below and judges\n"
+                "correctness by eye; no percentage is computed here._\n\n")
+        for pid in sorted(disp_map):
+            f.write(f"- cluster {pid} most-often overlaps GT "
+                    f"**{disp_map[pid]}**\n")
+        f.write("\n")
 
         # ── relabel log ──
         f.write("## Reclusterer forward-map events\n\n")
@@ -410,6 +523,31 @@ def main() -> int:
             for k, v in sorted(relabel_map.map.items()):
                 f.write(f"- {k} → {v}\n")
             f.write("\n")
+
+        # ── ASR transcript ↔ speaker boundary (chronological) ──
+        f.write("## ASR transcript ↔ speaker boundary\n\n")
+        f.write("Each line is one ASR transcript the LLM consumed: its time\n"
+                "window, the FINAL predicted speaker id (after holdback\n"
+                "voiceprint correction; ✎ marks a holdback amend), the\n"
+                "provisional online id, the most-overlapping GT speaker, and\n"
+                "the recognised text. NO ✓/✗ verdict is printed — the agent\n"
+                "reads this table and judges correctness by eye (per\n"
+                "benchmarks.md / workflow.instructions.md).\n\n")
+        # disp_map below is DISPLAY naming only; see the FORBIDDEN ZONE note.
+        for ev in sorted(asr_events, key=lambda e: e["start_sec"]):
+            gt_name = gt_speaker_for_window(utts, ev["start_sec"], ev["end_sec"])
+            gt_str = gt_name if gt_name else "—"
+            pid = ev["speaker_id"]
+            mapped = disp_map.get(pid)
+            mapped_str = f" (cluster≈{mapped})" if mapped else ""
+            amend_tag = " ✎" if ev.get("amended") else ""
+            txt = (ev.get("text", "") or "").replace("\n", " ").strip()
+            f.write(f"- [{fmt_t(ev['start_sec'])} – {fmt_t(ev['end_sec'])}]"
+                    f"  pred={pid}{mapped_str}{amend_tag}"
+                    f"  online={ev.get('online_id', pid)}"
+                    f"  GT={gt_str}\n"
+                    f"  > {txt}\n")
+        f.write("\n")
 
         # ── GT-oriented narrative ──
         f.write("## GT-oriented narrative\n\n")

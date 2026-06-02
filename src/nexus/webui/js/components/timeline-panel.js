@@ -29,9 +29,10 @@ const LH = {
     asr:     24,
     saas:    16,
     tracker: 16,
+    dzn:     14,
     gap:      4,
 };
-const ROW_H = LH.time + LH.vad + LH.asr + LH.saas + LH.tracker + LH.gap;
+const ROW_H = LH.time + LH.vad + LH.asr + LH.saas + LH.tracker + LH.dzn + LH.gap;
 const LABEL_W = 30;            // left margin for lane labels
 const DEFAULT_PX_SEC = 40;     // pixels per second
 
@@ -42,8 +43,15 @@ export class TimelinePanel {
         this.vadIntervals  = [];  // {start, end}
         this.asrSegments   = [];  // {start, end, text, trigger, latency, ...}
         this.saasSegments  = [];  // {start, end, spkId, spkName, spkSim, spkConf, spkSrc}
+        this.spkEvents     = [];  // {time, id, sim, name, isNew}
         this.trackerSpans  = [];  // {start, end, trkId, trkName, state, sim}
         this.trackerEvents = [];  // {time, type, oldId, newId, name, sim, state}
+        // DiariZen overlay lane (D): each finalize/partial pass is a full
+        // re-diarisation of the session, so the array is REPLACED per pass,
+        // not appended. {start, end, label} in global stream seconds.
+        this.dznSegments   = [];
+        this._dznPass      = -1;  // last pass seq rendered (newer wins)
+        this._dznLabelIdx  = new Map();  // DiariZen label -> stable color index
         this.maxEntries    = 800;
         // Forward-map of OratorReclusterer global-merge / K-cap relabels.
         // Each entry old_id -> new_id is applied transitively when rendering
@@ -218,6 +226,22 @@ export class TimelinePanel {
         this._dirty = true;
     }
 
+    // Raw speaker-identification event stream (from `type=speaker`).
+    // This is independent from ASR transcripts, so the timeline can still
+    // show speaker activity when ASR is disabled.
+    onSpeakerEvent(obj) {
+        const t = this._lastStreamSec > 0 ? this._lastStreamSec : 0;
+        this.spkEvents.push({
+            time: t,
+            id: obj.id ?? -1,
+            sim: obj.sim ?? 0,
+            name: obj.name || '',
+            isNew: !!obj.new,
+        });
+        if (this.spkEvents.length > this.maxEntries) this.spkEvents.shift();
+        this._dirty = true;
+    }
+
     // OratorReclusterer global-merge / K-cap relabel patcher. Receives a
     // {type:'speaker_relabel', segment_id, old_id, new_id, confidence}
     // envelope. v1 semantics: treat old_id -> new_id as a global identity
@@ -253,6 +277,32 @@ export class TimelinePanel {
             if (seg.spkId === oldId) { seg.spkId = target; n_patched += 1; }
         }
         if (n_patched > 0) this._dirty = true;
+    }
+
+    // DiariZen overlay (D): consume a speaker_diarize_partial / _final pass
+    // and render its segments as a dedicated lane under the online speaker
+    // chips, so DiariZen's session-level re-diarisation is visible while the
+    // stream is still running — not only at end-of-session. Each pass is a
+    // FULL re-diarise (segments already carry origin_sec offset from the
+    // worker), so the lane is replaced wholesale; a newer pass supersedes an
+    // older one. Display-only: this never rewrites the online saas segments.
+    onDiarize(obj) {
+        if (!obj || obj.ok === false || !Array.isArray(obj.segments)) return;
+        const pass = typeof obj.pass === 'number' ? obj.pass : (this._dznPass + 1);
+        if (pass < this._dznPass) return;  // stale pass — keep the newer one
+        const segs = [];
+        for (const s of obj.segments) {
+            let start, end, label;
+            if (Array.isArray(s)) { start = s[0]; end = s[1]; label = s[2]; }
+            else { start = s.start; end = s.end; label = s.label; }
+            if (typeof start !== 'number' || typeof end !== 'number' || end <= start) continue;
+            label = (label === undefined || label === null) ? '?' : String(label);
+            if (!this._dznLabelIdx.has(label)) this._dznLabelIdx.set(label, this._dznLabelIdx.size);
+            segs.push({ start, end, label });
+        }
+        this.dznSegments = segs;
+        this._dznPass = pass;
+        this._dirty = true;
     }
 
     // Apply the forward-map to a raw speaker id at render time.
@@ -374,6 +424,7 @@ export class TimelinePanel {
             { name: 'ASR', y: tyTop + LH.time + LH.vad,              h: LH.asr },
             { name: 'SPK', y: tyTop + LH.time + LH.vad + LH.asr,    h: LH.saas },
             { name: 'TRK', y: tyTop + LH.time + LH.vad + LH.asr + LH.saas, h: LH.tracker },
+            { name: 'DZN', y: tyTop + LH.time + LH.vad + LH.asr + LH.saas + LH.tracker, h: LH.dzn },
         ];
         for (const lane of lanes) {
             c.fillStyle = '#161b22';
@@ -490,6 +541,33 @@ export class TimelinePanel {
             }
         }
 
+        // Raw speaker events (when ASR lane has no segments yet).
+        for (const ev of this.spkEvents) {
+            if (ev.time < tStart || ev.time > tEnd) continue;
+            const px = tx(ev.time);
+            const spkId = this._resolveSpkId(ev.id);
+            const color = spkId >= 0 ? SPEAKER_COLORS[spkId % SPEAKER_COLORS.length] : UNKNOWN_COLOR;
+            c.strokeStyle = color;
+            c.lineWidth = 2;
+            c.globalAlpha = 0.85;
+            c.beginPath();
+            c.moveTo(px, spkY + 1);
+            c.lineTo(px, spkY + spkH - 1);
+            c.stroke();
+            c.globalAlpha = 1;
+
+            // New-speaker marker.
+            if (ev.isNew) {
+                c.fillStyle = '#3fb950';
+                c.beginPath();
+                c.moveTo(px, spkY + 1);
+                c.lineTo(px + 4, spkY + 7);
+                c.lineTo(px - 4, spkY + 7);
+                c.closePath();
+                c.fill();
+            }
+        }
+
         // ── Tracker lane (continuous spans from pipeline_stats) ──
         const trkY = lanes[3].y;
         const trkH = lanes[3].h;
@@ -603,6 +681,32 @@ export class TimelinePanel {
                 c.moveTo(px + 3, trkY + 2);
                 c.lineTo(px - 3, trkY + trkH - 2);
                 c.stroke();
+            }
+        }
+
+        // ── DiariZen lane (D) — session re-diarisation overlay ──
+        const dznY = lanes[4].y;
+        const dznH = lanes[4].h;
+        for (const seg of this.dznSegments) {
+            if (seg.end < tStart || seg.start > tEnd) continue;
+            const px1 = Math.max(x0, tx(Math.max(seg.start, tStart)));
+            const px2 = Math.min(W, tx(Math.min(seg.end, tEnd)));
+            if (px2 - px1 < 1) continue;
+            const idx = this._dznLabelIdx.get(seg.label) ?? 0;
+            c.fillStyle = SPEAKER_COLORS[idx % SPEAKER_COLORS.length];
+            c.globalAlpha = 0.6;
+            c.fillRect(px1, dznY + 1, px2 - px1, dznH - 2);
+            c.globalAlpha = 1;
+            if (px2 - px1 > 20) {
+                c.save();
+                c.beginPath();
+                c.rect(px1, dznY, px2 - px1, dznH);
+                c.clip();
+                c.fillStyle = '#fff';
+                c.font = '8px monospace';
+                c.textBaseline = 'middle';
+                c.fillText(seg.label, px1 + 2, dznY + dznH / 2);
+                c.restore();
             }
         }
     }

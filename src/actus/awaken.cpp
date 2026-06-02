@@ -156,17 +156,22 @@ int awaken(const std::string& webui_dir,
     audio_cfg.wavlm_ecapa_model = model_root + "/speaker/espnet_wavlm_ecapa/wavlm_ecapa.safetensors";
     audio_cfg.wavlm_ecapa_threshold = 0.55f;
 
-    // Speaker-ID benchmark stage: keep ASR fully disabled by default to avoid
-    // extra GPU/queue pressure that can distort diarization-focused metrics.
+    // ASR is part of the canonical perception path: speaker-id is never
+    // validated in isolation from ASR — the two share the live pipeline and
+    // the holdback speaker<->content boundary, so a speaker-only benchmark
+    // would measure a configuration the system never actually runs in. Load
+    // ASR by default; opt out only with DEUSRIDET_TEST_WS_ENABLE_ASR=0 for a
+    // pure VAD/diarization micro-benchmark.
     const char* test_ws_enable_asr = std::getenv("DEUSRIDET_TEST_WS_ENABLE_ASR");
     bool enable_asr_in_test_ws =
-        (test_ws_enable_asr != nullptr) && std::string(test_ws_enable_asr) == "1";
+        (test_ws_enable_asr == nullptr) || std::string(test_ws_enable_asr) != "0";
     if (enable_asr_in_test_ws) {
         audio_cfg.asr_model_path = model_root + "/asr/Qwen/Qwen3-ASR-1.7B";
-        printf("[awaken] ASR load enabled by DEUSRIDET_TEST_WS_ENABLE_ASR=1\n");
+        printf("[awaken] ASR load enabled (default; set "
+               "DEUSRIDET_TEST_WS_ENABLE_ASR=0 to disable)\n");
     } else {
         audio_cfg.asr_model_path.clear();
-        printf("[awaken] ASR load disabled for speaker-only benchmark stage\n");
+        printf("[awaken] ASR load disabled by DEUSRIDET_TEST_WS_ENABLE_ASR=0\n");
     }
 
     // Track WS-level stats.
@@ -185,7 +190,12 @@ int awaken(const std::string& webui_dir,
     std::unique_ptr<auditus::TranscriptHoldback> diarizen_holdback;
     std::unique_ptr<orator::DiarizenPeriodicWorker> diarizen_worker;
     double diarizen_cap_sec = 0.0;
-    double diarizen_period_sec = 60.0;
+    // Periodic recluster cadence. 30s is the sweet spot from the Jun 2 live
+    // 1x replay: max per-pass wall on the 120s window was ~19s, so 30s keeps
+    // ~37% headroom (no backlog), and 75s holdback / 30s = 2.5 correction
+    // passes per pending item (enough redundancy to retroactively fix the
+    // speaker cold-start lag). Override with DEUSRIDET_DIARIZEN_PERIOD_SEC.
+    double diarizen_period_sec = 30.0;
     double diarizen_holdback_sec = 75.0;
     // P3c default flip (2026-05-30): native DiariZen is ON by default. The
     // LLM-loaded live gate cleared at 93.55% (≥93.5%) with finalize RTF 0.10
@@ -301,62 +311,20 @@ int awaken(const std::string& webui_dir,
 
     // Load configs/auditus.conf (diarization runtime knobs). Missing keys
     // fall back to AudioPipelineConfig defaults, so the file is optional.
+    // Only the four gates the clean three-concern online facade consumes are
+    // parsed; the pre-redesign discovery/recency/short-identify/multi-gate/
+    // campp-shadow/inherit-peek knobs were removed (2026-06-02 anti-entropy).
     {
         Config aud_cfg;
         if (aud_cfg.load("configs/auditus.conf")) {
             audio_cfg.speaker_threshold          = (float)aud_cfg.get_double("speaker_threshold",          audio_cfg.speaker_threshold);
             audio_cfg.speaker_register_threshold = (float)aud_cfg.get_double("speaker_register_threshold", audio_cfg.speaker_register_threshold);
-            audio_cfg.speaker_discovery_count    =        aud_cfg.get_int   ("speaker_discovery_count",    audio_cfg.speaker_discovery_count);
-            audio_cfg.speaker_discovery_boost    = (float)aud_cfg.get_double("speaker_discovery_boost",    audio_cfg.speaker_discovery_boost);
-            audio_cfg.speaker_discovery_reg_relax = (float)aud_cfg.get_double("speaker_discovery_reg_relax", audio_cfg.speaker_discovery_reg_relax);
-            audio_cfg.speaker_recency_window_sec = (float)aud_cfg.get_double("speaker_recency_window_sec", audio_cfg.speaker_recency_window_sec);
-            audio_cfg.speaker_recency_bonus      = (float)aud_cfg.get_double("speaker_recency_bonus",      audio_cfg.speaker_recency_bonus);
-            audio_cfg.speaker_margin_abstain       = (float)aud_cfg.get_double("speaker_margin_abstain",       audio_cfg.speaker_margin_abstain);
-            audio_cfg.speaker_max_auto_reg_count   =        aud_cfg.get_int   ("speaker_max_auto_reg_count",   audio_cfg.speaker_max_auto_reg_count);
-            audio_cfg.speaker_min_fbank_frames     =        aud_cfg.get_int   ("speaker_min_fbank_frames",     audio_cfg.speaker_min_fbank_frames);
-            audio_cfg.speaker_short_inherit_enable =        aud_cfg.get_int   ("speaker_short_inherit_enable", audio_cfg.speaker_short_inherit_enable ? 1 : 0) != 0;
-            audio_cfg.speaker_short_identify_enable=        aud_cfg.get_int   ("speaker_short_identify_enable",audio_cfg.speaker_short_identify_enable ? 1 : 0) != 0;
-            audio_cfg.speaker_min_fbank_frames_identify =   aud_cfg.get_int   ("speaker_min_fbank_frames_identify", audio_cfg.speaker_min_fbank_frames_identify);
-            audio_cfg.speaker_short_identify_threshold =(float)aud_cfg.get_double("speaker_short_identify_threshold", audio_cfg.speaker_short_identify_threshold);
-            audio_cfg.speaker_short_identify_margin    =(float)aud_cfg.get_double("speaker_short_identify_margin",    audio_cfg.speaker_short_identify_margin);
-            audio_cfg.speaker_multi_gate_enable        =        aud_cfg.get_int   ("speaker_multi_gate_enable",        audio_cfg.speaker_multi_gate_enable ? 1 : 0) != 0;
-            audio_cfg.speaker_multi_gate_threshold     =(float)aud_cfg.get_double("speaker_multi_gate_threshold",     audio_cfg.speaker_multi_gate_threshold);
-            audio_cfg.speaker_multi_gate_min_fbank     =        aud_cfg.get_int   ("speaker_multi_gate_min_fbank",     audio_cfg.speaker_multi_gate_min_fbank);
-            audio_cfg.speaker_si_refresh_prev_full_threshold = (float)aud_cfg.get_double("speaker_si_refresh_prev_full_threshold", audio_cfg.speaker_si_refresh_prev_full_threshold);
-            audio_cfg.speaker_si_wl_tile_pad_enable    =        aud_cfg.get_int   ("speaker_si_wl_tile_pad_enable",    audio_cfg.speaker_si_wl_tile_pad_enable ? 1 : 0) != 0;
-            audio_cfg.speaker_campp_shadow_enable      =        aud_cfg.get_int   ("speaker_campp_shadow_enable",      audio_cfg.speaker_campp_shadow_enable ? 1 : 0) != 0;
-            audio_cfg.speaker_campp_shadow_threshold   = (float)aud_cfg.get_double("speaker_campp_shadow_threshold",   audio_cfg.speaker_campp_shadow_threshold);
-            audio_cfg.speaker_campp_shadow_margin      = (float)aud_cfg.get_double("speaker_campp_shadow_margin",      audio_cfg.speaker_campp_shadow_margin);
-            audio_cfg.speaker_inherit_peek_veto_enable    =        aud_cfg.get_int   ("speaker_inherit_peek_veto_enable",    audio_cfg.speaker_inherit_peek_veto_enable ? 1 : 0) != 0;
-            audio_cfg.speaker_inherit_peek_veto_threshold = (float)aud_cfg.get_double("speaker_inherit_peek_veto_threshold", audio_cfg.speaker_inherit_peek_veto_threshold);
-            audio_cfg.speaker_inherit_peek_rescue_enable  =        aud_cfg.get_int   ("speaker_inherit_peek_rescue_enable",  audio_cfg.speaker_inherit_peek_rescue_enable ? 1 : 0) != 0;
+            audio_cfg.speaker_margin_abstain     = (float)aud_cfg.get_double("speaker_margin_abstain",     audio_cfg.speaker_margin_abstain);
+            audio_cfg.speaker_min_fbank_frames   =        aud_cfg.get_int   ("speaker_min_fbank_frames",   audio_cfg.speaker_min_fbank_frames);
             printf("[awaken] Auditus diarization knobs loaded from configs/auditus.conf:\n"
-                   "           match=%.3f reg=%.3f disc=[count=%d,boost=%.3f,reg_relax=%.3f] recency=[win=%.1fs,bonus=%.3f] margin=%.3f max_autoreg=%d min_fbank=%d short_inherit=%s short_identify=%s min_fbank_ident=%d si_thresh=%.3f si_margin=%.3f\n",
+                   "           match=%.3f reg=%.3f margin=%.3f min_fbank=%d\n",
                    audio_cfg.speaker_threshold, audio_cfg.speaker_register_threshold,
-                   audio_cfg.speaker_discovery_count, audio_cfg.speaker_discovery_boost,
-                   audio_cfg.speaker_discovery_reg_relax,
-                   audio_cfg.speaker_recency_window_sec, audio_cfg.speaker_recency_bonus,
-                   audio_cfg.speaker_margin_abstain, audio_cfg.speaker_max_auto_reg_count,
-                   audio_cfg.speaker_min_fbank_frames,
-                   audio_cfg.speaker_short_inherit_enable ? "ON" : "off",
-                   audio_cfg.speaker_short_identify_enable ? "ON" : "off",
-                   audio_cfg.speaker_min_fbank_frames_identify,
-                   audio_cfg.speaker_short_identify_threshold,
-                   audio_cfg.speaker_short_identify_margin);
-            printf("[awaken]   multi_gate=%s thr=%.3f min_fb=%d si_refresh_prev_full_thr=%.3f si_wl_tile_pad=%s campp_shadow=%s\n",
-                   audio_cfg.speaker_multi_gate_enable ? "ON" : "off",
-                   audio_cfg.speaker_multi_gate_threshold,
-                   audio_cfg.speaker_multi_gate_min_fbank,
-                   audio_cfg.speaker_si_refresh_prev_full_threshold,
-                   audio_cfg.speaker_si_wl_tile_pad_enable ? "ON" : "off",
-                   audio_cfg.speaker_campp_shadow_enable ? "ON" : "off");
-            printf("[awaken]   campp_shadow_gate: thr=%.3f margin=%.3f\n",
-                   audio_cfg.speaker_campp_shadow_threshold,
-                   audio_cfg.speaker_campp_shadow_margin);
-            printf("[awaken]   inherit_peek_veto: %s thr=%.3f rescue=%s\n",
-                   audio_cfg.speaker_inherit_peek_veto_enable ? "ON" : "off",
-                   audio_cfg.speaker_inherit_peek_veto_threshold,
-                   audio_cfg.speaker_inherit_peek_rescue_enable ? "ON" : "off");
+                   audio_cfg.speaker_margin_abstain, audio_cfg.speaker_min_fbank_frames);
         } else {
             printf("[awaken] configs/auditus.conf not found — using compiled defaults\n");
         }
@@ -409,17 +377,19 @@ int awaken(const std::string& webui_dir,
                 audio, *diarizen_native, diarizen_holdback.get(), server,
                 diarizen_period_sec);
             diarizen_worker->start();
+            const char* periodic_env = std::getenv("DEUSRIDET_DIARIZEN_PERIODIC");
             const bool periodic_on =
-                (std::getenv("DEUSRIDET_DIARIZEN_PERIODIC") != nullptr) &&
-                std::string(std::getenv("DEUSRIDET_DIARIZEN_PERIODIC")) == "1";
+                (periodic_env == nullptr) || std::string(periodic_env) != "0";
             std::string periodic_desc =
                 periodic_on
                     ? ("ON period=" + std::to_string((long)diarizen_period_sec) + "s")
-                    : std::string("OFF (trigger/finalize only)");
-            // Direction C — sliding-window live diarise (env-gated). 0/unset
-            // keeps full-session passes; finalize is always full regardless.
+                    : std::string("OFF (DEUSRIDET_DIARIZEN_PERIODIC=0; trigger/finalize only)");
+            // Direction C — sliding-window live diarise. Default 120s: covers
+            // the 75s holdback with margin and bounds per-pass wall so the
+            // shared GPU is not starved. Unset keeps this default; env=0 forces
+            // full-session passes. Finalize is always full regardless.
             const char* win_env = std::getenv("DEUSRIDET_DIARIZEN_WINDOW_SEC");
-            const double win_sec = win_env ? std::atof(win_env) : 0.0;
+            const double win_sec = win_env ? std::atof(win_env) : 120.0;
             std::string window_desc =
                 (win_sec > 0.0)
                     ? ("window=" + std::to_string((long)win_sec) + "s (finalize=full)")

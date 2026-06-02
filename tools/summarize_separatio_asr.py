@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Compare separated-source ASR transcripts against homogeneity GT windows."""
+"""Compare separated-source ASR transcripts against homogeneity GT windows.
+
+INTERNAL-CHECK-ONLY (shadow). The difflib ratio() used below is a fuzzy
+text-alignment aid to guess which GT utterance a separated source most
+resembles — it is NOT an accuracy metric. Per
+.github/instructions/benchmarks.md and workflow.instructions.md, fuzzy
+string matching / edit-distance MUST NOT be used to declare a phase
+positive/negative, flip a default, or claim a quality win. The numbers
+this script prints describe a separator-experiment slice only; the agent
+judges separation quality by listening + eyes-on reading, never by these
+ratios. (diarizen_live_score.py + compute_accuracy.py were deleted on
+2026-06-02 for exactly this kind of script-judged verdict — do not let
+this shadow tool drift into the same role.)
+"""
 from __future__ import annotations
 
 import argparse

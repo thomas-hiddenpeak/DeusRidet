@@ -33,8 +33,6 @@ export class AsrPanel {
                 </label>
                 <select id="asr-vad-select" class="vad-source-select">
                     <option value="silero" selected>Silero</option>
-                    <option value="fsmn">FSMN</option>
-                    <option value="ten">TEN</option>
                     <option value="any">Any (OR)</option>
                     <option value="direct">Direct (no VAD)</option>
                 </select>
@@ -57,83 +55,8 @@ export class AsrPanel {
                     <strong class="asr-stat__value" id="asr-last-lat">—</strong>
                 </div>
             </div>
-            <details class="asr-params-section" open>
-                <summary class="asr-params-toggle">Parameters</summary>
-                <div class="asr-params-grid">
-                    <label class="asr-param">
-                        <span class="asr-param__label">Post-silence (ms)</span>
-                        <input type="range" id="asr-p-post-silence" min="100" max="2000" step="50" value="300">
-                        <output id="asr-v-post-silence">300</output>
-                    </label>
-                    <label class="asr-param">
-                        <span class="asr-param__label">Max buffer (s)</span>
-                        <input type="range" id="asr-p-max-buf" min="5" max="30" step="1" value="30">
-                        <output id="asr-v-max-buf">30</output>
-                    </label>
-                    <label class="asr-param">
-                        <span class="asr-param__label">Min duration (s)</span>
-                        <input type="range" id="asr-p-min-dur" min="0.1" max="2.0" step="0.1" value="0.3">
-                        <output id="asr-v-min-dur">0.3</output>
-                    </label>
-                    <label class="asr-param">
-                        <span class="asr-param__label">Pre-roll (s)</span>
-                        <input type="range" id="asr-p-pre-roll" min="0" max="3.0" step="0.1" value="1.0">
-                        <output id="asr-v-pre-roll">1.0</output>
-                    </label>
-                    <label class="asr-param">
-                        <span class="asr-param__label">Max tokens</span>
-                        <input type="range" id="asr-p-max-tokens" min="32" max="2048" step="32" value="448">
-                        <output id="asr-v-max-tokens">448</output>
-                    </label>
-                    <label class="asr-param">
-                        <span class="asr-param__label">Rep penalty</span>
-                        <input type="range" id="asr-p-rep-penalty" min="1.0" max="2.0" step="0.05" value="1.0">
-                        <output id="asr-v-rep-penalty">1.00</output>
-                    </label>
-                    <label class="asr-param">
-                        <span class="asr-param__label">Min energy</span>
-                        <input type="range" id="asr-p-min-energy" min="0" max="0.05" step="0.001" value="0.008">
-                        <output id="asr-v-min-energy">0.008</output>
-                    </label>
-                    <label class="asr-param">
-                        <span class="asr-param__label">Partial interval (s)</span>
-                        <input type="range" id="asr-p-partial-sec" min="0" max="5" step="0.5" value="2.0">
-                        <output id="asr-v-partial-sec">2.0</output>
-                    </label>
-                    <label class="asr-param">
-                        <span class="asr-param__label">Min speech ratio</span>
-                        <input type="range" id="asr-p-speech-ratio" min="0" max="0.5" step="0.01" value="0.15">
-                        <output id="asr-v-speech-ratio">0.15</output>
-                    </label>
-                </div>
-            </details>
-            <div class="asr-section">
-              <button class="btn btn--vad btn--active asr-section__action" id="asr-adaptive-toggle"
-                      aria-pressed="true">ON</button>
-              <details>
-                <summary class="asr-section__title">Adaptive Silence (SAAS)</summary>
-                <div class="asr-params" id="asr-adaptive-params">
-                    <div class="asr-adaptive-status" id="asr-adaptive-status">
-                        <span class="stat">Effective: <strong id="asr-effective-silence">300</strong> ms</span>
-                        <span class="stat">Current: <strong id="asr-current-silence">0</strong> ms</span>
-                    </div>
-                    <label class="asr-param">
-                        <span class="asr-param__label">Short seg (&lt;0.8s) ms</span>
-                        <input type="range" id="asr-p-adaptive-short" min="200" max="1500" step="50" value="700">
-                        <output id="asr-v-adaptive-short">700</output>
-                    </label>
-                    <label class="asr-param">
-                        <span class="asr-param__label">Long seg (5-15s) ms</span>
-                        <input type="range" id="asr-p-adaptive-long" min="50" max="500" step="10" value="200">
-                        <output id="asr-v-adaptive-long">200</output>
-                    </label>
-                    <label class="asr-param">
-                        <span class="asr-param__label">Very long (&gt;15s) ms</span>
-                        <input type="range" id="asr-p-adaptive-vlong" min="50" max="500" step="10" value="150">
-                        <output id="asr-v-adaptive-vlong">150</output>
-                    </label>
-                </div>
-            </details>
+            <div class="asr-actions">
+                <button id="asr-open-tuning" class="btn btn--vad" type="button">Advanced Tuning</button>
             </div>
             <canvas id="asr-latency-chart" class="asr-latency-chart" width="400" height="80"
                     aria-label="ASR latency history"></canvas>
@@ -141,6 +64,93 @@ export class AsrPanel {
                 <span class="asr-partial__label">Partial:</span>
                 <span class="asr-partial__text" id="asr-partial-text">—</span>
             </div>
+            <dialog id="asr-tuning-modal" class="app-modal app-modal--tuning" aria-label="ASR Advanced Tuning">
+                <div class="app-modal__card">
+                    <div class="app-modal__head">
+                        <h3 class="app-modal__title">ASR Advanced Tuning</h3>
+                        <button id="asr-tuning-close" class="btn btn--vad" type="button">Close</button>
+                    </div>
+                    <p class="app-modal__desc">这里放低频参数，避免占用主视野；运行中只保留关键状态和结果。</p>
+                    <details class="asr-params-section" open>
+                        <summary class="asr-params-toggle">Recognition Parameters</summary>
+                        <div class="asr-params-grid">
+                            <label class="asr-param">
+                                <span class="asr-param__label">Post-silence (ms)</span>
+                                <input type="range" id="asr-p-post-silence" min="100" max="2000" step="50" value="300">
+                                <output id="asr-v-post-silence">300</output>
+                            </label>
+                            <label class="asr-param">
+                                <span class="asr-param__label">Max buffer (s)</span>
+                                <input type="range" id="asr-p-max-buf" min="5" max="30" step="1" value="30">
+                                <output id="asr-v-max-buf">30</output>
+                            </label>
+                            <label class="asr-param">
+                                <span class="asr-param__label">Min duration (s)</span>
+                                <input type="range" id="asr-p-min-dur" min="0.1" max="2.0" step="0.1" value="0.3">
+                                <output id="asr-v-min-dur">0.3</output>
+                            </label>
+                            <label class="asr-param">
+                                <span class="asr-param__label">Pre-roll (s)</span>
+                                <input type="range" id="asr-p-pre-roll" min="0" max="3.0" step="0.1" value="1.0">
+                                <output id="asr-v-pre-roll">1.0</output>
+                            </label>
+                            <label class="asr-param">
+                                <span class="asr-param__label">Max tokens</span>
+                                <input type="range" id="asr-p-max-tokens" min="32" max="2048" step="32" value="448">
+                                <output id="asr-v-max-tokens">448</output>
+                            </label>
+                            <label class="asr-param">
+                                <span class="asr-param__label">Rep penalty</span>
+                                <input type="range" id="asr-p-rep-penalty" min="1.0" max="2.0" step="0.05" value="1.0">
+                                <output id="asr-v-rep-penalty">1.00</output>
+                            </label>
+                            <label class="asr-param">
+                                <span class="asr-param__label">Min energy</span>
+                                <input type="range" id="asr-p-min-energy" min="0" max="0.05" step="0.001" value="0.008">
+                                <output id="asr-v-min-energy">0.008</output>
+                            </label>
+                            <label class="asr-param">
+                                <span class="asr-param__label">Partial interval (s)</span>
+                                <input type="range" id="asr-p-partial-sec" min="0" max="5" step="0.5" value="2.0">
+                                <output id="asr-v-partial-sec">2.0</output>
+                            </label>
+                            <label class="asr-param">
+                                <span class="asr-param__label">Min speech ratio</span>
+                                <input type="range" id="asr-p-speech-ratio" min="0" max="0.5" step="0.01" value="0.15">
+                                <output id="asr-v-speech-ratio">0.15</output>
+                            </label>
+                        </div>
+                    </details>
+                    <div class="asr-section">
+                      <button class="btn btn--vad btn--active asr-section__action" id="asr-adaptive-toggle"
+                              aria-pressed="true">ON</button>
+                      <details open>
+                        <summary class="asr-section__title">Adaptive Silence (SAAS)</summary>
+                        <div class="asr-params" id="asr-adaptive-params">
+                            <div class="asr-adaptive-status" id="asr-adaptive-status">
+                                <span class="stat">Effective: <strong id="asr-effective-silence">300</strong> ms</span>
+                                <span class="stat">Current: <strong id="asr-current-silence">0</strong> ms</span>
+                            </div>
+                            <label class="asr-param">
+                                <span class="asr-param__label">Short seg (&lt;0.8s) ms</span>
+                                <input type="range" id="asr-p-adaptive-short" min="200" max="1500" step="50" value="700">
+                                <output id="asr-v-adaptive-short">700</output>
+                            </label>
+                            <label class="asr-param">
+                                <span class="asr-param__label">Long seg (5-15s) ms</span>
+                                <input type="range" id="asr-p-adaptive-long" min="50" max="500" step="10" value="200">
+                                <output id="asr-v-adaptive-long">200</output>
+                            </label>
+                            <label class="asr-param">
+                                <span class="asr-param__label">Very long (&gt;15s) ms</span>
+                                <input type="range" id="asr-p-adaptive-vlong" min="50" max="500" step="10" value="150">
+                                <output id="asr-v-adaptive-vlong">150</output>
+                            </label>
+                        </div>
+                    </details>
+                    </div>
+                </div>
+            </dialog>
         `;
         this.toggleBtn = this.el.querySelector('#asr-toggle');
         this.statusEl = this.el.querySelector('#asr-status');
@@ -153,6 +163,9 @@ export class AsrPanel {
         this.bufBar = this.el.querySelector('#asr-buf-bar');
         this.bufLabel = this.el.querySelector('#asr-buf-label');
         this.asrVadSelect = this.el.querySelector('#asr-vad-select');
+        this.openTuningBtn = this.el.querySelector('#asr-open-tuning');
+        this.tuningDialog = this.el.querySelector('#asr-tuning-modal');
+        this.tuningCloseBtn = this.el.querySelector('#asr-tuning-close');
         this.partialTextEl = this.el.querySelector('#asr-partial-text');
         this._partialClearTimer = null;
 
@@ -202,6 +215,13 @@ export class AsrPanel {
                 this.ws.sendText(`asr_vad_source:${this.asrVadSelect.value}`);
             });
         }
+
+        this.openTuningBtn?.addEventListener('click', () => {
+            this.tuningDialog?.showModal();
+        });
+        this.tuningCloseBtn?.addEventListener('click', () => {
+            this.tuningDialog?.close();
+        });
 
 
         // Bind parameter sliders — send on change (mouseup / touchend).
@@ -337,7 +357,7 @@ export class AsrPanel {
         // Sync ASR VAD source selector.
         if (obj.asr_vad_source !== undefined && this.asrVadSelect &&
             document.activeElement !== this.asrVadSelect) {
-            const map = {0:'silero', 1:'fsmn', 2:'ten', 3:'any', 4:'direct'};
+            const map = {0:'silero', 2:'any', 3:'direct'};
             this.asrVadSelect.value = map[obj.asr_vad_source] || 'silero';
         }
     }

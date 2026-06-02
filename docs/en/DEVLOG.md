@@ -6,6 +6,7 @@ To add a new entry, create `devlog/YYYY-MM-DD.md` and prepend it here.
 
 ## DEVLOG
 
+- [2026-06-02](devlog/2026-06-02.md) — Orator online redesign: diagnosed why the holdback corrected 0 times (periodic worker default-OFF), proved the B1+sliding-window fix live (17 passes, 124 rewrites, clean 4-cluster bijection), flipped ASR/periodic defaults (`cee2b02`), pruned the 0-consumption speaker-id config surface + R1-split `audio_pipeline.h` 795→500 (`9cc6741`), and fixed the vires PUBLIC link debt so all 43 targets build (`fe84f20`)
 - [2026-05-30](devlog/2026-05-30.md) — DiariZen-v2 native CUDA pipeline live-verified: wired into `awaken` behind `DEUSRIDET_DIARIZEN_NATIVE` (`d1b9d82`); accuracy 93.5% → 93.7% (+0.2 pp) on `tests/test.mp3`. Default NOT flipped — native single-chunk finalize RTF 0.54 vs Python-IPC 0.21; batching is the gating perf task before the flip
 - [2026-04-30](devlog/2026-04-30.md) — Step 18n-18aa: Auditus separated-source identity fusion selector, runtime fusion shadow ASR/speaker evidence, arbitrium + ledger/canary telemetry, deterministic/strong-pending/newborn enrollment, stable canary precision gate, and Mel rolling compaction; r2 replay restored 4/4 births, 0 stable wrong, 0 authority violations
 - [2026-04-29](devlog/2026-04-29.md) — Step 18l-18m: upstream ClearerVoice + 3D-Speaker + FunASR smoke and top30 Auditus upstream-vs-C++ probe; production py313 CUDA torch preserved

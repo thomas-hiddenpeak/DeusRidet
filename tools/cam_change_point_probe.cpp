@@ -5,7 +5,10 @@
  *                     CAM++ window across the interval and emits the
  *                     adjacent-window cosine similarity sequence.
  *                     Diagnostic only: does not modify online behavior.
- * @serves tools/score_change_points.py
+ * @serves offline change-point inspection (former
+ *          tools/score_change_points.py deleted 2026-06-02 as a
+ *          forbidden scoring script; this probe only emits the cosine
+ *          similarity sequence for eyes-on reading, no F1/score).
  *
  * I/O:
  *   input : --pcm        /tmp/test_mp3_16k_mono.f32   (f32 mono 16k)
