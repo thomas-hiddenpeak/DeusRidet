@@ -4,7 +4,9 @@
  *                     evaluation (Step 2b of the SAAS ablation plan).
  *                     For every refined GT segment, produces one 192-D
  *                     embedding per window-strategy.
- * @serves tools/cam_ablation.py
+ * @serves offline embedding inspection (former tools/cam_ablation.py
+ *          deleted 2026-06-02 as a forbidden scoring script; this
+ *          extractor only dumps embeddings, no quality score).
  *
  * Window strategies (5):
  *   full        — whole segment

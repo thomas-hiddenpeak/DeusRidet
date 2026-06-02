@@ -1,6 +1,6 @@
 // speaker-debug-panel.js — Speaker identification debug visualizations.
 // Displays: confidence gauge, speaker timeline, change detection plot,
-// latency breakdown, and per-speaker diversity metrics.
+// and per-speaker diversity metrics.
 
 import { spkColor } from '../utils/speaker-colors.js';
 
@@ -57,50 +57,37 @@ export class SpeakerDebugPanel {
         if (!this.el) return;
 
         // Update threshold from server.
-        if (stats.wlecapa_threshold !== undefined)
-            this._threshold = stats.wlecapa_threshold;
+        if (stats.speaker_threshold !== undefined)
+            this._threshold = stats.speaker_threshold;
 
-        // When WL-ECAPA is active this tick, use it to feed gauge + timeline.
-        if (stats.wlecapa_active) {
-            this._lastSim = stats.wlecapa_sim || 0;
-            this._lastId = stats.wlecapa_id ?? -1;
-            const name = stats.wlecapa_name || `#${stats.wlecapa_id}`;
-            const isEarly = !!stats.wlecapa_is_early;
+        // Use active CAM++ tick to feed gauge + timeline.
+        if (stats.speaker_active) {
+            this._lastSim = stats.speaker_sim || 0;
+            this._lastId = stats.speaker_id ?? -1;
+            const name = stats.speaker_name || `#${stats.speaker_id}`;
 
             this._timeline.push({
                 ts: Date.now(),
-                id: stats.wlecapa_id,
+                id: stats.speaker_id,
                 name: name,
-                sim: stats.wlecapa_sim,
-                early: isEarly
+                sim: stats.speaker_sim,
             });
             if (this._timeline.length > this._maxTimeline)
                 this._timeline.shift();
 
-            // Retroactive backfill: when a full-segment result resolves,
-            // recolor recent gray (id=-1) entries with the actual speaker.
-            if (!isEarly && stats.wlecapa_id >= 0) {
-                this._backfillTimeline(stats.wlecapa_id, name);
+            // Retroactive backfill: recolor recent gray (id=-1) entries
+            // with the resolved speaker for this active identification tick.
+            if (stats.speaker_id >= 0) {
+                this._backfillTimeline(stats.speaker_id, name);
             }
 
             this._renderGauge();
             this._renderTimeline();
-
-            // Change detection from pipeline_stats (end-of-segment only).
-            if (stats.change_similarity !== undefined) {
-                this._simHistory.push(stats.change_similarity);
-                if (this._simHistory.length > this._maxSimHistory)
-                    this._simHistory.shift();
-                this._renderChangePlot();
-            }
         }
 
         // Update early trigger value for display.
         if (stats.early_trigger_sec !== undefined)
             this._earlyTriggerSec = stats.early_trigger_sec;
-
-        // Latency breakdown (populated when server sends these fields).
-        this._renderLatency(stats);
 
         // Diversity metrics from speaker_lists.
         this._renderDiversity(stats);
@@ -119,7 +106,6 @@ export class SpeakerDebugPanel {
             this._renderChangePlot();
         }
 
-        if (data.latency) this._renderLatency(data.latency);
     }
 
     // --- Internal: Build DOM ---
@@ -138,15 +124,6 @@ export class SpeakerDebugPanel {
                     </span>
                 </div>
             </div>
-            <div class="dbg-card dbg-latency-card">
-                <h4 class="dbg-card__title">Latency</h4>
-                <div class="dbg-latency-grid" id="dbg-latency">
-                    <span>CNN</span><span id="lat-cnn">—</span>
-                    <span>Encoder</span><span id="lat-enc">—</span>
-                    <span>ECAPA</span><span id="lat-ecapa">—</span>
-                    <span>Total</span><span id="lat-total" class="dbg-lat-total">—</span>
-                </div>
-            </div>
         </div>
         <div class="dbg-card">
             <h4 class="dbg-card__title">Speaker Timeline</h4>
@@ -157,10 +134,6 @@ export class SpeakerDebugPanel {
             <h4 class="dbg-card__title">Change Detection</h4>
             <canvas id="dbg-change-canvas" class="dbg-change-canvas"
                     width="600" height="48"></canvas>
-        </div>
-        <div class="dbg-card">
-            <h4 class="dbg-card__title">Diversity</h4>
-            <div id="dbg-diversity" class="dbg-diversity"></div>
         </div>
         <div class="dbg-card">
             <h4 class="dbg-card__title">Diversity</h4>
@@ -338,20 +311,6 @@ export class SpeakerDebugPanel {
         }
     }
 
-    // --- Latency ---
-
-    _renderLatency(data) {
-        const set = (id, val) => {
-            const el = document.getElementById(id);
-            if (el && val !== undefined && val !== null)
-                el.textContent = typeof val === 'number' ? val.toFixed(1) + ' ms' : val;
-        };
-        set('lat-cnn', data.lat_cnn_ms);
-        set('lat-enc', data.lat_encoder_ms);
-        set('lat-ecapa', data.lat_ecapa_ms);
-        set('lat-total', data.lat_total_ms);
-    }
-
     // --- Diversity ---
 
     _renderDiversity(stats) {
@@ -359,27 +318,25 @@ export class SpeakerDebugPanel {
 
         let html = '';
         for (const group of stats.speaker_lists) {
-            if (group.model !== 'WL-ECAPA') continue;
+            if (group.model !== 'CAM++') continue;
             for (const spk of group.speakers) {
                 const ex = spk.exemplars || 1;
-                const div = spk.min_diversity;
-                const divStr = (div !== undefined && div !== null)
-                    ? div.toFixed(3) : '—';
-                const divPct = div !== undefined ? Math.min(div / 0.3, 1) * 100 : 0;
+                const cnt = spk.count || 0;
+                const barPct = Math.min(ex / 15, 1) * 100;
                 const label = spk.name || `#${spk.id}`;
                 const dotColor = spkColor(spk.id);
                 html += `<div class="dbg-div-row">
                     <span class="dbg-div-dot" style="background:${dotColor}"></span>
                     <span class="dbg-div-label">${this._esc(label)}</span>
                     <span class="dbg-div-ex">${ex}ex</span>
-                    <span class="dbg-div-val">div=${divStr}</span>
+                    <span class="dbg-div-val">×${cnt}</span>
                     <div class="dbg-div-bar-wrap">
-                        <div class="dbg-div-bar" style="width:${divPct}%"></div>
+                        <div class="dbg-div-bar" style="width:${barPct}%"></div>
                     </div>
                 </div>`;
             }
         }
-        if (!html) html = '<span class="dbg-div-empty">No WL-ECAPA speakers</span>';
+        if (!html) html = '<span class="dbg-div-empty">No CAM++ speakers</span>';
         this._diversityEl.innerHTML = html;
     }
 

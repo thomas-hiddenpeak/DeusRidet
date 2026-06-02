@@ -28,9 +28,9 @@ export class DiarizenPanel {
                 <span class="stat">Changed pending: <strong id="diarizen-changed">—</strong></span>
             </div>
             <h3 class="panel__subtitle">Per-label duration (s)</h3>
-            <pre id="diarizen-label-durs" class="log-output" style="max-height:120px"></pre>
+            <pre id="diarizen-label-durs" class="log-output diarizen-log"></pre>
             <h3 class="panel__subtitle">Recent passes</h3>
-            <pre id="diarizen-history" class="log-output" style="max-height:120px"></pre>
+            <pre id="diarizen-history" class="log-output diarizen-log"></pre>
         `;
         this._passEl     = document.getElementById('diarizen-pass');
         this._statusEl   = document.getElementById('diarizen-status');

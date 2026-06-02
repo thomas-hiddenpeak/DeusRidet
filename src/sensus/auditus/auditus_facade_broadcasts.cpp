@@ -55,6 +55,31 @@ void install_transcript_callback(AudioPipeline& audio,
                                  ConscientiStream& consciousness,
                                  bool llm_loaded,
                                  auditus::TranscriptHoldback* holdback) {
+    // When the holdback is active, the speaker_id we broadcast at ASR time
+    // is only the provisional ONLINE tracker id. The holdback rewrites it
+    // from the voiceprint-anchored DiariZen identity registry up to
+    // holdback_sec later, just before the transcript is committed to the
+    // LLM. Emit an `asr_transcript_amend` envelope at that commit point so
+    // the WebUI / capture layer can observe the FINAL speaker the LLM
+    // actually consumes — closing the speaker↔content boundary that the
+    // provisional broadcast leaves open.
+    if (holdback) {
+        holdback->set_on_commit(
+            [&server](const InputItem& item,
+                      double stream_start_sec,
+                      double stream_end_sec) {
+                std::string txt_escaped = json_escape(item.text);
+                std::string spk_escaped = json_escape(item.speaker_name);
+                char json[2048];
+                snprintf(json, sizeof(json),
+                    R"({"type":"asr_transcript_amend","text":"%s",)"
+                    R"("stream_start_sec":%.2f,"stream_end_sec":%.2f,)"
+                    R"("speaker_id":%d,"speaker_name":"%s"})",
+                    txt_escaped.c_str(), stream_start_sec, stream_end_sec,
+                    item.speaker_id, spk_escaped.c_str());
+                server.broadcast_text(json);
+            });
+    }
     audio.set_on_transcript([&server, &timeline, &consciousness, llm_loaded, holdback]
                             (const asr::ASRResult& result, float audio_sec,
                              int speaker_id, const std::string& speaker_name,

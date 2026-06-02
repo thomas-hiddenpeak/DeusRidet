@@ -85,6 +85,12 @@ size_t TranscriptHoldback::pending_count() const {
     return q_.size();
 }
 
+void TranscriptHoldback::set_on_commit(
+        std::function<void(const InputItem&, double, double)> fn) {
+    std::lock_guard<std::mutex> lk(mu_);
+    on_commit_ = std::move(fn);
+}
+
 void TranscriptHoldback::drainer_loop_() {
     using namespace std::chrono_literals;
     std::unique_lock<std::mutex> lk(mu_);
@@ -99,6 +105,8 @@ void TranscriptHoldback::drainer_loop_() {
             q_.pop_front();
             // Release lock around the (potentially heavy) inject call.
             lk.unlock();
+            if (on_commit_)
+                on_commit_(pt.item, pt.stream_start_sec, pt.stream_end_sec);
             cs_.inject_input(std::move(pt.item));
             lk.lock();
         }
@@ -111,6 +119,8 @@ void TranscriptHoldback::drain_now() {
         PendingTranscript pt = std::move(q_.front());
         q_.pop_front();
         lk.unlock();
+        if (on_commit_)
+            on_commit_(pt.item, pt.stream_start_sec, pt.stream_end_sec);
         cs_.inject_input(std::move(pt.item));
         lk.lock();
     }

@@ -1,0 +1,544 @@
+/* panels.css — redesigned internal composition for all live panels. */
+
+.audio-panel,
+.speaker-panel,
+.consciousness-panel,
+.config-panel,
+.asr-panel,
+.speaker-debug-panel,
+.timeline-panel,
+.asr-transcript-panel,
+.asr-log-panel,
+.diarizen-panel,
+.text-output-panel,
+.system-metrics-panel,
+.vires-panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-sm);
+    min-width: 0;
+}
+
+.panel--hero-dialogue {
+    min-height: 620px;
+    background: linear-gradient(180deg, rgba(252, 255, 250, 0.96), rgba(255, 249, 238, 0.96));
+    border-color: rgba(15, 111, 107, 0.64);
+    box-shadow: 0 20px 50px rgba(15, 111, 107, 0.08);
+}
+
+.audio-controls,
+.spk-controls,
+.asr-controls,
+.asr-actions,
+.asr-log-controls,
+.diarizen-controls,
+.eval-run-status-row,
+.eval-shell__actions,
+.timeline-panel .tl-controls,
+.timeline-panel .tl-legend,
+.vires-status,
+.cs-status,
+.cs-metrics,
+.asr-tx-row,
+.asr-log-row,
+.to-msg,
+.diarizen-summary-row,
+.sm-row,
+.vad-source-control,
+.vad-threshold-control,
+.spk-thresh-row,
+.asr-param,
+.cfg-slider-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-sm);
+}
+
+.spk-settings,
+.cfg-pipe-body,
+.asr-params-section,
+.asr-section details,
+.cfg-pipeline details,
+.dbg-row,
+.dbg-diversity,
+.to-messages {
+    display: grid;
+    gap: var(--sp-sm);
+}
+
+.speaker-roster,
+.asr-log-list,
+.asr-tx-list,
+.to-messages,
+.tl-scroll,
+.dbg-diversity,
+.diarizen-log,
+.sm-row,
+.cfg-pipeline,
+.asr-section,
+.asr-params-section,
+.dbg-card,
+.asr-stat,
+.asr-param,
+.diarizen-stat,
+.diarizen-history-item,
+.eval-kpi {
+    border: 1px solid rgba(180, 155, 119, 0.72);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.74);
+}
+
+.speaker-roster,
+.asr-log-list,
+.asr-tx-list,
+.to-messages,
+.diarizen-log,
+.tl-scroll,
+.cfg-pipeline,
+.asr-section,
+.asr-params-section,
+.dbg-card {
+    padding: var(--sp-sm);
+}
+
+.speaker-roster {
+    display: grid;
+    gap: 8px;
+}
+
+.to-messages {
+    min-height: 500px;
+    max-height: calc(100vh - 360px);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(247, 255, 251, 0.88));
+}
+
+.text-output-panel .to-input-wrap {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+}
+
+.text-output-panel .to-input {
+    min-height: 48px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.94);
+}
+
+.text-output-panel #to-send {
+    min-width: 110px;
+    min-height: 48px;
+    border-radius: 14px;
+}
+
+.to-msg {
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(180, 155, 119, 0.28);
+    background: rgba(255, 255, 255, 0.78);
+}
+
+.to-msg--entity {
+    background: rgba(240, 255, 249, 0.9);
+    border-color: rgba(15, 111, 107, 0.2);
+}
+
+.to-msg--asr {
+    background: rgba(255, 251, 242, 0.88);
+}
+
+.audio-panel,
+.speaker-panel,
+.asr-panel {
+    box-shadow: 0 8px 22px rgba(24, 30, 34, 0.05);
+}
+
+.speaker-roster .speaker-card {
+    border: 1px solid rgba(180, 155, 119, 0.72);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.88);
+    padding: 10px 12px;
+}
+
+.speaker-roster .speaker-card__meta,
+.speaker-roster .speaker-card__name,
+.speaker-roster .speaker-card__stats,
+.cs-entity,
+.cs-state-badge,
+.cs-llm-status,
+.cs-gauge-val,
+.sm-val,
+.sm-label strong,
+.asr-stat__value,
+.asr-log-ts,
+.asr-log-badge,
+.asr-tx-time,
+.to-time,
+.to-state,
+.to-meta,
+.diarizen-status,
+.vires-table {
+    font-family: var(--font-mono);
+}
+
+.speaker-roster .speaker-card__name {
+    font-weight: 700;
+}
+
+.speaker-roster .speaker-card__stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    color: var(--clr-text-dim);
+    font-size: 12px;
+}
+
+.vad-threshold-label,
+.spk-thresh-label,
+.cfg-label,
+.asr-param__label,
+.cs-label,
+.sm-label,
+.asr-tx-speaker,
+.asr-log-count,
+.diarizen-stat,
+.tl-legend,
+.dbg-card__title {
+    color: var(--clr-text-dim);
+    font-size: 12px;
+}
+
+.dbg-card__title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    margin-bottom: var(--sp-sm);
+}
+
+.vad-source-select,
+.cfg-textarea,
+.to-input {
+    width: 100%;
+}
+
+.cfg-textarea {
+    min-height: 92px;
+    resize: vertical;
+}
+
+.cfg-pipeline > summary,
+.asr-params-section > summary,
+.asr-section > summary,
+.cfg-pipeline summary,
+.asr-section summary {
+    cursor: pointer;
+    list-style: none;
+    color: var(--clr-text);
+    font-weight: 600;
+}
+
+.cfg-pipeline > summary::-webkit-details-marker,
+.asr-params-section > summary::-webkit-details-marker,
+.asr-section > summary::-webkit-details-marker {
+    display: none;
+}
+
+.cfg-slider-row,
+.asr-param,
+.spk-thresh-row,
+.vad-threshold-control,
+.sm-row {
+    justify-content: space-between;
+}
+
+.cfg-slider-row input[type="range"],
+.asr-param input[type="range"],
+.vad-threshold-slider {
+    flex: 1;
+    min-width: 0;
+}
+
+.cs-status {
+    justify-content: space-between;
+}
+
+.cs-state-badge,
+.asr-log-badge,
+.to-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(180, 155, 119, 0.82);
+    background: rgba(255, 253, 247, 0.92);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+}
+
+.cs-state-badge.cs-state--response,
+.cs-state-badge.cs-state--llm,
+.asr-log-row--trigger .asr-log-badge--trigger,
+.asr-log-row--result .asr-log-badge--result,
+.asr-log-row--partial .asr-log-badge--partial,
+.asr-log-row--transcript .asr-log-badge--transcript {
+    color: var(--clr-accent);
+}
+
+.cs-state-badge.cs-state--daydream,
+.cs-state-badge.cs-state--dreaming,
+.asr-log-row--skipped .asr-log-badge--skipped {
+    color: var(--clr-warn);
+}
+
+.cs-gauge-wrap,
+.sm-bar-wrap,
+.dbg-div-bar-wrap {
+    position: relative;
+    height: 10px;
+    overflow: hidden;
+    border-radius: 999px;
+    border: 1px solid rgba(180, 155, 119, 0.8);
+    background: rgba(250, 243, 231, 0.9);
+}
+
+.cs-gauge-wrap {
+    height: 18px;
+}
+
+.cs-gauge-bar {
+    position: absolute;
+    inset: 0;
+    width: 0;
+    border-radius: inherit;
+    background: linear-gradient(90deg, rgba(15, 111, 107, 0.95), rgba(43, 143, 78, 0.95));
+}
+
+.cs-gauge-val {
+    position: relative;
+    z-index: 1;
+    line-height: 18px;
+    padding: 0 10px;
+    color: #fff;
+}
+
+.sm-row {
+    padding: 10px 12px;
+}
+
+.sm-bar-wrap {
+    flex: 1;
+    min-width: 0;
+}
+
+.sm-bar {
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    transition: width 160ms ease;
+}
+
+.asr-stats-grid,
+.asr-params-grid {
+    display: grid;
+    gap: var(--sp-sm);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.audio-panel,
+.speaker-panel,
+.asr-panel,
+.analysis-switch,
+.speaker-debug-panel,
+.asr-log-panel,
+.asr-transcript-panel,
+.diarizen-panel,
+.vires-panel,
+.timeline-panel,
+.log-panel {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 248, 236, 0.92));
+}
+
+@media (min-width: 1200px) {
+    .asr-stats-grid,
+    .asr-params-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+}
+
+.asr-stat,
+.asr-param,
+.eval-kpi,
+.diarizen-stat,
+.diarizen-history-item {
+    padding: 10px 12px;
+}
+
+.asr-log-list,
+.asr-tx-list,
+.to-messages,
+.diarizen-log,
+.log-output {
+    max-height: 360px;
+    overflow: auto;
+}
+
+.asr-log-row,
+.asr-tx-row,
+.to-msg {
+    display: grid;
+    gap: 8px;
+    align-items: start;
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(180, 155, 119, 0.45);
+}
+
+.asr-log-row:last-child,
+.asr-tx-row:last-child,
+.to-msg:last-child {
+    border-bottom: 0;
+}
+
+.asr-log-detail,
+.asr-log-text,
+.asr-log-raw,
+.to-msg-text,
+.asr-tx-text,
+.diarizen-log {
+    color: var(--clr-text);
+    line-height: 1.55;
+    word-break: break-word;
+}
+
+.asr-tx-row {
+    grid-template-columns: 120px 1fr;
+}
+
+.tl-scroll {
+    min-height: 240px;
+    max-height: 380px;
+}
+
+.tl-canvas,
+.dbg-gauge-canvas,
+.dbg-timeline-canvas,
+.dbg-change-canvas {
+    width: 100%;
+    min-height: 88px;
+    border-radius: 12px;
+    border: 1px solid rgba(180, 155, 119, 0.72);
+    background: rgba(255, 255, 255, 0.78);
+}
+
+.tl-canvas {
+    min-height: 240px;
+}
+
+.tl-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.tl-legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+
+.dbg-div-row {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) auto auto;
+    gap: 8px;
+    align-items: center;
+}
+
+.dbg-div-bar-wrap {
+    grid-column: 2 / -1;
+    height: 8px;
+}
+
+.dbg-div-bar {
+    height: 100%;
+    border-radius: inherit;
+    background: var(--clr-accent);
+}
+
+.to-messages {
+    display: grid;
+    gap: 10px;
+}
+
+.to-msg--user .to-msg-text {
+    color: var(--clr-accent-strong);
+    font-weight: 600;
+}
+
+.to-msg--entity .to-msg-text {
+    color: var(--clr-success);
+}
+
+.to-msg--asr .to-msg-text {
+    color: var(--clr-accent);
+}
+
+.to-msg--streaming .to-msg-text::after {
+    content: '▍';
+    margin-left: 4px;
+    color: var(--clr-accent);
+    animation: to-blink 1s steps(1) infinite;
+}
+
+@keyframes to-blink {
+    50% { opacity: 0; }
+}
+
+.vires-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.vires-table th,
+.vires-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(180, 155, 119, 0.55);
+    text-align: left;
+}
+
+.vires-table th {
+    color: var(--clr-text-dim);
+    font-weight: 600;
+}
+
+.vires-table tr[data-class="foreground"] td {
+    color: var(--clr-accent);
+}
+
+.vires-table tr[data-class="background"] td {
+    color: var(--clr-text-dim);
+}
+
+.asr-panel .asr-controls,
+.asr-panel .asr-actions,
+.asr-panel .asr-stats-grid,
+.asr-panel .asr-params-section,
+.asr-panel .asr-section,
+.config-panel .cfg-pipeline,
+.consciousness-panel .cs-status,
+.consciousness-panel .cs-metrics,
+.consciousness-panel .cs-wakefulness,
+.speaker-debug-panel .dbg-row,
+.speaker-debug-panel .dbg-card,
+.speaker-debug-panel .dbg-diversity,
+.text-output-panel .to-input-wrap,
+.text-output-panel .to-messages,
+.diarizen-panel .diarizen-controls,
+.diarizen-panel .diarizen-stats,
+.diarizen-panel .diarizen-log,
+.system-metrics-panel .sm-row,
+.vires-panel .vires-status,
+.vires-panel .vires-table {
+    min-width: 0;
+}

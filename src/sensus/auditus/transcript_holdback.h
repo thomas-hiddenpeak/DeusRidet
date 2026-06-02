@@ -106,6 +106,15 @@ public:
     /// holdback window. Used at finalize.
     void drain_now();
 
+    /// Set a callback invoked with the FINAL, post-holdback speaker_id/name
+    /// of each transcript, immediately before it is committed to Conscientia.
+    /// This lets the broadcast/capture layer observe the voiceprint-anchored
+    /// id the LLM actually consumes — not the provisional online tracker id
+    /// that was sent at ASR time. Arguments: (item, stream_start_sec,
+    /// stream_end_sec). Set once before start().
+    void set_on_commit(
+        std::function<void(const InputItem&, double, double)> fn);
+
     /// Diagnostic.
     size_t pending_count() const;
 
@@ -122,6 +131,10 @@ private:
     // Optional gid → human display name (enrollment hook for the persona
     // layer). Empty by default ⇒ names render as "Speaker <gid>".
     std::unordered_map<int, std::string> id_to_name_;
+
+    // Invoked with the final speaker_id/name just before each item commits
+    // to Conscientia. Set once before start(); read lock-free thereafter.
+    std::function<void(const InputItem&, double, double)> on_commit_;
 
     std::thread               drainer_;
     bool                      running_ = false;
