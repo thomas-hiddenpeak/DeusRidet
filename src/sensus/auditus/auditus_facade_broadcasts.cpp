@@ -15,6 +15,7 @@
 #include "communis/timeline_logger.h"
 #include "conscientia/stream.h"
 #include "conscientia/frame.h"
+#include "orator/diarizen_soft_link_ledger.h"
 #include "sensus/auditus/transcript_holdback.h"
 
 #include <cstdio>
@@ -27,24 +28,38 @@ namespace auditus {
 
 namespace {
 
-// Serialize a SpeakerDb's roster as a JSON array string. Templated so it accepts
-// the various SpeakerDb-shaped types (CAM++, Legacy, WL-ECAPA).
 template <class Db>
-std::string speaker_list_json(Db& db) {
+std::string speaker_name_by_id(Db& db, int id) {
+    if (id < 0) return {};
     auto spks = db.all_speakers();
-    if (spks.empty()) return "[]";
-    std::string s = "[";
-    for (size_t i = 0; i < spks.size(); ++i) {
-        char buf[320];
-        snprintf(buf, sizeof(buf),
-            R"({"id":%d,"name":"%s","count":%d,"exemplars":%d,"min_diversity":%.4f})",
-            spks[i].id, spks[i].name.c_str(), spks[i].match_count,
-            spks[i].exemplar_count, spks[i].min_diversity);
-        if (i > 0) s += ',';
-        s += buf;
-    }
-    s += ']';
-    return s;
+    for (const auto& spk : spks)
+        if (spk.id == id) return spk.name;
+    return {};
+}
+
+orator::DiarizenSoftLinkLedger& soft_link_ledger() {
+    static orator::DiarizenSoftLinkLedger ledger;
+    return ledger;
+}
+
+void broadcast_soft_link(WsServer& server,
+                         const char* source,
+                         uint64_t segment_id,
+                         const orator::DiarizenSoftLinkLedger::Snapshot& snap) {
+    if (snap.live_id < 0) return;
+    char json[320];
+    snprintf(json, sizeof(json),
+        R"({"type":"speaker_id_link","source":"%s","segment_id":%llu,"live_id":%d,"stable_id":%d,"score":%.3f,"margin":%.3f,"support":%d,"committed":%s,"changed":%s})",
+        source,
+        (unsigned long long)segment_id,
+        snap.live_id,
+        snap.stable_id,
+        snap.score,
+        snap.margin,
+        snap.support,
+        snap.committed ? "true" : "false",
+        snap.changed ? "true" : "false");
+    server.broadcast_text(json);
 }
 
 }  // namespace
@@ -117,7 +132,7 @@ void install_transcript_callback(AudioPipeline& audio,
                    result.text.c_str(), result.total_ms, audio_sec);
 
         // Inject ASR transcript into consciousness stream.
-        if (llm_loaded && !result.text.empty()) {
+        if (!result.text.empty()) {
             InputItem item;
             item.source = InputSource::ASR;
             item.text = result.text;
@@ -125,12 +140,17 @@ void install_transcript_callback(AudioPipeline& audio,
             item.speaker_id = speaker_id;
             item.priority = 0.8f;
             if (holdback) {
-                // Hybrid P2: delay injection so DiariZen-v2 can rewrite
-                // speaker_id/name before the LLM tokenises the utterance.
+                // Pre-prefill ("前置") mutable transcript buffer: ALWAYS
+                // enqueue so DiariZen-v2 can rewrite speaker_id/name and the
+                // WebUI observes `asr_transcript_amend` — even on prefill-free
+                // observation runs where the LLM is not loaded. The actual
+                // cs_.inject_input at drain time is gated by the stream's
+                // enable_llm_ master switch, so it no-ops cleanly when prefill
+                // is disabled.
                 holdback->enqueue(std::move(item),
                                   (double)stream_start_sec,
                                   (double)stream_end_sec);
-            } else {
+            } else if (llm_loaded) {
                 consciousness.inject_input(std::move(item));
             }
         }
@@ -164,13 +184,12 @@ void install_stats_callback(AudioPipeline& audio,
 
     audio.set_on_stats([&audio, &server, &timeline, st_ptr]
                        (const AudioPipelineStats& st) {
-        // Build speaker lists JSON — always included so the roster stays current.
-        std::string lists_json;
-        lists_json += R"(,"speaker_lists":[)";
-        lists_json += R"({"model":"CAM++","speakers":)" + speaker_list_json(audio.campp_db()) + "},";
-        lists_json += R"({"model":"CAM++Legacy","speakers":)" + speaker_list_json(audio.speaker_db()) + "},";
-        lists_json += R"({"model":"WL-ECAPA","speakers":)" + speaker_list_json(audio.wlecapa_db()) + "}]";
-
+        // The legacy `speaker_lists` block (CAM++ / CAM++Legacy / WL-ECAPA
+        // stores) was removed 2026-06-03: in the default dual-encoder runtime
+        // those three stores are never registered, so the block broadcast
+        // three empty rosters from a SEPARATE id space than the live matcher.
+        // The single speaker authority is now DiariZen's identity registry
+        // ("S<gid>" via speaker_diarize_partial / asr_transcript_amend).
         char json[3200];
         snprintf(json, sizeof(json),
             R"({"type":"pipeline_stats","audio_t1":%lu,"audio_t1_in":%lu,"mel_frames":%lu,)"
@@ -333,7 +352,7 @@ void install_stats_callback(AudioPipeline& audio,
             multi_speaker ? "true" : "false",
             multi_score,
             multi_source);
-        full_json += ms;
+
 
         if (!st_ptr->multi_speaker_initialized || multi_speaker != st_ptr->multi_speaker_last) {
             st_ptr->multi_speaker_initialized = true;
@@ -344,7 +363,7 @@ void install_stats_callback(AudioPipeline& audio,
                    multi_source);
         }
 
-        full_json += lists_json;
+        full_json += ms;
         full_json += '}';
         server.broadcast_text(full_json);
 
@@ -373,6 +392,9 @@ void install_speaker_match_callback(AudioPipeline& audio,
                    match.prior_speaker_id, match.prior_similarity,
                    match.speaker_id, match.similarity,
                    match.name.empty() ? "(unnamed)" : match.name.c_str());
+
+                 auto snap = soft_link_ledger().observe_online(match.speaker_id, match.similarity);
+                 broadcast_soft_link(server, "online_amend", 0, snap);
             return;
         }
         char json[256];
@@ -386,15 +408,35 @@ void install_speaker_match_callback(AudioPipeline& audio,
                match.speaker_id, match.similarity,
                match.is_new ? "NEW " : "",
                match.name.empty() ? "(unnamed)" : match.name.c_str());
+
+        auto snap = soft_link_ledger().observe_online(match.speaker_id, match.similarity);
+        broadcast_soft_link(server, "online", 0, snap);
     });
 }
 
 void install_speaker_relabel_callback(AudioPipeline& audio,
                                       WsServer& server) {
-    audio.set_on_speaker_relabel([&server](uint64_t segment_id,
-                                           int old_speaker_id,
-                                           int new_speaker_id,
-                                           float confidence) {
+    audio.set_on_speaker_relabel([&audio, &server](uint64_t segment_id,
+                                                   int old_speaker_id,
+                                                   int new_speaker_id,
+                                                   float confidence) {
+        if (old_speaker_id >= 0 && new_speaker_id >= 0) {
+            // If reclustering split a previously named person onto a new ID,
+            // inherit that manual label to preserve identity continuity.
+            std::string old_name = speaker_name_by_id(audio.dual_db(), old_speaker_id);
+            std::string new_name = speaker_name_by_id(audio.dual_db(), new_speaker_id);
+            if (!old_name.empty() && new_name.empty()) {
+                audio.set_speaker_name(new_speaker_id, old_name);
+                char name_json[256];
+                snprintf(name_json, sizeof(name_json),
+                    R"({"type":"speaker_name","id":%d,"name":"%s"})",
+                    new_speaker_id, old_name.c_str());
+                server.broadcast_text(name_json);
+                printf("[awaken] Speaker relabel inherited name: id=%d <- '%s' (from %d)\n",
+                       new_speaker_id, old_name.c_str(), old_speaker_id);
+            }
+        }
+
         char json[256];
         snprintf(json, sizeof(json),
             R"({"type":"speaker_relabel","segment_id":%llu,"old_id":%d,"new_id":%d,"confidence":%.3f})",
@@ -402,6 +444,10 @@ void install_speaker_relabel_callback(AudioPipeline& audio,
             old_speaker_id, new_speaker_id,
             (double)confidence);
         server.broadcast_text(json);
+
+        auto snap = soft_link_ledger().observe_relabel(old_speaker_id, new_speaker_id, confidence);
+        broadcast_soft_link(server, "relabel", segment_id, snap);
+
         printf("[awaken] Speaker relabel: seg=%llu %d -> %d conf=%.3f\n",
                (unsigned long long)segment_id,
                old_speaker_id, new_speaker_id,

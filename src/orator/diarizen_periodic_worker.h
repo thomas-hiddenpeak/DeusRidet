@@ -84,6 +84,11 @@ public:
     /// Thread-safe live status for WS/UI observability.
     StatusSnapshot snapshot_status();
 
+    /// Runtime tuning hooks for the debug WebUI.
+    void set_period_sec(double period_sec);
+    void set_window_sec(double window_sec);
+    void set_periodic_enabled(bool enabled);
+
 private:
     void worker_loop_();
     /// Runs one pass. `is_final` controls the WS broadcast type.

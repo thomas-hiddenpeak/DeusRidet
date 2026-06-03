@@ -128,6 +128,12 @@ public:
     // Per-backend threshold control.
     void set_speaker_threshold(float t) { speaker_threshold_.store(t, std::memory_order_relaxed); }
     float speaker_threshold() const { return speaker_threshold_.load(std::memory_order_relaxed); }
+    // Ambiguity guard: min (top1 - top2) margin required to trust a closed-set
+    // match. Runtime-tunable (like the match/register thresholds) so the
+    // cross-speaker absorption guard can be exercised live, not frozen in a
+    // fixture-driven config value.
+    void set_speaker_margin_abstain(float m) { speaker_margin_abstain_.store(m, std::memory_order_relaxed); }
+    float speaker_margin_abstain() const { return speaker_margin_abstain_.load(std::memory_order_relaxed); }
     void set_wlecapa_threshold(float t) { wlecapa_threshold_.store(t, std::memory_order_relaxed); }
     float wlecapa_threshold() const { return wlecapa_threshold_.load(std::memory_order_relaxed); }
 
@@ -212,6 +218,7 @@ public:
     SpeakerDb& speaker_db() { return speaker_db_; }
     SpeakerVectorStore& campp_db() { return campp_db_; }
     SpeakerVectorStore& wlecapa_db() { return wlecapa_db_; }
+    SpeakerVectorStore& dual_db() { return dual_db_; }
 
     // Per-backend clear and name.
     void clear_speaker_db() {
@@ -230,10 +237,30 @@ public:
         stats_.wlecapa_active = true;
         stats_.wlecapa_name[0] = '\0';
     }
-    void set_speaker_name(int id, const std::string& name) { speaker_db_.set_name(id, name); }
+    void set_speaker_name(int id, const std::string& name) {
+        // Keep legacy + active online stores in sync so manual naming survives
+        // whichever matcher path is currently producing IDs.
+        speaker_db_.set_name(id, name);
+        campp_db_.set_name(id, name);
+        wlecapa_db_.set_name(id, name);
+        dual_db_.set_name(id, name);
+    }
     void set_wlecapa_name(int id, const std::string& name) { wlecapa_db_.set_name(id, name); }
     bool remove_wlecapa_speaker(int id) { return wlecapa_db_.remove_speaker(id); }
     bool merge_wlecapa_speakers(int dst_id, int src_id) { return wlecapa_db_.merge_speakers(dst_id, src_id); }
+
+    // Forget a speaker everywhere. The live online matcher reads dual_db_ (or
+    // campp_db_ when the dual encoder is off), so deleting only the legacy
+    // wlecapa_db_ left the prototype alive on the hot path — a deleted person
+    // kept absorbing strangers. Remove the prototype from every store the
+    // identifier can consult, mirroring set_speaker_name's fan-out.
+    bool remove_speaker(int id) {
+        bool any = false;
+        any |= dual_db_.remove_speaker(id);
+        any |= campp_db_.remove_speaker(id);
+        any |= wlecapa_db_.remove_speaker(id);
+        return any;
+    }
 
     // Input gain (applied before Mel + VAD). 1.0 = unity.
     void set_gain(float g) { gain_.store(g, std::memory_order_relaxed); }
@@ -359,6 +386,7 @@ private:
     std::atomic<bool> enable_wlecapa_{false};    // WL-ECAPA — disabled (CAM++ is primary)
     std::atomic<float> speaker_threshold_{0.50f}; // CAM++ matching threshold
     std::atomic<float> speaker_register_threshold_{0.60f}; // pending pool confirmation threshold (0.60: separates true 4-spk at 0.62+ from false splits at 0.56-0.58)
+    std::atomic<float> speaker_margin_abstain_{0.05f}; // min (top1-top2) margin to trust a match (ambiguity guard, runtime-tunable)
     std::atomic<float> wlecapa_threshold_{0.55f};
     std::atomic<int>   early_trigger_samples_{27200};  // 1.7s default
     std::atomic<bool>  enable_early_{true};              // early trigger on/off

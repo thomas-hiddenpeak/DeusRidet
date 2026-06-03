@@ -126,6 +126,31 @@ void TranscriptHoldback::drain_now() {
     }
 }
 
+void TranscriptHoldback::set_holdback_sec(double holdback_sec) {
+    std::lock_guard<std::mutex> lk(mu_);
+    holdback_sec_ = holdback_sec;
+}
+
+void TranscriptHoldback::set_id_name(int gid, const std::string& name) {
+    if (gid < 0) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (name.empty()) {
+        id_to_name_.erase(gid);
+    } else {
+        id_to_name_[gid] = name;
+    }
+    // Retro-apply to any still-pending item already mapped to this gid so a
+    // rename takes effect even on utterances captured before the name existed.
+    for (auto& p : q_) {
+        if (p.item.speaker_id == gid) p.item.speaker_name = name;
+    }
+}
+
+double TranscriptHoldback::holdback_sec() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return holdback_sec_;
+}
+
 size_t TranscriptHoldback::apply_diarization(
         const std::vector<orator::DiarizenSegment>& segs,
         double capture_origin_sec) {
@@ -155,10 +180,13 @@ size_t TranscriptHoldback::apply_diarization(
         if (gid < 0) continue;
         if (gid != p.item.speaker_id) {
             p.item.speaker_id = gid;
+            // Identity layer carries the user-assigned name only. An unnamed
+            // global identity stays empty here; each presentation layer
+            // (WebUI roster, LLM prompt) applies its own "Speaker <id>"
+            // render-time fallback. Synthesising the placeholder name here
+            // made the WebUI misclassify unnamed speakers as "named".
             auto it = id_to_name_.find(gid);
-            p.item.speaker_name = (it != id_to_name_.end())
-                ? it->second
-                : (std::string("Speaker ") + std::to_string(gid));
+            p.item.speaker_name = (it != id_to_name_.end()) ? it->second : std::string();
             ++changed;
         }
     }

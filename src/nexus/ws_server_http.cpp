@@ -165,6 +165,10 @@ void WsServer::process_http(Client& c) {
         return;
     }
 
+    // HTTP static responses are one-shot. We close after flush so browser-side
+    // keepalive sockets cannot exhaust max_clients and starve new requests.
+    c.close_after_send = true;
+
     // Static file serving for GET requests.
     if (method == "GET") {
         serve_static(c, path);
@@ -173,6 +177,7 @@ void WsServer::process_http(Client& c) {
 
     // Unsupported method.
     std::string resp = "HTTP/1.1 405 Method Not Allowed\r\n"
+                       "Connection: close\r\n"
                        "Content-Length: 0\r\n\r\n";
     c.send_buf += resp;
     flush_send(c.fd);
@@ -185,7 +190,7 @@ void WsServer::process_http(Client& c) {
 void WsServer::serve_static(Client& c, const std::string& url_path) {
     // Security: reject path traversal.
     if (url_path.find("..") != std::string::npos) {
-        c.send_buf += "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+        c.send_buf += "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
         flush_send(c.fd);
         return;
     }
@@ -196,28 +201,28 @@ void WsServer::serve_static(Client& c, const std::string& url_path) {
     // Resolve and verify under static_dir.
     char resolved[PATH_MAX];
     if (!realpath(full.c_str(), resolved)) {
-        c.send_buf += "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        c.send_buf += "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
         flush_send(c.fd);
         return;
     }
     char root_resolved[PATH_MAX];
     if (!realpath(config_.static_dir.c_str(), root_resolved) ||
         strncmp(resolved, root_resolved, strlen(root_resolved)) != 0) {
-        c.send_buf += "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
+        c.send_buf += "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
         flush_send(c.fd);
         return;
     }
 
     struct stat st;
     if (stat(resolved, &st) < 0 || !S_ISREG(st.st_mode)) {
-        c.send_buf += "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        c.send_buf += "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
         flush_send(c.fd);
         return;
     }
 
     FILE* fp = fopen(resolved, "rb");
     if (!fp) {
-        c.send_buf += "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+        c.send_buf += "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
         flush_send(c.fd);
         return;
     }
@@ -231,6 +236,7 @@ void WsServer::serve_static(Client& c, const std::string& url_path) {
              "Content-Type: %s\r\n"
              "Content-Length: %ld\r\n"
              "Cache-Control: no-cache\r\n"
+             "Connection: close\r\n"
              "\r\n", mime_type(resolved), (long)st.st_size);
 
     c.send_buf += hdr;

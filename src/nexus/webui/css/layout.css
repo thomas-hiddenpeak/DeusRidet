@@ -19,7 +19,7 @@ body { overflow: hidden; }
 
 .app {
   display: grid;
-  grid-template-rows: var(--header-h) auto 1fr auto;
+  grid-template-rows: var(--header-h) 1fr auto;
   height: 100dvh;
   max-width: var(--maxw);
   margin: 0 auto;
@@ -64,11 +64,26 @@ body { overflow: hidden; }
   background: var(--c-line);
 }
 
-/* Conversation stream (the scrolling middle). */
+/* Main middle area: contacts sidebar + conversation. */
+.app__main {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.app__sidebar {
+  border-right: 1px solid var(--c-line);
+  background: var(--c-bg-elev);
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Conversation stream (inside main area). */
 .app__stream {
   overflow: hidden;
   overflow-x: hidden;
   padding: var(--sp-4);
+  min-height: 0;
 }
 
 /* Composer (typing input). */
@@ -90,4 +105,16 @@ body { overflow: hidden; }
 @media (max-width: 600px) {
   :root { --fs-md: 14px; }
   .app__stream { padding: var(--sp-3); }
+}
+
+@media (max-width: 980px) {
+  .app__main {
+    grid-template-columns: 1fr;
+  }
+
+  .app__sidebar {
+    border-right: none;
+    border-bottom: 1px solid var(--c-line);
+    max-height: 220px;
+  }
 }

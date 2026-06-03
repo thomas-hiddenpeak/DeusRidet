@@ -19,6 +19,7 @@ namespace deusridet {
 class AudioPipeline;
 class WsServer;
 class ConscientiStream;
+namespace auditus { class TranscriptHoldback; }
 namespace orator {
 class DiarizenPeriodicWorker;
 class DiarizenPipeline;
@@ -40,6 +41,7 @@ void handle_ws_text_command(int fd,
                             ConscientiStream& consciousness,
                             std::atomic<bool>& loopback,
                             bool llm_loaded,
+                            auditus::TranscriptHoldback* holdback = nullptr,
                             orator::DiarizenPeriodicWorker* worker = nullptr,
                             orator::DiarizenPipeline* native = nullptr);
 

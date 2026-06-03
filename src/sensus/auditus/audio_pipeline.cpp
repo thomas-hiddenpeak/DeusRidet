@@ -160,6 +160,10 @@ bool AudioPipeline::start(const AudioPipelineConfig& cfg) {
     // (key: speaker_register_threshold). See AudioPipelineConfig for rationale.
     speaker_register_threshold_.store(cfg_.speaker_register_threshold,
                                       std::memory_order_relaxed);
+    // Ambiguity guard margin — tunable via configs/auditus.conf
+    // (key: speaker_margin_abstain) and live via the dev console.
+    speaker_margin_abstain_.store(cfg_.speaker_margin_abstain,
+                                  std::memory_order_relaxed);
 
     // v24: threshold set from config (default 0.50 in header, 0.45 in machina.conf).
     // Recency bonus (-0.05) applies dynamically during FULL identification.

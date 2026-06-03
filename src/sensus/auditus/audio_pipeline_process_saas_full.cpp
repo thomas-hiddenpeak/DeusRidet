@@ -94,7 +94,7 @@ void AudioPipeline::process_saas_full_extract_(int fbank_frames) {
     // runtime-configurable); the gate's pending evidence persists in the member.
     orator::OratorOnlineConfig oc;
     oc.judge.match_floor    = speaker_threshold_.load(std::memory_order_relaxed);
-    oc.judge.margin_abstain = cfg_.speaker_margin_abstain;
+    oc.judge.margin_abstain = speaker_margin_abstain_.load(std::memory_order_relaxed);
     oc.reg.coalesce_sim     = speaker_register_threshold_.load(std::memory_order_relaxed);
     oc.reg.confirm_hits     = 2;
     orator_online_.set_config(oc);

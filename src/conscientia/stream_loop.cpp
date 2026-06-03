@@ -371,8 +371,13 @@ std::vector<int> ConscientiStream::drain_and_tokenize(std::vector<InputItem>* ra
     for (const auto& item : items) {
         if (item.source != InputSource::ASR) continue;
         if (!asr_block.empty()) asr_block += "\n";
+        // Render-time speaker label. The identity layer leaves the name empty
+        // for an unnamed speaker; synthesise a "Speaker <id>" prefix here so
+        // the LLM still distinguishes turns. Named speakers use their name.
         if (!item.speaker_name.empty()) {
             asr_block += "[" + item.speaker_name + "] ";
+        } else if (item.speaker_id >= 0) {
+            asr_block += "[Speaker " + std::to_string(item.speaker_id) + "] ";
         }
         asr_block += item.text;
     }

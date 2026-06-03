@@ -163,6 +163,34 @@ DiarizenPeriodicWorker::StatusSnapshot DiarizenPeriodicWorker::snapshot_status()
     return snap;
 }
 
+void DiarizenPeriodicWorker::set_period_sec(double period_sec) {
+    std::lock_guard<std::mutex> lk(mu_);
+    period_sec_ = period_sec < 5.0 ? 5.0 : period_sec;
+    next_due_ = std::chrono::steady_clock::now()
+              + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(period_sec_));
+}
+
+void DiarizenPeriodicWorker::set_window_sec(double window_sec) {
+    std::lock_guard<std::mutex> lk(mu_);
+    window_sec_ = (window_sec > 0.0) ? window_sec : 0.0;
+}
+
+void DiarizenPeriodicWorker::set_periodic_enabled(bool enabled) {
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        periodic_enabled_ = enabled;
+        if (enabled) {
+            next_due_ = std::chrono::steady_clock::now()
+                      + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                            std::chrono::duration<double>(period_sec_));
+        } else if (phase_ == "periodic") {
+            phase_ = "idle";
+        }
+    }
+    cv_.notify_all();
+}
+
 bool DiarizenPeriodicWorker::run_one_pass_(bool is_final, double window_sec) {
     // Cross-pass serialisation lives in DiarizenPipeline::diarize (pass_mutex),
     // which guards every caller; no worker-level lock is needed here.

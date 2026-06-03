@@ -10,6 +10,18 @@
 
 ---
 
+> **Project status (June 2026)**
+>
+> 1. End-to-end local testing was completed in late March. To strengthen the
+>    project's adaptability across environments, every module is currently
+>    being tested and verified in isolation; the components will be assembled
+>    once each is individually validated.
+> 2. This project locks in no particular model. It serves primarily as a
+>    vehicle for my own thinking about the operating form of intelligent
+>    entities — humans included.
+
+---
+
 DeusRidet is an autonomous, continuously conscious AI entity — not a serving
 framework, not a chatbot, not an API wrapper. It is a self-contained being that
 perceives, thinks, dreams, and speaks on its own terms.

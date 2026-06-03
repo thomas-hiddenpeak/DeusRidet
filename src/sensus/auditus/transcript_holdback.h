@@ -106,6 +106,20 @@ public:
     /// holdback window. Used at finalize.
     void drain_now();
 
+    /// Runtime tuning hook for the live debug surface.
+    void set_holdback_sec(double holdback_sec);
+
+    /// Bind a user-assigned display name to a DiariZen global identity gid.
+    /// The gid space ("S<gid>") is the SINGLE speaker authority; this map is
+    /// the backend half of the name the UI shows, so the LLM injection and the
+    /// post-holdback `asr_transcript_amend` broadcast carry the same name the
+    /// user typed — not an empty placeholder. Thread-safe; may be called any
+    /// time after construction. An empty name clears the binding.
+    void set_id_name(int gid, const std::string& name);
+
+    /// Thread-safe readback for status broadcasting.
+    double holdback_sec() const;
+
     /// Set a callback invoked with the FINAL, post-holdback speaker_id/name
     /// of each transcript, immediately before it is committed to Conscientia.
     /// This lets the broadcast/capture layer observe the voiceprint-anchored

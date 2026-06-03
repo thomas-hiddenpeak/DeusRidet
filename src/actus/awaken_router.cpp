@@ -10,6 +10,7 @@
 #include "awaken_router.h"
 
 #include "sensus/auditus/audio_pipeline.h"
+#include "sensus/auditus/transcript_holdback.h"
 #include "nexus/ws_server.h"
 #include "conscientia/stream.h"
 #include "conscientia/frame.h"
@@ -34,6 +35,7 @@ void handle_ws_text_command(int fd,
                             ConscientiStream& consciousness,
                             std::atomic<bool>& loopback,
                             bool llm_loaded,
+                            auditus::TranscriptHoldback* holdback,
                             orator::DiarizenPeriodicWorker* worker,
                             orator::DiarizenPipeline* native) {
     if (msg == "loopback:on") {
@@ -109,6 +111,16 @@ void handle_ws_text_command(int fd,
             R"({"type":"speaker_threshold","value":%.2f})", t);
         server.send_text(fd, json);
         printf("[awaken] Speaker threshold = %.2f (fd=%d)\n", t, fd);
+    } else if (msg.rfind("speaker_margin_abstain:", 0) == 0) {
+        float m = std::strtof(msg.c_str() + 23, nullptr);
+        if (m < 0.0f) m = 0.0f;
+        if (m > 1.0f) m = 1.0f;
+        audio.set_speaker_margin_abstain(m);
+        char json[128];
+        snprintf(json, sizeof(json),
+            R"({"type":"speaker_margin_abstain","value":%.2f})", m);
+        server.send_text(fd, json);
+        printf("[awaken] Speaker margin_abstain = %.2f (fd=%d)\n", m, fd);
     } else if (msg == "speaker_clear") {
         audio.clear_speaker_db();
         server.send_text(fd, R"({"type":"speaker_clear"})");
@@ -121,11 +133,15 @@ void handle_ws_text_command(int fd,
             int id = std::stoi(rest.substr(0, colon));
             std::string name = rest.substr(colon + 1);
             audio.set_speaker_name(id, name);
+            // The DiariZen gid space is the single speaker authority; bind the
+            // name there too so the LLM injection + post-holdback amend carry
+            // it. The rename id from the roster IS the gid ("S<gid>").
+            if (holdback) holdback->set_id_name(id, name);
             char json[256];
             snprintf(json, sizeof(json),
                 R"({"type":"speaker_name","id":%d,"name":"%s"})", id, name.c_str());
-            server.send_text(fd, json);
-            printf("[awaken] CAM++ Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
+            server.broadcast_text(json);
+            printf("[awaken] Speaker %d named '%s' (broadcast, from fd=%d)\n", id, name.c_str(), fd);
         }
     } else if (msg == "wlecapa_enable:on" || msg == "wlecapa_enable:off") {
         bool on = msg.back() == 'n';
@@ -200,6 +216,18 @@ void handle_ws_text_command(int fd,
             server.send_text(fd, json);
             printf("[awaken] WL-ECAPA Speaker %d named '%s' (fd=%d)\n", id, name.c_str(), fd);
         }
+    } else if (msg.rfind("speaker_delete:", 0) == 0) {
+        // Format: speaker_delete:ID — forget a speaker on the LIVE matcher
+        // (dual_db_/campp_db_) plus the legacy stores. The old wlecapa_delete
+        // touched only wlecapa_db_, leaving the prototype alive on the hot
+        // path so a "deleted" person kept absorbing strangers.
+        int id = std::stoi(msg.substr(15));
+        bool ok = audio.remove_speaker(id);
+        char json[128];
+        snprintf(json, sizeof(json),
+            R"({"type":"speaker_delete","id":%d,"ok":%s})", id, ok ? "true" : "false");
+        server.send_text(fd, json);
+        printf("[awaken] Speaker delete #%d %s (fd=%d)\n", id, ok ? "OK" : "FAIL", fd);
     } else if (msg.rfind("wlecapa_delete:", 0) == 0) {
         // Format: wlecapa_delete:ID
         int id = std::stoi(msg.substr(15));
@@ -342,6 +370,58 @@ void handle_ws_text_command(int fd,
     } else if (llm_loaded &&
                handle_ws_consciousness_command(fd, msg, server, consciousness)) {
         // Handled by the consciousness peer router (awaken_router_consciousness.cpp).
+    } else if (msg.rfind("diarizen_param:", 0) == 0) {
+        auto rest = msg.substr(15);
+        auto sep = rest.find(':');
+        if (sep != std::string::npos) {
+            auto key = rest.substr(0, sep);
+            auto val = rest.substr(sep + 1);
+            if (!worker) {
+                server.send_text(fd, R"json({"type":"speaker_diarize_status","ok":false,"error":"periodic worker unavailable"})json");
+                return;
+            }
+
+            if (key == "period_sec") {
+                double period = std::atof(val.c_str());
+                if (period < 5.0) period = 5.0;
+                worker->set_period_sec(period);
+            } else if (key == "window_sec") {
+                double window = std::atof(val.c_str());
+                const double holdback_sec = holdback ? holdback->holdback_sec() : 0.0;
+                if (window > 0.0 && window < holdback_sec) window = holdback_sec;
+                worker->set_window_sec(window);
+            } else if (key == "holdback_sec") {
+                if (!holdback) {
+                    server.send_text(fd, R"json({"type":"speaker_diarize_status","ok":false,"error":"holdback unavailable"})json");
+                    return;
+                }
+                double holdback_sec = std::atof(val.c_str());
+                if (holdback_sec < 1.0) holdback_sec = 1.0;
+                holdback->set_holdback_sec(holdback_sec);
+                const auto st = worker->snapshot_status();
+                if (st.window_sec > 0.0 && st.window_sec < holdback_sec) {
+                    worker->set_window_sec(holdback_sec);
+                }
+            } else if (key == "periodic_enabled") {
+                const bool enabled = (val == "true" || val == "1" || val == "on");
+                worker->set_periodic_enabled(enabled);
+            } else {
+                server.send_text(fd, R"json({"type":"speaker_diarize_status","ok":false,"error":"unknown diarizen_param"})json");
+                return;
+            }
+
+            const auto st = worker->snapshot_status();
+            const double holdback_sec = holdback ? holdback->holdback_sec() : 0.0;
+            char json[448];
+            snprintf(json, sizeof(json),
+                R"({"type":"speaker_diarize_status","ok":true,"running":%s,"periodic_enabled":%s,"phase":"%s","cycle_progress":%.3f,"period_sec":%.1f,"window_sec":%.1f,"holdback_sec":%.1f,"pass":%lu})",
+                st.running ? "true" : "false",
+                st.periodic_enabled ? "true" : "false",
+                st.phase.c_str(), st.cycle_progress,
+                st.period_sec, st.window_sec, holdback_sec,
+                (unsigned long)st.pass_seq);
+            server.send_text(fd, json);
+        }
     } else if (msg == "diarizen_trigger") {
         // Hybrid P2 — ask the periodic worker for an extra reclustering
         // pass right now. Returns immediately; result arrives later as a

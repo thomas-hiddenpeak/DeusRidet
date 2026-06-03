@@ -71,6 +71,7 @@ private:
     struct Client {
         int fd = -1;
         bool is_ws = false;           // true after successful WS upgrade
+        bool close_after_send = false; // HTTP one-shot responses close socket
         std::string recv_buf;         // accumulated inbound bytes
         std::string send_buf;         // pending outbound bytes
     };

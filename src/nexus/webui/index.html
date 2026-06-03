@@ -22,9 +22,10 @@
       <button type="button" class="lang" data-role="lang">中文</button>
     </header>
 
-    <div class="app__strips" data-slot="strips"></div>
-
-    <section class="app__stream" data-slot="stream" aria-label="Conversation"></section>
+    <section class="app__main" aria-label="Workspace">
+      <aside class="app__sidebar" data-slot="contacts" aria-label="Contacts"></aside>
+      <section class="app__stream" data-slot="stream" aria-label="Conversation"></section>
+    </section>
 
     <footer class="app__composer" data-slot="composer"></footer>
   </main>

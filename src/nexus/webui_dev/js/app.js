@@ -246,6 +246,13 @@ ws.onText = (msg) => {
             log(`DiariZen ${progressState}${sampleText}`);
             return;
         }
+        if (obj.type === 'speaker_diarize_status') {
+            diarizenPanel.onStatus(obj);
+            if (obj.ok === false) {
+                log(`DiariZen status error: ${obj.error || 'unknown'}`);
+            }
+            return;
+        }
         if (obj.type === 'speaker_diarize_partial') {
             diarizenPanel.onPartial(obj);
             evalRunPanel.onDiarizePartial(obj);
@@ -424,6 +431,19 @@ MODELS.forEach(m => {
         ws.sendText(`${m.thresholdCmd}:${v.toFixed(2)}`);
     });
 });
+
+// Ambiguity guard (margin_abstain) — min (top1-top2) margin to trust a match.
+{
+    const slider = document.getElementById('speaker-margin');
+    const valEl = document.getElementById('speaker-margin-val');
+    if (slider && valEl) {
+        slider.addEventListener('input', () => {
+            const v = parseFloat(slider.value);
+            valEl.textContent = v.toFixed(2);
+            ws.sendText(`speaker_margin_abstain:${v.toFixed(2)}`);
+        });
+    }
+}
 
 // Early trigger controls.
 {

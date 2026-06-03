@@ -24,8 +24,9 @@ void wire_server_ingress(WsServer& server,
                          std::atomic<bool>& loopback,
                          std::atomic<uint64_t>& total_frames,
                          std::atomic<uint64_t>& total_bytes,
-                         orator::DiarizenPeriodicWorker* worker,
-                         orator::DiarizenPipeline* native) {
+                         auditus::TranscriptHoldback*& holdback,
+                         orator::DiarizenPeriodicWorker*& worker,
+                         orator::DiarizenPipeline*& native) {
     WsServer* sp = &server;
     server.set_on_connect([sp, &cb](int fd) {
         send_consciousness_hello(fd, *sp, cb.stream, cb.cache, cb.persona_cfg, cb.loaded);
@@ -33,8 +34,8 @@ void wire_server_ingress(WsServer& server,
     server.set_on_disconnect([](int fd) {
         printf("[awaken] WS client disconnected (fd=%d)\n", fd);
     });
-    server.set_on_text([sp, &audio, &cb, &loopback, worker, native](int fd, const std::string& msg) {
-        handle_ws_text_command(fd, msg, audio, *sp, cb.stream, loopback, cb.loaded, worker, native);
+    server.set_on_text([sp, &audio, &cb, &loopback, &holdback, &worker, &native](int fd, const std::string& msg) {
+        handle_ws_text_command(fd, msg, audio, *sp, cb.stream, loopback, cb.loaded, holdback, worker, native);
     });
     auditus::install_ws_binary_callback(server, audio, total_frames, total_bytes, loopback);
 }

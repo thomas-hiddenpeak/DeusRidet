@@ -8,7 +8,7 @@ import { WsClient } from './ws-client.js';
 import { i18n } from './i18n.js';
 import { Presence } from './components/presence.js';
 import { Listening } from './components/listening.js';
-import { Speakers } from './components/speakers.js';
+import { Contacts } from './components/contacts.js';
 import { Conversation } from './components/conversation.js';
 import { Composer } from './components/composer.js';
 
@@ -48,20 +48,25 @@ function renderAll() {
 // ── Mount components ───────────────────────────────────────────────────
 const presence = new Presence();
 const listening = new Listening();
-const speakers = new Speakers();
+const contacts = new Contacts();
 const conversation = new Conversation();
 const composer = new Composer();
 
 presence.mount(document.querySelector('[data-slot=top]'));
 listening.mount(document.querySelector('[data-slot=top]'));
-speakers.mount(document.querySelector('[data-slot=strips]'));
+contacts.mount(document.querySelector('[data-slot=contacts]'));
 conversation.mount(document.querySelector('[data-slot=stream]'));
 composer.mount(document.querySelector('[data-slot=composer]'));
-components.push(presence, listening, speakers, conversation, composer);
+components.push(presence, listening, contacts, conversation, composer);
 
 // ── User intent → upstream ─────────────────────────────────────────────
 composer.onSend = (text) => ws.sendText('text_input:' + text);
-speakers.onRename = (id, name) => ws.sendText(`speaker_name:${id}:${name}`);
+contacts.onRename = (id, name) => ws.sendText(`speaker_name:${id}:${name}`);
+contacts.onMerge = (srcId, dstId, dstName) => {
+    ws.sendText(`wlecapa_merge:${dstId}:${srcId}`);
+    if (dstName) ws.sendText(`speaker_name:${srcId}:${dstName}`);
+};
+contacts.onRemove = (id) => ws.sendText(`speaker_delete:${id}`);
 listening.onMic = (on) => {
     micWanted = on;
     syncMicDrivenRuntime();
@@ -106,7 +111,7 @@ ws.onOpen = () => {
     online = true;
     presence.setOnline(true);
     composer.setEnabled(true);
-    speakers.reapplyAliases((msg) => ws.sendText(msg));
+    contacts.reapplyAliases((msg) => ws.sendText(msg));
     syncMicDrivenRuntime();
     renderHeader();
 };

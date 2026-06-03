@@ -212,6 +212,10 @@ void WsServer::flush_send(int fd) {
     }
 
     if (c.send_buf.empty()) {
+        if (c.close_after_send) {
+            close_client(fd);
+            return;
+        }
         // No more pending data — stop watching EPOLLOUT.
         struct epoll_event ev{};
         ev.events  = EPOLLIN;

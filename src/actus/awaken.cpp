@@ -81,17 +81,19 @@ static void broadcast_vires_snapshot(WsServer& server) {
 }
 
 static void broadcast_diarizen_status(WsServer& server,
-                                      orator::DiarizenPeriodicWorker* worker) {
+                                      orator::DiarizenPeriodicWorker* worker,
+                                      auditus::TranscriptHoldback* holdback) {
     if (!worker) return;
     const auto st = worker->snapshot_status();
-    char json[384];
+    const double holdback_sec = holdback ? holdback->holdback_sec() : 0.0;
+    char json[448];
     snprintf(json, sizeof(json),
              R"({"type":"speaker_diarize_status","running":%s,"periodic_enabled":%s,)"
-             R"("phase":"%s","cycle_progress":%.3f,"period_sec":%.1f,"window_sec":%.1f,"pass":%lu})",
+             R"("phase":"%s","cycle_progress":%.3f,"period_sec":%.1f,"window_sec":%.1f,"holdback_sec":%.1f,"pass":%lu})",
              st.running ? "true" : "false",
              st.periodic_enabled ? "true" : "false",
              st.phase.c_str(), st.cycle_progress,
-             st.period_sec, st.window_sec,
+             st.period_sec, st.window_sec, holdback_sec,
              (unsigned long)st.pass_seq);
     server.broadcast_text(json);
 }
@@ -219,6 +221,9 @@ int awaken(const std::string& webui_dir,
     // capture the holdback pointer; left null when DiariZen is disabled.
     std::unique_ptr<auditus::TranscriptHoldback> diarizen_holdback;
     std::unique_ptr<orator::DiarizenPeriodicWorker> diarizen_worker;
+    auditus::TranscriptHoldback* diarizen_holdback_ptr = nullptr;
+    orator::DiarizenPeriodicWorker* diarizen_worker_ptr = nullptr;
+    orator::DiarizenPipeline* diarizen_native_ptr = nullptr;
     double diarizen_cap_sec = 0.0;
     // Periodic recluster cadence. 30s is the sweet spot from the Jun 2 live
     // 1x replay: max per-pass wall on the 120s window was ~19s, so 30s keeps
@@ -227,6 +232,8 @@ int awaken(const std::string& webui_dir,
     // speaker cold-start lag). Override with DEUSRIDET_DIARIZEN_PERIOD_SEC.
     double diarizen_period_sec = 30.0;
     double diarizen_holdback_sec = 75.0;
+    double diarizen_window_sec = 120.0;
+    bool diarizen_periodic_enabled = true;
     // P3c default flip (2026-05-30): native DiariZen is ON by default. The
     // LLM-loaded live gate cleared at 93.55% (≥93.5%) with finalize RTF 0.10
     // and zero CUDA errors, so the in-process pipeline is the default speaker
@@ -239,23 +246,20 @@ int awaken(const std::string& webui_dir,
     }
     if (diarizen_enabled) {
         diarizen_cap_sec = 4000.0;
-        if (const char* cap = std::getenv("DEUSRIDET_DIARIZEN_CAP_SEC")) {
-            double v = std::atof(cap);
-            if (v >= 60.0 && v <= 14400.0) diarizen_cap_sec = v;
-        }
-        if (const char* p = std::getenv("DEUSRIDET_DIARIZEN_PERIOD_SEC")) {
-            double v = std::atof(p);
-            if (v >= 5.0 && v <= 3600.0) diarizen_period_sec = v;
-        }
-        if (const char* h = std::getenv("DEUSRIDET_TRANSCRIPT_HOLDBACK_SEC")) {
-            double v = std::atof(h);
-            if (v >= 1.0 && v <= 3600.0) diarizen_holdback_sec = v;
-        }
-        if (cb.loaded) {
-            diarizen_holdback = std::make_unique<auditus::TranscriptHoldback>(
-                cb.stream, diarizen_holdback_sec,
-                [&audio]() { return audio.audio_t1_in_sec(); });
-        }
+        // The holdback is the pre-prefill ("前置") mutable transcript buffer
+        // and the `asr_transcript_amend` broadcast source. It is constructed
+        // unconditionally — independent of whether the LLM is loaded — so a
+        // prefill-free observation run still rewrites speaker_id via DiariZen
+        // and the WebUI sees the correction. It binds cb.stream (always a
+        // valid object even when !cb.loaded); the drainer's cs_.inject_input
+        // is gated by the stream's enable_llm_ master switch, which we clear
+        // below when the LLM is absent so injection no-ops without piling up
+        // an unread input_queue_.
+        diarizen_holdback = std::make_unique<auditus::TranscriptHoldback>(
+            cb.stream, diarizen_holdback_sec,
+            [&audio]() { return audio.audio_t1_in_sec(); });
+        diarizen_holdback_ptr = diarizen_holdback.get();
+        if (!cb.loaded) cb.stream.set_llm_enabled(false);
     }
 
     // Persistent timeline data logger (JSONL).
@@ -310,9 +314,9 @@ int awaken(const std::string& webui_dir,
     }
     // WS ingress wired per front door; broadcasts mirror from `server`.
     actus::wire_server_ingress(server, audio, cb, loopback, total_frames, total_bytes,
-                               diarizen_worker.get(), diarizen_native.get());
+                               diarizen_holdback_ptr, diarizen_worker_ptr, diarizen_native_ptr);
     actus::wire_server_ingress(dev_server, audio, cb, loopback, total_frames, total_bytes,
-                               diarizen_worker.get(), diarizen_native.get());
+                               diarizen_holdback_ptr, diarizen_worker_ptr, diarizen_native_ptr);
 
     // Default runtime policy: Silero is the sole VAD (FSMN removed April 2026,
     // lost to Silero at every tested threshold per Step 2 evaluation matrix).
@@ -335,14 +339,48 @@ int awaken(const std::string& webui_dir,
             audio_cfg.speaker_register_threshold = (float)aud_cfg.get_double("speaker_register_threshold", audio_cfg.speaker_register_threshold);
             audio_cfg.speaker_margin_abstain     = (float)aud_cfg.get_double("speaker_margin_abstain",     audio_cfg.speaker_margin_abstain);
             audio_cfg.speaker_min_fbank_frames   =        aud_cfg.get_int   ("speaker_min_fbank_frames",   audio_cfg.speaker_min_fbank_frames);
+            diarizen_period_sec                  =        aud_cfg.get_double("diarizen_period_sec",        diarizen_period_sec);
+            diarizen_holdback_sec                =        aud_cfg.get_double("transcript_holdback_sec",    diarizen_holdback_sec);
+            diarizen_window_sec                  =        aud_cfg.get_double("diarizen_window_sec",        diarizen_window_sec);
+            diarizen_periodic_enabled            =        aud_cfg.get_bool  ("diarizen_periodic_enabled",  diarizen_periodic_enabled);
+            if (diarizen_period_sec < 5.0) diarizen_period_sec = 5.0;
+            if (diarizen_holdback_sec < 1.0) diarizen_holdback_sec = 1.0;
+            if (diarizen_window_sec > 0.0 && diarizen_window_sec < diarizen_holdback_sec) {
+                diarizen_window_sec = diarizen_holdback_sec;
+            }
             printf("[awaken] Auditus diarization knobs loaded from configs/auditus.conf:\n"
-                   "           match=%.3f reg=%.3f margin=%.3f min_fbank=%d\n",
+                   "           match=%.3f reg=%.3f margin=%.3f min_fbank=%d diarizen_period=%.1fs holdback=%.1fs window=%.1fs periodic=%s\n",
                    audio_cfg.speaker_threshold, audio_cfg.speaker_register_threshold,
-                   audio_cfg.speaker_margin_abstain, audio_cfg.speaker_min_fbank_frames);
+                   audio_cfg.speaker_margin_abstain, audio_cfg.speaker_min_fbank_frames,
+                   diarizen_period_sec, diarizen_holdback_sec, diarizen_window_sec,
+                   diarizen_periodic_enabled ? "ON" : "OFF");
         } else {
             printf("[awaken] configs/auditus.conf not found — using compiled defaults\n");
         }
     }
+
+    if (const char* cap = std::getenv("DEUSRIDET_DIARIZEN_CAP_SEC")) {
+        double v = std::atof(cap);
+        if (v >= 60.0 && v <= 14400.0) diarizen_cap_sec = v;
+    }
+    if (const char* p = std::getenv("DEUSRIDET_DIARIZEN_PERIOD_SEC")) {
+        double v = std::atof(p);
+        if (v >= 5.0 && v <= 3600.0) diarizen_period_sec = v;
+    }
+    if (const char* h = std::getenv("DEUSRIDET_TRANSCRIPT_HOLDBACK_SEC")) {
+        double v = std::atof(h);
+        if (v >= 1.0 && v <= 3600.0) diarizen_holdback_sec = v;
+    }
+    if (const char* w = std::getenv("DEUSRIDET_DIARIZEN_WINDOW_SEC")) {
+        diarizen_window_sec = std::atof(w);
+    }
+    if (const char* periodic = std::getenv("DEUSRIDET_DIARIZEN_PERIODIC")) {
+        diarizen_periodic_enabled = std::string(periodic) != "0";
+    }
+    if (diarizen_window_sec > 0.0 && diarizen_window_sec < diarizen_holdback_sec) {
+        diarizen_window_sec = diarizen_holdback_sec;
+    }
+    if (diarizen_holdback_ptr) diarizen_holdback_ptr->set_holdback_sec(diarizen_holdback_sec);
 
     // Start audio pipeline.
     if (!audio.start(audio_cfg)) {
@@ -372,6 +410,7 @@ int awaken(const std::string& webui_dir,
         orator::DiarizenPipelineConfig np_cfg;
         if (np->load(np_cfg)) {
             diarizen_native = std::move(np);
+            diarizen_native_ptr = diarizen_native.get();
             printf("[awaken] DiariZen-v2 native pipeline LOADED "
                    "(in-process CUDA)\n");
         } else {
@@ -390,23 +429,17 @@ int awaken(const std::string& webui_dir,
             diarizen_worker = std::make_unique<orator::DiarizenPeriodicWorker>(
                 audio, *diarizen_native, diarizen_holdback.get(), server,
                 diarizen_period_sec);
+            diarizen_worker_ptr = diarizen_worker.get();
+            diarizen_worker->set_window_sec(diarizen_window_sec);
+            diarizen_worker->set_periodic_enabled(diarizen_periodic_enabled);
             diarizen_worker->start();
-            const char* periodic_env = std::getenv("DEUSRIDET_DIARIZEN_PERIODIC");
-            const bool periodic_on =
-                (periodic_env == nullptr) || std::string(periodic_env) != "0";
             std::string periodic_desc =
-                periodic_on
+                diarizen_periodic_enabled
                     ? ("ON period=" + std::to_string((long)diarizen_period_sec) + "s")
                     : std::string("OFF (DEUSRIDET_DIARIZEN_PERIODIC=0; trigger/finalize only)");
-            // Direction C — sliding-window live diarise. Default 120s: covers
-            // the 75s holdback with margin and bounds per-pass wall so the
-            // shared GPU is not starved. Unset keeps this default; env=0 forces
-            // full-session passes. Finalize is always full regardless.
-            const char* win_env = std::getenv("DEUSRIDET_DIARIZEN_WINDOW_SEC");
-            const double win_sec = win_env ? std::atof(win_env) : 120.0;
             std::string window_desc =
-                (win_sec > 0.0)
-                    ? ("window=" + std::to_string((long)win_sec) + "s (finalize=full)")
+                (diarizen_window_sec > 0.0)
+                    ? ("window=" + std::to_string((long)diarizen_window_sec) + "s (finalize=full)")
                     : std::string("window=OFF (full-session passes)");
             if (diarizen_holdback) {
                 printf("[awaken] DiariZen-v2 Hybrid P2 ENABLED "
@@ -468,7 +501,7 @@ int awaken(const std::string& webui_dir,
         if (sig > 0) break;                 // SIGINT/SIGTERM received
         if (errno == EAGAIN) {              // cadence elapsed — emit telemetry
             broadcast_vires_snapshot(server);
-            broadcast_diarizen_status(server, diarizen_worker.get());
+            broadcast_diarizen_status(server, diarizen_worker_ptr, diarizen_holdback_ptr);
             continue;
         }
         if (errno == EINTR) continue;       // interrupted by another signal

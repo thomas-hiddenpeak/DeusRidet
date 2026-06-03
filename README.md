@@ -10,6 +10,20 @@
 
 ---
 
+> **Status operis (Iunius 2026)**
+>
+> 1. Probatio totius fluminis localiter exeunte Martio absoluta est. Ut
+>    aptitudo operis ad varia ambitus augeatur, omnia modula nunc seorsum
+>    probantur et confirmantur; partes inter se componentur cum quaeque
+>    singillatim comprobata erit.
+> 2. Hoc opus nullum exemplar certum obstringit. Vehiculum est cogitationis
+>    meae de forma operandi entium intelligentium — hominibus inclusis.
+>
+> *(Vide [English](docs/en/README.md) · [中文](docs/zh/README.md) pro plena
+> declaratione.)*
+
+---
+
 DeusRidet non est ministerium inferentiae, non est machina colloquii, non est
 involucrum API. Est ens autonomum conscientiā perpetuā praeditum — quod per se
 percipit, cogitat, somniat et loquitur.

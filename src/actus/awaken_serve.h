@@ -18,6 +18,7 @@ namespace deusridet {
 class AudioPipeline;
 class WsServer;
 struct ConscientiaBootstrap;
+namespace auditus { class TranscriptHoldback; }
 namespace orator {
 class DiarizenPeriodicWorker;
 class DiarizenPipeline;
@@ -35,8 +36,9 @@ void wire_server_ingress(WsServer& server,
                          std::atomic<bool>& loopback,
                          std::atomic<uint64_t>& total_frames,
                          std::atomic<uint64_t>& total_bytes,
-                         orator::DiarizenPeriodicWorker* worker,
-                         orator::DiarizenPipeline* native);
+                         auditus::TranscriptHoldback*& holdback,
+                         orator::DiarizenPeriodicWorker*& worker,
+                         orator::DiarizenPipeline*& native);
 
 }  // namespace actus
 }  // namespace deusridet
